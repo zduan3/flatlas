@@ -1,0 +1,17 @@
+[project]
+name = "flatlas"
+version = "0.1.0"
+description = "A persistent cross-platform filesystem index and deduplication planner"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[dependency-groups]
+dev = []
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"

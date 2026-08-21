@@ -1,0 +1,26 @@
+# Python and uv
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
+.pyright/
+
+# Local indexes, plans, and reports
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+flatlas-reports/
+flatlas-plans/
+
+# Rust, added in a later phase
+target/
+
+# Editors and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
