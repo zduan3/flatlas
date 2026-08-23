@@ -1,40 +1,80 @@
 # File Atlas (`flatlas`)
 
-跨平台的持久化文件系统索引工具。它将目录扫描结果保存在 SQLite 中，以便离线浏览、查询和导出；重复文件检测、去重计划与实际文件系统修改建立在该索引之上。
+跨 Windows/Linux 的持久化、只读文件系统索引工具。扫描结果保存在 SQLite 中，可离线查询、分析重复内容、导出结果并生成不可变 dry-run 去重计划；MVP 不会修改用户文件。
 
-## 当前状态
+当前已实现的范围、已验证行为与待补齐项见 [MVP 实现状态](docs/mvp-implementation.md)。
 
-项目处于纯 Python 3.12 的设计与原型准备阶段，尚未包含功能代码、CLI 实现或数据库 schema。
+## 安装与开发
 
-当前阶段的目标：
-
-- 建立可复现的 `uv` 项目环境。
-- 明确索引、扫描覆盖、重复检测与安全操作计划的设计。
-- 先实现只读的 Python MVP；不实现文件修改、监听、TUI 或 Rust 后端。
-
-## 快速开始（环境）
+项目使用 Python 3.12 与 uv：
 
 ```powershell
 uv sync
-uv run python --version
+uv run flatlas --help
 ```
 
-预期解释器为 Python 3.12。依赖将在功能设计确定后通过 `uv add` 加入；不要向项目环境直接使用 `pip install`。
+安装为用户级命令行工具：
+
+```powershell
+uv tool install --editable .
+flatlas --help
+```
+
+发布到包索引后，用户可使用 `uv tool install flatlas` 安装。
+
+## 首次使用
+
+`init` 仅登记当前路径所属的文件系统 namespace，不会遍历或扫描文件。配置在用户级目录，Linux 通常为 `~/.config/flatlas`，Windows 通常为 `%LOCALAPPDATA%/flatlas`；索引数据库独立于项目目录。
+
+```powershell
+flatlas init D:\Archive
+flatlas scan D:\Archive
+flatlas scan D:\Archive\2026\08
+flatlas duplicates
+flatlas du D:\Archive\2026
+flatlas largest --limit 50
+flatlas export duplicates --format csv --output duplicates.csv
+flatlas plan create --root D:\Archive
+```
+
+`--db PATH` 仅用于测试、迁移、脚本或故障排查等需要覆盖全局索引位置的场景。未初始化时，命令只输出可读的 `error: ...` 信息并返回退出码 2。
+
+## 当前 CLI
+
+```text
+flatlas init [PATH]
+flatlas roots
+flatlas scan PATH [--hash none|quick|full]
+flatlas paths [PATH]
+flatlas du [PATH]
+flatlas largest [--limit N]
+flatlas duplicates
+flatlas export duplicates --format json|csv --output PATH
+flatlas plan create --root PATH
+flatlas plan show PLAN_ID
+```
+
+## MVP 安全边界
+
+- 完整扫描与指定子树更新；仅在 scope 完整覆盖后将缺失路径标记为 `deleted`。
+- size → quick BLAKE3 → full BLAKE3 的重复检测；默认不跟随 symlink 或 Windows reparse point。
+- 支持路径、目录大小、最大文件、重复组查询、JSON/CSV 导出和 dry-run plan。
+- 不删除、移动、hardlink、reflink、symlink 或持续监听文件系统。
+
+## 开发检查
+
+```powershell
+uv run pytest -q
+uv run ruff check .
+uv run pyright
+```
 
 ## 文档
 
+- [当前 MVP 实现状态](docs/mvp-implementation.md)
 - [架构与边界](docs/architecture.md)
-- [阶段路线图](docs/roadmap.md)
 - [SQLite 数据库结构草案](docs/database-schema.md)
 - [MVP 范围与验收标准](docs/mvp-acceptance.md)
-- [同类工具与 MVP 功能对照](docs/tool-comparison.md)
+- [阶段路线图](docs/roadmap.md)
 - [开发环境与依赖策略](docs/development.md)
-- [待决策清单](docs/decisions.md)
-
-## 目录
-
-```text
-src/flatlas/  # 未来的纯 Python 应用包；当前无功能代码
-tests/        # 未来的测试语料与测试代码；当前无功能代码
-docs/         # 设计、决策与开发说明
-```
+- [维护规则](AGENTS.md)

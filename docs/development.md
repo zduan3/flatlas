@@ -4,33 +4,19 @@
 
 - Python：固定 Python 3.12，由 `uv` 依据 `.python-version` 创建项目 `.venv`。
 - 依赖：`pyproject.toml` 是唯一声明来源，`uv.lock` 是可复现锁文件。
-- 当前没有运行时或开发依赖；功能设计落实时再添加。
-
-建议的首批依赖：
-
-```powershell
-uv add blake3 typer
-uv add --dev pytest hypothesis ruff pyright
-uv add --optional ui rich
-```
-
-- `blake3`：quick hash 与 full hash。
-- `typer`：CLI 子命令。
-- `pytest`、`hypothesis`：测试与边界状态生成。
-- `ruff`、`pyright`：质量检查。
-- `rich`：仅在提供纯文本回退时作为可选 `ui` extra；否则应是普通运行时依赖。
+- 当前运行时依赖：`blake3`（quick/full hash）、`platformdirs`（用户级配置位置）、`typer`（CLI）。
+- 当前开发依赖：`pytest`、`ruff`、`pyright`。
 
 使用：
 
 ```powershell
 uv sync
-uv run pytest
+uv run pytest -q
 uv run ruff check .
 uv run pyright
-uv sync --extra ui
 ```
 
-不要向项目 `.venv` 使用裸 `pip install`，也不要让 Pixi 与 uv 同时管理该项目依赖。Pixi Global 可以继续作为日常 Python，但本项目不依赖全局环境的偶然状态。
+使用 `uv add <package>` 或 `uv add --dev <package>` 变更依赖；不要向项目 `.venv` 使用裸 `pip install`，也不要让 Pixi 与 uv 同时管理该项目依赖。Pixi Global 可以继续作为日常 Python，但本项目不依赖全局环境的偶然状态。
 
 ## 后续 Rust 配置
 

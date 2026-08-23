@@ -24,3 +24,6 @@ target/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Temporaries and outputs
+tmp/
