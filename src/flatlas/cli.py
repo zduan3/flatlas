@@ -18,7 +18,7 @@ from flatlas.core import (
     export_rows,
     get_root,
     largest_files,
-    list_directory_usage,
+    list_child_directories,
     list_roots,
     open_database,
     plan_operations,
@@ -51,6 +51,8 @@ def _print_usage(
     output: Path | None,
     *,
     include_kind: bool = False,
+    include_status: bool = False,
+    name_column: bool = False,
 ) -> None:
     if fmt in {"json", "csv"}:
         _print(rows, fmt, output)
@@ -60,23 +62,29 @@ def _print_usage(
 
     show_allocated = any(row["allocated_size"] is not None for row in rows)
     headers = ["T"] if include_kind else []
+    if include_status:
+        headers.append("S")
     headers.extend(["SIZE(B)", "N"])
     if show_allocated:
         headers.append("ALLOC(B)")
-    headers.append("PATH")
+    value_column = "name" if name_column else "path"
+    headers.append(value_column.upper())
     table_rows: list[list[str]] = []
     for row in rows:
         fields = [str(row["entry_kind"])[0]] if include_kind else []
-        fields.extend([str(row["logical_size"]), str(row["files"])])
+        if include_status:
+            fields.append({"scanned": "ok", "unscanned": "new", "incomplete": "part", "missing": "gone"}[str(row["status"])])
+        fields.extend(["-" if row[key] is None else str(row[key]) for key in ("logical_size", "files")])
         if show_allocated:
             allocated = row["allocated_size"]
             fields.append("-" if allocated is None else str(allocated))
-        fields.append(str(row["path"]))
+        fields.append(str(row[value_column]))
         table_rows.append(fields)
 
     all_rows = [headers, *table_rows]
     widths = [max(_display_width(row[index]) for row in all_rows) for index in range(len(headers))]
-    numeric_columns = set(range(1 if include_kind else 0, len(headers) - 1))
+    leading_columns = int(include_kind) + int(include_status)
+    numeric_columns = set(range(leading_columns, len(headers) - 1))
     lines = [
         "  ".join(
             _pad_display(value, widths[index], right=index in numeric_columns)
@@ -182,15 +190,24 @@ def du(
 
 @app.command("ls")
 def ls_command(
-    path: Annotated[Path, typer.Argument(help="Indexed directory whose direct children are listed.")] = Path("."),
+    path: Annotated[Path, typer.Argument(help="Directory whose live direct children are listed.")] = Path("."),
     format: Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")] = "table",
     output: Annotated[Path | None, typer.Option("--output")] = None,
     db: db_option = None,
 ) -> None:
-    """List indexed children. T: d=directory, f=file; size columns match du."""
+    """List live child directories. S: ok=scanned, new=unscanned, part=incomplete, gone=missing.
+
+    SIZE(B)=indexed logical bytes; N=indexed file count; ALLOC(B)=indexed allocated bytes.
+    """
     connection = open_database(_database(db))
     try:
-        _print_usage(list_directory_usage(connection, scope=path), format, output, include_kind=True)
+        _print_usage(
+            list_child_directories(connection, scope=path),
+            format,
+            output,
+            include_status=True,
+            name_column=True,
+        )
     finally:
         connection.close()
 

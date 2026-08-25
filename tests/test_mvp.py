@@ -9,7 +9,7 @@ from flatlas.core import (
     discover_namespace,
     disk_usage,
     duplicate_groups,
-    list_directory_usage,
+    list_child_directories,
     open_database,
     plan_operations,
     register_namespace,
@@ -119,34 +119,49 @@ def test_du_defaults_to_headered_summary_with_relative_path(tmp_path: Path, monk
     assert "ALLOC(B)=allocated bytes" in help_result.stdout
 
 
-def test_ls_lists_direct_children_and_summarizes_directories(tmp_path: Path, monkeypatch) -> None:
+def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "index.sqlite"
     connection, source = make_connection(tmp_path)
     try:
         empty = source / "empty"
         empty.mkdir()
+        complete = source / "complete"
+        complete.mkdir()
+        (complete / "file.bin").write_bytes(b"done")
         nested = source / "nested"
         nested.mkdir()
-        deeper = nested / "deeper"
-        deeper.mkdir()
         (nested / "child.bin").write_bytes(b"ab")
-        (deeper / "grandchild.bin").write_bytes(b"cde")
-        (source / "loose.bin").write_bytes(b"wxyz")
         scan_directory(connection, source, hash_mode="none")
 
-        rows = list_directory_usage(connection, scope=source, relative_to=tmp_path)
-        by_path = {row["path"]: row for row in rows}
-        assert list(by_path) == [
-            str(Path("source") / "empty"),
-            str(Path("source") / "loose.bin"),
-            str(Path("source") / "nested"),
-        ]
-        assert by_path[str(Path("source") / "empty")]["files"] == 0
-        assert by_path[str(Path("source") / "loose.bin")]["entry_kind"] == "file"
-        assert by_path[str(Path("source") / "loose.bin")]["logical_size"] == 4
-        assert by_path[str(Path("source") / "nested")]["entry_kind"] == "directory"
-        assert by_path[str(Path("source") / "nested")]["files"] == 2
-        assert by_path[str(Path("source") / "nested")]["logical_size"] == 5
+        real_scandir = __import__("os").scandir
+
+        def fail_nested(path):
+            if Path(path) == nested:
+                raise PermissionError("injected ls coverage failure")
+            return real_scandir(path)
+
+        with monkeypatch.context() as partial_scan:
+            partial_scan.setattr("flatlas.core.os.scandir", fail_nested)
+            assert scan_directory(connection, nested, hash_mode="none")["status"] == "partial"
+
+        empty.rmdir()
+        (source / "new").mkdir()
+        rows = list_child_directories(connection, scope=source)
+        by_name = {row["name"]: row for row in rows}
+        assert list(by_name) == ["complete", "empty", "nested", "new"]
+        assert by_name["complete"]["status"] == "scanned"
+        assert by_name["complete"]["logical_size"] == 4
+        assert by_name["empty"]["status"] == "missing"
+        assert by_name["empty"]["logical_size"] is None
+        assert by_name["nested"]["status"] == "incomplete"
+        assert by_name["nested"]["files"] == 1
+        assert by_name["new"]["status"] == "unscanned"
+        assert by_name["new"]["files"] is None
+        empty_state = connection.execute(
+            "SELECT state FROM path WHERE path_display=?",
+            (str(empty),),
+        ).fetchone()["state"]
+        assert empty_state == "present"
     finally:
         connection.close()
 
@@ -155,12 +170,15 @@ def test_ls_lists_direct_children_and_summarizes_directories(tmp_path: Path, mon
     assert result.exit_code == 0
     lines = result.stdout.splitlines()
     assert "\t" not in result.stdout
-    assert lines[0].lstrip().startswith("T  SIZE(B)  N")
-    path_column = lines[0].index("PATH")
-    assert all(line[path_column:].startswith("source") for line in lines[1:])
-    assert {line[0] for line in lines[1:]} == {"d", "f"}
+    assert lines[0].split()[:3] == ["S", "SIZE(B)", "N"]
+    name_column = lines[0].index("NAME")
+    assert {line[name_column:] for line in lines[1:]} == {"complete", "empty", "nested", "new"}
+    assert {line.split()[0] for line in lines[1:]} == {"ok", "new", "part", "gone"}
 
     help_result = CliRunner().invoke(app, ["ls", "--help"])
     assert help_result.exit_code == 0
-    assert "d=directory, f=file" in help_result.stdout
-    assert "size columns match du" in help_result.stdout
+    assert "ok=scanned" in help_result.stdout
+    assert "new=unscanned" in help_result.stdout
+    assert "part=incomplete" in help_result.stdout
+    assert "gone=missing" in help_result.stdout
+    assert "SIZE(B)=indexed logical bytes" in help_result.stdout

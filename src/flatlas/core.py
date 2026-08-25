@@ -590,27 +590,44 @@ def _relative_display(path_display: str, relative_to: Path, namespace_path: str)
         return os.path.relpath(path_display, namespace_path)
 
 
-def list_directory_usage(
+def list_child_directories(
     connection: sqlite3.Connection,
     *,
     scope: Path = Path("."),
-    relative_to: Path | None = None,
 ) -> list[dict[str, Any]]:
-    selected = _scope_row(connection, scope)
-    if selected["entry_kind"] not in {"root", "directory"}:
-        raise FlatlasError(f"ls path is not a directory: {selected['path_display']}")
-    display_base = Path.cwd() if relative_to is None else relative_to
-    rows = connection.execute(
+    selected_path = scope.expanduser().resolve()
+    namespace = discover_namespace(selected_path)
+    root = get_root(connection, namespace)
+    if root is None:
+        raise FlatlasError(f"filesystem is not registered; run 'flatlas init {scope}' first")
+    try:
+        with os.scandir(selected_path) as entries:
+            actual_paths = [Path(entry.path) for entry in entries if entry.is_dir(follow_symlinks=False)]
+    except OSError as exc:
+        raise FlatlasError(f"cannot list directory {selected_path}: {exc}") from exc
+
+    parent = connection.execute(
+        "SELECT id FROM path WHERE root_id=? AND path_key=?",
+        (root["id"], path_key(namespace, selected_path)),
+    ).fetchone()
+    indexed_rows = [] if parent is None else connection.execute(
+        """SELECT id, path_key, path_display, state FROM path
+        WHERE parent_path_id=? AND entry_kind='directory'""",
+        (parent["id"],),
+    ).fetchall()
+    indexed_by_path = {_normalized_display(row["path_display"]): row for row in indexed_rows}
+
+    usage_rows = [] if parent is None else connection.execute(
         """WITH RECURSIVE descendants(top_id, id) AS (
             SELECT p.id, p.id FROM path p
             WHERE p.parent_path_id=? AND p.state='present'
-              AND p.entry_kind IN ('directory', 'file')
+              AND p.entry_kind='directory'
             UNION ALL
             SELECT d.top_id, p.id FROM path p
             JOIN descendants d ON p.parent_path_id=d.id
             WHERE p.state='present'
         )
-        SELECT top.entry_kind, top.path_display,
+        SELECT top.id,
                sum(CASE WHEN item.entry_kind='file' THEN 1 ELSE 0 END) AS files,
                COALESCE(sum(CASE WHEN item.entry_kind='file' THEN item.logical_size END), 0) AS logical_size,
                CASE
@@ -623,19 +640,69 @@ def list_directory_usage(
         JOIN path top ON top.id=d.top_id
         JOIN path item ON item.id=d.id
         GROUP BY top.id
-        ORDER BY top.path_display""",
-        (selected["id"],),
-    )
-    return [
-        {
-            "entry_kind": row["entry_kind"],
-            "files": row["files"],
-            "logical_size": row["logical_size"],
-            "allocated_size": row["allocated_size"],
-            "path": _relative_display(row["path_display"], display_base, selected["root_path_display"]),
-        }
-        for row in rows
-    ]
+        """,
+        (parent["id"],),
+    ).fetchall()
+    usage_by_id = {row["id"]: row for row in usage_rows}
+    scopes = connection.execute(
+        """SELECT ss.scope_path_key, ss.status FROM scan_scope ss
+        JOIN scan s ON s.id=ss.scan_id
+        WHERE ss.root_id=?
+        ORDER BY s.started_at_ns DESC, ss.id DESC""",
+        (root["id"],),
+    ).fetchall()
+
+    result: list[dict[str, Any]] = []
+    actual_keys: set[str] = set()
+    for actual_path in actual_paths:
+        normalized = _normalized_display(str(actual_path))
+        actual_keys.add(normalized)
+        indexed = indexed_by_path.get(normalized)
+        status = _directory_scan_status(indexed, path_key(namespace, actual_path), scopes)
+        usage = None if indexed is None else usage_by_id.get(indexed["id"])
+        result.append(_directory_status_row(actual_path, status, usage))
+
+    for indexed in indexed_rows:
+        if _normalized_display(indexed["path_display"]) not in actual_keys:
+            result.append(
+                _directory_status_row(
+                    Path(indexed["path_display"]),
+                    "missing",
+                    None,
+                )
+            )
+    return sorted(result, key=lambda row: os.path.normcase(str(row["name"])))
+
+
+def _normalized_display(path_display: str) -> str:
+    return os.path.normcase(os.path.normpath(path_display))
+
+
+def _directory_scan_status(
+    indexed: sqlite3.Row | None,
+    directory_key: bytes,
+    scopes: list[sqlite3.Row],
+) -> str:
+    if indexed is None or indexed["state"] != "present":
+        return "unscanned"
+    latest = next((scope for scope in scopes if directory_key.startswith(scope["scope_path_key"])), None)
+    if latest is None:
+        return "unscanned"
+    return "scanned" if latest["status"] == "completed" else "incomplete"
+
+
+def _directory_status_row(
+    path: Path,
+    status: str,
+    usage: sqlite3.Row | None,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "files": None if usage is None else usage["files"],
+        "logical_size": None if usage is None else usage["logical_size"],
+        "allocated_size": None if usage is None else usage["allocated_size"],
+        "name": path.name,
+    }
 
 
 def disk_usage(
