@@ -576,27 +576,59 @@ def query_paths(connection: sqlite3.Connection, *, scope: Path | None = None, li
     return [dict(row) for row in rows]
 
 
-def disk_usage(connection: sqlite3.Connection, *, scope: Path | None = None) -> list[dict[str, Any]]:
+def _relative_display(path_display: str, relative_to: Path, namespace_path: str) -> str:
+    try:
+        return os.path.relpath(path_display, relative_to)
+    except ValueError:
+        # Windows cannot express a cwd-relative path across drive letters, but
+        # every indexed path can still be shown relative to its scan namespace.
+        return os.path.relpath(path_display, namespace_path)
+
+
+def disk_usage(
+    connection: sqlite3.Connection,
+    *,
+    scope: Path | None = None,
+    relative_to: Path | None = None,
+) -> list[dict[str, Any]]:
+    display_base = Path.cwd() if relative_to is None else relative_to
     if scope is None:
         rows = connection.execute(
             """SELECT r.id AS root_id, r.root_path_display, count(p.id) AS files,
                COALESCE(sum(p.logical_size), 0) AS logical_size,
-               COALESCE(sum(p.allocated_size), 0) AS allocated_size
+               CASE WHEN count(p.id) = count(p.allocated_size)
+                    THEN COALESCE(sum(p.allocated_size), 0)
+                    ELSE NULL END AS allocated_size
                FROM root r LEFT JOIN path p ON p.root_id=r.id AND p.state='present' AND p.entry_kind='file'
                GROUP BY r.id ORDER BY r.root_path_display"""
         )
-        return [dict(row) for row in rows]
+        return [
+            {
+                "root_id": row["root_id"],
+                "files": row["files"],
+                "logical_size": row["logical_size"],
+                "allocated_size": row["allocated_size"],
+                "path": _relative_display(row["root_path_display"], display_base, row["root_path_display"]),
+            }
+            for row in rows
+        ]
     selected = _scope_row(connection, scope)
+    namespace_path = connection.execute(
+        "SELECT r.root_path_display FROM root r JOIN path p ON p.root_id=r.id WHERE p.id=?",
+        (selected["id"],),
+    ).fetchone()["root_path_display"]
     row = connection.execute(
         """WITH RECURSIVE descendants(id) AS (
             SELECT id FROM path WHERE id=? UNION ALL
             SELECT p.id FROM path p JOIN descendants d ON p.parent_path_id=d.id
-        ) SELECT ? AS path_display, count(p.id) AS files, COALESCE(sum(p.logical_size), 0) AS logical_size,
-        COALESCE(sum(p.allocated_size), 0) AS allocated_size FROM path p
+        ) SELECT count(p.id) AS files, COALESCE(sum(p.logical_size), 0) AS logical_size,
+        CASE WHEN count(p.id) = count(p.allocated_size)
+             THEN COALESCE(sum(p.allocated_size), 0)
+             ELSE NULL END AS allocated_size FROM path p
         WHERE p.state='present' AND p.entry_kind='file' AND p.id IN descendants""",
-        (selected["id"], selected["path_display"]),
+        (selected["id"],),
     ).fetchone()
-    return [dict(row)]
+    return [{**dict(row), "path": _relative_display(selected["path_display"], display_base, namespace_path)}]
 
 def largest_files(connection: sqlite3.Connection, *, limit: int = 50) -> list[dict[str, Any]]:
     return [dict(row) for row in connection.execute(

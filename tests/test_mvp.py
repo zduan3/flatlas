@@ -1,8 +1,13 @@
+import json
 from pathlib import Path
 
+from typer.testing import CliRunner
+
+from flatlas.cli import app
 from flatlas.core import (
     create_dry_run_plan,
     discover_namespace,
+    disk_usage,
     duplicate_groups,
     open_database,
     plan_operations,
@@ -64,3 +69,35 @@ def test_subtree_scan_can_match_existing_index_and_complete_scope_marks_deletion
         assert old["state"] == "present"
     finally:
         connection.close()
+
+
+def test_du_defaults_to_headered_summary_with_relative_path(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "index.sqlite"
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "one.bin").write_bytes(b"a")
+    (source / "two.bin").write_bytes(b"bc")
+    connection = open_database(database)
+    try:
+        register_namespace(connection, discover_namespace(source))
+        scan_directory(connection, source, hash_mode="none")
+        rows = disk_usage(connection, scope=source, relative_to=tmp_path)
+        assert rows[0]["path"] == "source"
+        assert rows[0]["files"] == 2
+        assert rows[0]["logical_size"] == 3
+    finally:
+        connection.close()
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(app, ["du", str(source), "--db", str(database)])
+    assert result.exit_code == 0
+    lines = result.stdout.splitlines()
+    assert lines[0].startswith("LOGICAL_BYTES\tFILES\t")
+    assert lines[0].endswith("PATH")
+    assert lines[1].startswith("3\t2\t")
+    assert lines[1].endswith("\tsource")
+
+    json_result = runner.invoke(app, ["du", str(source), "--format", "json", "--db", str(database)])
+    assert json_result.exit_code == 0
+    assert json.loads(json_result.stdout)[0]["path"] == "source"

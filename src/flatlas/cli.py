@@ -43,6 +43,34 @@ def _print(rows: object, fmt: str = "json", output: Path | None = None) -> None:
         typer.echo(rendered, nl=False)
 
 
+def _print_du(rows: list[dict[str, object]], fmt: str, output: Path | None) -> None:
+    if fmt in {"json", "csv"}:
+        _print(rows, fmt, output)
+        return
+    if fmt != "table":
+        raise FlatlasError("format must be table, json or csv")
+
+    show_allocated = any(row["allocated_size"] is not None for row in rows)
+    headers = ["LOGICAL_BYTES", "FILES"]
+    if show_allocated:
+        headers.append("ALLOCATED_BYTES")
+    headers.append("PATH")
+    lines = ["\t".join(headers)]
+    for row in rows:
+        fields = [str(row["logical_size"]), str(row["files"])]
+        if show_allocated:
+            allocated = row["allocated_size"]
+            fields.append("-" if allocated is None else str(allocated))
+        fields.append(str(row["path"]))
+        lines.append("\t".join(fields))
+    rendered = "\n".join(lines) + "\n"
+    if output is None:
+        typer.echo(rendered, nl=False)
+    else:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(rendered, encoding="utf-8", newline="")
+
+
 @app.command()
 def init(
     path: Annotated[Path, typer.Argument(help="A path on the filesystem/volume to register.")] = Path("."),
@@ -103,14 +131,14 @@ def paths_command(
 @app.command("du")
 def du(
     path: Annotated[Path | None, typer.Argument(help="Optional indexed directory scope.")] = None,
-    format: Annotated[str, typer.Option("--format")] = "json",
+    format: Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")] = "table",
     output: Annotated[Path | None, typer.Option("--output")] = None,
     db: db_option = None,
 ) -> None:
-    """Report logical and allocated file sizes, aggregated per registered namespace."""
+    """Summarize indexed file count and sizes in a du-like table."""
     connection = open_database(_database(db))
     try:
-        _print(disk_usage(connection, scope=path), format, output)
+        _print_du(disk_usage(connection, scope=path), format, output)
     finally:
         connection.close()
 
