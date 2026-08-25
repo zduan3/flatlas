@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import stat as stat_module
 import sys
@@ -241,6 +242,48 @@ def register_namespace(connection: sqlite3.Connection, namespace: Namespace) -> 
 
 def list_roots(connection: sqlite3.Connection) -> list[dict[str, Any]]:
     return [dict(row) for row in connection.execute("SELECT id, root_path_display, platform, namespace_kind, enabled FROM root ORDER BY id")]
+
+
+def filesystem_usage(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """SELECT id, root_path_display, platform, namespace_kind, filesystem_type, enabled
+        FROM root ORDER BY root_path_display"""
+    )
+    result = []
+    for row in rows:
+        try:
+            usage = shutil.disk_usage(row["root_path_display"])
+        except OSError:
+            total = used = available = use_percent = None
+            status = "unavailable"
+        else:
+            total = _blocks_1k(usage.total)
+            used = _blocks_1k(usage.used)
+            available = _blocks_1k(usage.free)
+            use_percent = 0 if usage.total == 0 else min(100, (usage.used * 100 + usage.total - 1) // usage.total)
+            status = "ok" if row["enabled"] else "disabled"
+        result.append(
+            {
+                "id": row["id"],
+                "root_path_display": row["root_path_display"],
+                "platform": row["platform"],
+                "namespace_kind": row["namespace_kind"],
+                "enabled": bool(row["enabled"]),
+                "filesystem": row["root_path_display"],
+                "filesystem_type": row["filesystem_type"],
+                "blocks_1k": total,
+                "used_1k": used,
+                "available_1k": available,
+                "use_percent": use_percent,
+                "mounted_on": row["root_path_display"],
+                "status": status,
+            }
+        )
+    return result
+
+
+def _blocks_1k(byte_count: int) -> int:
+    return (byte_count + 1023) // 1024
 
 
 def _sqlite_integer(value: int | None) -> int | None:

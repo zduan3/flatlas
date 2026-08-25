@@ -16,10 +16,10 @@ from flatlas.core import (
     disk_usage,
     duplicate_groups,
     export_rows,
+    filesystem_usage,
     get_root,
     largest_files,
     list_child_directories,
-    list_roots,
     open_database,
     plan_operations,
     query_paths,
@@ -81,18 +81,9 @@ def _print_usage(
         fields.append(str(row[value_column]))
         table_rows.append(fields)
 
-    all_rows = [headers, *table_rows]
-    widths = [max(_display_width(row[index]) for row in all_rows) for index in range(len(headers))]
     leading_columns = int(include_kind) + int(include_status)
     numeric_columns = set(range(leading_columns, len(headers) - 1))
-    lines = [
-        "  ".join(
-            _pad_display(value, widths[index], right=index in numeric_columns)
-            for index, value in enumerate(row)
-        ).rstrip()
-        for row in all_rows
-    ]
-    rendered = "\n".join(lines) + "\n"
+    rendered = _render_table(headers, table_rows, numeric_columns)
     if output is None:
         typer.echo(rendered, nl=False)
     else:
@@ -112,6 +103,46 @@ def _pad_display(value: str, width: int, *, right: bool) -> str:
     return f"{padding}{value}" if right else f"{value}{padding}"
 
 
+def _render_table(headers: list[str], rows: list[list[str]], numeric_columns: set[int]) -> str:
+    all_rows = [headers, *rows]
+    widths = [max(_display_width(row[index]) for row in all_rows) for index in range(len(headers))]
+    lines = [
+        "  ".join(
+            _pad_display(value, widths[index], right=index in numeric_columns)
+            for index, value in enumerate(row)
+        ).rstrip()
+        for row in all_rows
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _print_filesystems(rows: list[dict[str, object]], fmt: str) -> None:
+    if fmt in {"json", "csv"}:
+        _print(rows, fmt)
+        return
+    if fmt != "table":
+        raise FlatlasError("format must be table, json or csv")
+    table_rows = [
+        [
+            str(row["filesystem"]),
+            "-" if row["blocks_1k"] is None else str(row["blocks_1k"]),
+            "-" if row["used_1k"] is None else str(row["used_1k"]),
+            "-" if row["available_1k"] is None else str(row["available_1k"]),
+            "-" if row["use_percent"] is None else f"{row['use_percent']}%",
+            str(row["mounted_on"]),
+        ]
+        for row in rows
+    ]
+    typer.echo(
+        _render_table(
+            ["FILESYSTEM", "1K-BLOCKS", "USED", "AVAILABLE", "USE%", "MOUNTED ON"],
+            table_rows,
+            {1, 2, 3, 4},
+        ),
+        nl=False,
+    )
+
+
 @app.command()
 def init(
     path: Annotated[Path, typer.Argument(help="A path on the filesystem/volume to register.")] = Path("."),
@@ -128,14 +159,24 @@ def init(
     typer.echo(f"registered filesystem {namespace.path} as root {root_id}; no files were scanned")
 
 
-@app.command("roots")
-def roots(db: db_option = None, format: Annotated[str, typer.Option("--format")] = "json") -> None:
-    """List globally registered filesystem namespaces."""
+def _show_filesystems(db: Path | None, fmt: str) -> None:
     connection = open_database(_database(db))
     try:
-        _print(list_roots(connection), format)
+        _print_filesystems(filesystem_usage(connection), fmt)
     finally:
         connection.close()
+
+
+@app.command("roots")
+def roots(db: db_option = None, format: Annotated[str, typer.Option("--format")] = "table") -> None:
+    """Show registered filesystems in a GNU df-like table."""
+    _show_filesystems(db, format)
+
+
+@app.command("df")
+def df_command(db: db_option = None, format: Annotated[str, typer.Option("--format")] = "table") -> None:
+    """Alias for roots; show registered filesystem capacity and usage."""
+    _show_filesystems(db, format)
 
 
 @app.command()

@@ -58,7 +58,7 @@ hash 复用在两个平台均采取保守规则：仅在当前文件身份、siz
 
 ## 查询 CLI 兼容基线
 
-`ls` 与 `du` 的后续交互设计以 GNU Coreutils 为心智模型：`flatlas ls` 的目标默认接近 `ls -Al`，即包含真实隐藏条目但不合成 `.` 与 `..`；`flatlas du` 的目标默认接近 `du -s`。兼容不得牺牲持久化 coverage、离线查询、跨平台字段真实性或“只有 completed scope 才能持久化删除”的不变量。
+`ls`、`du` 与 `df` 的后续交互设计以 GNU Coreutils 为心智模型：`flatlas ls` 的目标默认接近 `ls -Al`，即包含真实隐藏条目但不合成 `.` 与 `..`；`flatlas du` 的目标默认接近 `du -s`；`flatlas roots` 与别名 `df` 使用 GNU `df` 风格容量表，但默认只列 registered namespace。兼容不得牺牲持久化 coverage、离线查询、跨平台字段真实性或“只有 completed scope 才能持久化删除”的不变量。
 
 具体默认行为、与 GNU 的差异、参数优先级和迁移计划见 [`query-cli-design.md`](query-cli-design.md)。
 

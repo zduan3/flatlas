@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
@@ -25,7 +26,7 @@ def make_connection(tmp_path: Path):
     return connection, source
 
 
-def test_init_registration_does_not_scan(tmp_path: Path) -> None:
+def test_init_registration_does_not_scan_and_roots_has_df_alias(tmp_path: Path, monkeypatch) -> None:
     connection, _ = make_connection(tmp_path)
     try:
         assert connection.execute("SELECT count(*) FROM scan").fetchone()[0] == 0
@@ -164,6 +165,51 @@ def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch
         assert empty_state == "present"
     finally:
         connection.close()
+
+    monkeypatch.setattr(
+        "flatlas.core.shutil.disk_usage",
+        lambda _path: SimpleNamespace(total=10 * 1024, used=4 * 1024, free=6 * 1024),
+    )
+    database = tmp_path / "index.sqlite"
+    runner = CliRunner()
+    roots_result = runner.invoke(app, ["roots", "--db", str(database)])
+    df_result = runner.invoke(app, ["df", "--db", str(database)])
+    assert roots_result.exit_code == 0
+    assert df_result.exit_code == 0
+    assert roots_result.stdout == df_result.stdout
+    assert roots_result.stdout.splitlines()[0].split() == [
+        "FILESYSTEM",
+        "1K-BLOCKS",
+        "USED",
+        "AVAILABLE",
+        "USE%",
+        "MOUNTED",
+        "ON",
+    ]
+    assert "10" in roots_result.stdout
+    assert "4" in roots_result.stdout
+    assert "6" in roots_result.stdout
+    assert "40%" in roots_result.stdout
+
+    json_result = runner.invoke(app, ["df", "--format", "json", "--db", str(database)])
+    row = json.loads(json_result.stdout)[0]
+    assert list(row)[:5] == ["id", "root_path_display", "platform", "namespace_kind", "enabled"]
+    assert row["blocks_1k"] == 10
+    assert row["used_1k"] == 4
+    assert row["available_1k"] == 6
+    assert row["use_percent"] == 40
+
+    def unavailable(_path):
+        raise OSError("injected unavailable filesystem")
+
+    monkeypatch.setattr("flatlas.core.shutil.disk_usage", unavailable)
+    unavailable_result = runner.invoke(app, ["roots", "--format", "json", "--db", str(database)])
+    unavailable_row = json.loads(unavailable_result.stdout)[0]
+    assert unavailable_row["blocks_1k"] is None
+    assert unavailable_row["used_1k"] is None
+    assert unavailable_row["available_1k"] is None
+    assert unavailable_row["use_percent"] is None
+    assert unavailable_row["status"] == "unavailable"
 
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(app, ["ls", "source", "--db", str(database)])
