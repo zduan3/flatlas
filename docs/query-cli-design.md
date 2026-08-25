@@ -1,10 +1,10 @@
-# `ls` / `du` / `df` 查询命令设计
+# 查询命令设计
 
 ## 状态与目标
 
 本文定义 File Atlas 查询体验的后续兼容基线。当前实现仍以 [MVP 实现状态](mvp-implementation.md) 为准；本文中的“目标默认行为”和参数除明确标为已实现者外，均是设计规划，不代表当前 CLI 已支持。
 
-兼容参照采用 GNU Coreutils 的 `ls` 与 `du`。Linux 上的 BusyBox、BSD 工具和发行版 alias 可能不同，因此这里追求的是一致的用户心智模型和常用参数语义，不承诺逐字符复刻 GNU 输出。
+兼容参照优先采用 GNU Coreutils 与 GNU Findutils。Linux 上的 BusyBox、BSD 工具和发行版 alias 可能不同，因此这里追求的是一致的用户心智模型和常用参数语义，不承诺逐字符复刻 GNU 输出。
 
 设计目标：
 
@@ -103,6 +103,20 @@ gone  d---------      -  -      -      -         -         -                 rem
 | `--allow-partial-totals` | 默认隐藏不完整统计；显式启用后用 `~` 或独立 completeness 字段标注估计值。 |
 | `--absolute` | 默认只显示名称；需要复制完整路径时显式请求。 |
 | `--null` | 使用 NUL 分隔名称，安全处理换行等特殊字符；语义参照 Coreutils 通用做法。 |
+
+### `ls` 与 `coverage` 的职责边界
+
+`ls` 回答“这个目录当前有哪些直接子项”，`coverage` 回答“索引对这棵目录树了解得有多完整、哪些结论可信”。`ls` 的状态列是快速告警灯，不是完整的扫描诊断界面：它把实时存在性与索引覆盖度压缩成 `ok`、`new`、`part`、`gone`，其中 `gone` 只表示本次完整实时枚举没有看到旧索引条目，不等于数据库已经可靠确认 `deleted`。
+
+仅给 `ls` 增加一列不能满足以下需求：
+
+- 递归展示盲区位于哪一层，而不是只把直接子目录标成 `part`。
+- 展开最近 scan、scope 边界、completed/partial/failed/cancelled 状态、上次完整扫描时间及错误原因。
+- 汇总一棵树中完整、部分和未扫描的目录/文件数量，并说明大小统计为何不完整。
+- 在 registered root 尚未扫描、根目录读取失败、源路径离线或没有可列实时条目时，仍审计已有 scan/scope/error 记录。
+- 区分“实时存在性证据”和“扫描覆盖证据”，避免把枚举错误或局部 scan 范围外的缺失解释为删除。
+
+因此 `ls` 应保留紧凑状态列，并允许输出指向进一步诊断所需的 path/status；独立的 `coverage [PATH]` 则提供递归汇总、scope 边界和错误明细。首期若只需较小实现，可以先增加 `ls --coverage` 摘要，但不能以此取代后续 coverage 审计视图。
 
 ## `du` 的目标行为
 
@@ -230,6 +244,62 @@ C:\         997482492  391581348  605901144   40%  C:\
 - 同一 namespace 的 `roots` 与 `df` 表格、JSON 和错误行为必须逐项一致。
 - Windows/Linux 测试应 mock 固定容量验证单位和舍入，并各自增加真实文件系统 smoke test。
 
+## 后续查询子命令规划
+
+后续子命令不应只是重新包装操作系统工具，而应利用持久化索引，把路径状态、scan coverage、错误、hash 状态和实时差异叠加到熟悉的查询模型上。除非命令明确声明使用 live 数据源，否则索引查询不得隐式遍历或更新文件系统。
+
+### 产品价值优先级
+
+File Atlas 的首要用途是定位大文件、大目录和重复内容，以帮助用户减少存储占用；名称/路径查找只是持久化索引带来的附加能力。MVP 不以复刻 ncdu 的交互式空间浏览为目标，而以“在空间分析工作流中补充可靠的重复文件识别与局部子树更新”为核心差异。
+
+按实际使用价值，后续工作顺序应是：
+
+1. 强化 `duplicates`：按理论可节省量排序和汇总、限定 root/path、最小文件大小、组内对象数、hardlink 保守去重、hash/coverage completeness，以及稳定导出。
+2. 强化 `du` 与 `largest`：同时覆盖大目录和大文件，支持 metric、top N、排序、深度、阈值和 human-readable，并明确 logical、allocated 与理论可回收量的差别。
+3. 完善局部更新：让新增子树只扫描必要范围，仍能与旧索引形成重复组；partial/error/cancelled 不产生假删除，stale hash 能被保守重算。
+4. 提供最低限度的可信度诊断：`coverage`、`errors`、scan 摘要及必要的 `verify`，服务于解释“为何这个目录总量或重复结果不完整”，而不是扩张成通用文件管理器。
+5. 在上述能力稳定后再增加 `stat`、`find`、`locate` 等通用查询便利功能。
+
+### 候选命令与优先级
+
+| 优先级 | 子命令 | 兼容参照 | flatlas 增强信息与边界 |
+|---|---|---|---|
+| P0 | `coverage [PATH]` | flatlas 原生命令 | 按目录展示 completed、partial、failed、cancelled 与 unscanned，定位索引盲区和不完整统计的来源。 |
+| P0 | `errors [PATH]` | flatlas 原生命令 | 汇总遍历、权限、I/O 和 hash 错误，支持按 scan、目录、operation 与错误码筛选和聚合。 |
+| P0 | `scans` / `scan-info ID` | 审计日志 | 查询扫描历史、scope、状态、耗时、文件/目录数量与错误摘要，补足当前 `scan` 执行入口的审计视图。 |
+| P1 | `hash PATH...` | `b2sum` 等 checksum 工具 | 仅把 `full_ready` digest 当作可用内容 hash，同时展示 algorithm、state 与 basis；实时校验和是否回写索引必须由独立参数明确控制。 |
+| P1 | `verify [PATH...]` | flatlas 原生命令 | 只读比较索引与当前文件系统，报告新增、metadata 改变、stale hash 和未确认缺失；读取失败或 coverage 不完整不得把路径判为 deleted。 |
+| P2 | `tree [PATH]` | `tree` | 以索引生成目录层级，附带 logical/allocated 总量、文件数、coverage 和错误标记；与 `du --max-depth` 重叠，只有确有层级浏览需求时实现。 |
+| P2 | `stat PATH...` | GNU `stat` | 展示索引 metadata、路径状态、最后观测 scan、coverage、hash 状态与 digest；可规划只读 `--live` 比较，但不得隐式更新索引。 |
+| P3 | `find [PATH] [EXPR...]` | GNU `find` | 在 SQLite 中查询而非实时遍历；可考虑 `-name`、`-iname`、`-type`、`-size`、`-mtime`、`-uid`、`-gid`、`-links`，并增加索引状态条件。MVP 不提供 `-delete`、`-exec` 等动作。 |
+| P3 | `locate PATTERN...` | GNU `locate` | 直接复用全局路径索引，不另设 `updatedb`；除匹配路径外显示 root、present/deleted 状态、最后扫描时间和 coverage。 |
+| P3 | `readlink PATH...` | GNU `readlink` | 显示索引中的 symlink target、Windows reparse 类型和最后观测状态，不跟随目标。 |
+| P3 | `findmnt` | `findmnt` | 展示 registered namespace、mount 与扫描边界；只有可靠的跨平台 mount/source/type metadata 落地后实现。 |
+
+这里的 P0 是对空间回收主线的支撑优先级，不表示要先于 `duplicates`、`du`、`largest` 和局部扫描本身。`coverage`、`errors`、`scans` 应采用满足可信度诊断所需的最小设计，避免审计界面反过来延迟核心查询能力。
+
+### 命令分组与默认数据源
+
+- 熟悉的系统视图：`ls`、`du`、`df`、`stat`、`find`、`locate`。
+- 索引可信度视图：`verify`、`coverage`、`errors`。
+- 索引管理与审计：`scan`、`scans`、`scan-info`、`hash`、`duplicates`、`plan`。
+
+GNU `find` 默认遍历实时目录树，而 `flatlas find` 应默认查询 SQLite；未知或尚未支持的 expression 必须报错，不能静默忽略。若未来提供统一数据源参数，应采用显式的 `--source=index|live` 或各命令已定义的受控变体，并说明 live 查询是否只比较、是否计算 hash、是否更新数据库。
+
+`locate` 与 flatlas 的持久化索引天然匹配：它不需要第二套文件名数据库，但必须显式显示 stale、deleted 或 coverage 不完整的结果，避免旧索引被误解为当前存在性证明。
+
+### 暂不规划的命令
+
+| 命令 | 原因 |
+|---|---|
+| `file` | 当前没有 MIME、内容特征或可执行格式索引，仅凭 `path.kind` 不足以兼容。 |
+| `grep` | 当前不索引文件内容。 |
+| scan 间 `diff` | 数据库保存当前路径状态而非不可变历史快照，无法可靠重建任意两次扫描。 |
+| `getfacl`、`lsattr` | schema 尚未保存 ACL、xattr 或完整平台属性。 |
+| `rm`、`mv`、`ln`、`touch`、`chmod`、`chown` | 超出只读 MVP；不得借查询子命令引入文件修改。 |
+| 精确兼容 checksum `--check` | 需先设计实时内容读取、digest 算法选择、stale 判断及是否回写索引。 |
+| `ncdu` / TUI | 需要独立交互与性能设计，不作为查询 CLI 的近期兼容目标。 |
+
 ## 当前行为到目标行为的迁移
 
 | 命令 | 当前实现 | 目标默认 | 兼容迁移 |
@@ -247,7 +317,17 @@ C:\         997482492  391581348  605901144   40%  C:\
 
 ## 实现顺序与验收
 
-### 第一批：默认心智模型
+### 空间回收主线
+
+1. `duplicates` 先提供可节省量、排序、范围/阈值筛选和 completeness，使结果可以直接指导清理决策。
+2. `du` / `largest` 补齐大目录与大文件的 top、depth、metric 和 human-readable 查询，形成非交互式空间定位闭环。
+3. 验证局部 scan 与旧索引的重复组交互、stale hash 重算以及 partial/error/cancelled 不产生假删除。
+4. 增加最小的 `coverage` / `errors` / scan 摘要，能够解释上述结果何时精确、何时不完整。
+5. 完成稳定 JSON/CSV 导出和 dry-run plan 后，再投入通用文件查找与更完整的 GNU 参数兼容。
+
+下面的批次只描述 `ls` / `du` / `df` 兼容参数内部的依赖顺序，不高于上述产品主线。
+
+### 兼容第一批：默认心智模型
 
 - `ls` 默认列出文件和目录，包含隐藏条目，维持长表与 coverage 状态。
 - `du` 无参数改为当前目录；新增 `--all-roots`。
@@ -255,13 +335,13 @@ C:\         997482492  391581348  605901144   40%  C:\
 - `roots` / `df` 增加 `-h`、`-k`、`-T`，并固定 registered-only 默认范围。
 - 为 partial/stale/unknown allocated size 增加机器可读 completeness 字段。
 
-### 第二批：最常用显示参数
+### 兼容第二批：最常用显示参数
 
 - 两个命令实现 `-h`、`--si`、`--block-size` 的一致缩放层。
 - `du` 实现 `-b`、`--apparent-size`、`-c`、`-d`。
 - `ls` 实现 `-1`、`-S`、`-t`、`-r`、`--sort`。
 
-### 第三批：过滤、对象与边界
+### 兼容第三批：过滤、对象与边界
 
 - hardlink 默认去重与 `du -l`。
 - `du -x` 与 mount/namespace coverage。
@@ -284,4 +364,7 @@ C:\         997482492  391581348  605901144   40%  C:\
 - [GNU `ls`: which files are listed](https://www.gnu.org/software/coreutils/manual/html_node/Which-files-are-listed.html)
 - [GNU `du` invocation](https://www.gnu.org/software/coreutils/manual/html_node/du-invocation.html)
 - [GNU `df` invocation](https://www.gnu.org/software/coreutils/manual/html_node/df-invocation.html)
+- [GNU `stat` invocation](https://www.gnu.org/software/coreutils/manual/html_node/stat-invocation.html)
+- [GNU Findutils manual](https://www.gnu.org/software/findutils/manual/html_mono/find.html)
+- [GNU `b2sum` invocation](https://www.gnu.org/software/coreutils/manual/html_node/b2sum-invocation.html)
 - [GNU Coreutils block size](https://www.gnu.org/software/coreutils/manual/html_node/Block-size.html)

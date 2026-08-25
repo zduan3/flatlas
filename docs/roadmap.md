@@ -1,5 +1,9 @@
 # 阶段路线图
 
+## 产品优先级
+
+File Atlas 首先服务于寻找大文件、大目录和重复内容，以减少存储占用。它不以复刻 ncdu 的交互式空间浏览为首要目标，而是用持久化索引补充重复文件识别、离线查询和局部子树更新。名称/路径查找属于附加能力，不能优先于 `du`、`largest`、`duplicates`、局部扫描正确性和结果可信度。
+
 ## 阶段 0：设计与实验（当前）
 
 - 固化术语、范围、失败语义和测试矩阵。
@@ -18,9 +22,12 @@
 
 ## 阶段 2：Python 索引完善
 
+- 优先强化 `duplicates` 的理论可节省量排序/汇总、范围和阈值过滤、hardlink 去重、completeness 与稳定导出。
+- 强化 `du` / `largest` 的 metric、top N、排序、深度和阈值能力，服务大目录与大文件定位。
+- 完善局部子树更新、当前状态校验和 stale hash 重算，并以最小的 `coverage`、`errors`、scan 摘要解释结果可信度。
 - 配置化 include/exclude、大小与时间过滤。
-- 当前状态校验、dirty state 与历史结果保留策略。
-- 按 [`ls` / `du` / `df` 查询命令设计](query-cli-design.md) 对齐 GNU Coreutils 心智模型：`ls -Al` 风格长列表、`du -s` 风格默认汇总、`df` 风格 registered filesystem 容量，以及常用兼容参数与 coverage/completeness 输出。
+- 按 [查询命令设计](query-cli-design.md) 逐步增加 GNU 风格常用参数；`stat`、`find`、`locate` 等通用查找便利功能后置。
+- dirty state 与历史结果保留策略。
 - 基准测试与故障注入测试。
 
 ## 阶段 3：Rust 扫描与 hash 后端
