@@ -26,7 +26,7 @@
 
 ### 查询、查重与导出
 
-- 提供路径查询、目录大小（`du`）、最大文件（`largest`）和基础重复组（`duplicates`）查询。
+- 提供路径查询、实时/索引目录状态（`ls`）、目录大小（`du`）、最大文件（`largest`）和基础重复组（`duplicates`）查询。
 - 以 `size → quick hash → BLAKE3 full hash` 分级识别内容重复文件。
 - 支持 JSON 与 CSV 导出。
 - 支持生成不可变 dry-run plan，记录 canonical/replacement、预期 full hash 和同卷/同文件系统等前置条件。
@@ -51,6 +51,7 @@
 | 分级 hash | 完全相同、同大小但不同内容、文件修改后重扫 | 仅完全相同内容进入同一重复组；修改使旧 hash 失效并重算。 |
 | 离线查询 | 完成扫描后使源目录不可访问 | 仍可查询此前索引的 `path`、`du`、`largest` 和重复组。 |
 | 查询与导出 | 固定语料运行所有基础查询、JSON/CSV 导出 | 查询结果、排序和统计符合预期；JSON 可解析，CSV 列名与编码稳定。 |
+| 目录状态 | 实时目录包含已完整扫描、未扫描、partial coverage 和已移除子目录 | `ls` 正确区分状态；实时缺失不写入 `deleted`；枚举错误不产生误导状态。 |
 | dry-run | 生成 plan 前后对比文件系统快照 | 文件系统无新增、删除、改名、内容或 metadata 修改；plan 含预期 precondition。 |
 | 全局查询 | 两个 namespace 中各存在相同内容文件 | 全局 `duplicates` 能返回该组；plan 报告跨文件系统 hardlink 不可执行的前置条件。 |
 | Windows | Unicode、长路径、Access Denied、junction/reparse point | 不发生路径截断或越界遍历；错误被记录；reparse point 不被默认跟随。 |

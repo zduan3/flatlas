@@ -81,5 +81,6 @@ uv run pyright
 - [SQLite 数据库结构草案](docs/database-schema.md)
 - [MVP 范围与验收标准](docs/mvp-acceptance.md)
 - [阶段路线图](docs/roadmap.md)
+- [`ls` / `du` 查询命令设计](docs/query-cli-design.md)
 - [开发环境与依赖策略](docs/development.md)
 - [维护规则](AGENTS.md)

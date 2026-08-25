@@ -10,7 +10,7 @@
 ## 阶段 1：纯 Python 只读 MVP
 
 - 全量 metadata 扫描与局部子树更新。
-- SQLite 查询：`du`、`largest`、基础 `duplicates`。
+- SQLite 查询：`ls`、`du`、`largest`、基础 `duplicates`。
 - size → quick hash → BLAKE3 full hash 流水线。
 - JSON/CSV 导出与 dry-run plan。
 
@@ -20,6 +20,7 @@
 
 - 配置化 include/exclude、大小与时间过滤。
 - 当前状态校验、dirty state 与历史结果保留策略。
+- 按 [`ls` / `du` 查询命令设计](query-cli-design.md) 对齐 GNU Coreutils 心智模型：`ls -Al` 风格长列表、`du -s` 风格默认汇总、常用兼容参数与 coverage/completeness 输出。
 - 基准测试与故障注入测试。
 
 ## 阶段 3：Rust 扫描与 hash 后端
