@@ -29,7 +29,7 @@
 - `scan --hash {none,quick,full}` 默认使用 `full`；重复检测先按 size 缩小候选集，再计算 quick BLAKE3 和 full BLAKE3。
 - full hash 仅在 size 与 quick hash 匹配后生成；同一 full digest、算法和大小的当前文件构成重复组。
 - 局部扫描会将新候选与已有索引中的同大小文件一并补齐 hash，从而发现新旧目录之间的重复项。
-- 可用命令：`roots`、`paths [PATH]`、`du [PATH]`、`ls [PATH]`、`largest`、`duplicates`，其中 paths、du 和 ls 的 PATH 是可选索引范围。`du` 默认以带表头的单行汇总表输出逻辑字节数、文件数、可用时的 allocated 字节数和相对路径；`ls` 以相同统计列列出目标目录的直接子目录和普通文件，并为目录递归汇总后代普通文件；JSON/CSV 仍可显式选择。
+- 可用命令：`roots`、`paths [PATH]`、`du [PATH ...]`、`ls [PATH]`、`largest`、`duplicates`，其中路径参数均为可选索引范围。`du` 默认以带表头的汇总表输出每个目标的逻辑字节数、文件数、可用时的 allocated 字节数和相对路径，并接受多个文件或目录路径以兼容调用层已经展开的通配结果；`ls` 以相同统计列列出目标目录的直接子目录和普通文件，并为目录递归汇总后代普通文件；JSON/CSV 仍可显式选择。
 - 查询可用 `--format json|csv` 与 `--output PATH` 导出；`flatlas export duplicates` 提供快捷导出。
 - `flatlas plan create --root PATH` 生成不可变 `dry_run` hardlink plan。canonical 以字典序最小路径确定；operation 带 size、full digest 与“不执行”的前置条件。MVP 没有 `apply` 命令。
 

@@ -139,7 +139,10 @@ def paths_command(
 
 @app.command("du")
 def du(
-    path: Annotated[Path | None, typer.Argument(help="Optional indexed directory scope.")] = None,
+    paths: Annotated[
+        list[Path] | None,
+        typer.Argument(help="Optional indexed file or directory scopes."),
+    ] = None,
     format: Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")] = "table",
     output: Annotated[Path | None, typer.Option("--output")] = None,
     db: db_option = None,
@@ -147,7 +150,8 @@ def du(
     """Summarize indexed file count and sizes in a du-like table."""
     connection = open_database(_database(db))
     try:
-        _print_usage(disk_usage(connection, scope=path), format, output)
+        rows = disk_usage(connection) if not paths else [row for path in paths for row in disk_usage(connection, scope=path)]
+        _print_usage(rows, format, output)
     finally:
         connection.close()
 

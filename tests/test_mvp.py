@@ -103,6 +103,13 @@ def test_du_defaults_to_headered_summary_with_relative_path(tmp_path: Path, monk
     assert json_result.exit_code == 0
     assert json.loads(json_result.stdout)[0]["path"] == "source"
 
+    multiple_result = runner.invoke(
+        app,
+        ["du", "source/one.bin", "source/two.bin", "--format", "json", "--db", str(database)],
+    )
+    assert multiple_result.exit_code == 0
+    assert [row["logical_size"] for row in json.loads(multiple_result.stdout)] == [1, 2]
+
 
 def test_ls_lists_direct_children_and_summarizes_directories(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "index.sqlite"
