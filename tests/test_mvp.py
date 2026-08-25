@@ -94,10 +94,12 @@ def test_du_defaults_to_headered_summary_with_relative_path(tmp_path: Path, monk
     result = runner.invoke(app, ["du", str(source), "--db", str(database)])
     assert result.exit_code == 0
     lines = result.stdout.splitlines()
-    assert lines[0].startswith("LOGICAL_BYTES\tFILES\t")
+    assert "\t" not in result.stdout
+    assert lines[0].lstrip().startswith("SIZE(B)  N")
     assert lines[0].endswith("PATH")
-    assert lines[1].startswith("3\t2\t")
-    assert lines[1].endswith("\tsource")
+    assert lines[1].lstrip().startswith("3  2")
+    assert lines[1].endswith("  source")
+    assert lines[0].index("PATH") == lines[1].index("source")
 
     json_result = runner.invoke(app, ["du", str(source), "--format", "json", "--db", str(database)])
     assert json_result.exit_code == 0
@@ -109,6 +111,12 @@ def test_du_defaults_to_headered_summary_with_relative_path(tmp_path: Path, monk
     )
     assert multiple_result.exit_code == 0
     assert [row["logical_size"] for row in json.loads(multiple_result.stdout)] == [1, 2]
+
+    help_result = runner.invoke(app, ["du", "--help"])
+    assert help_result.exit_code == 0
+    assert "SIZE(B)=logical bytes" in help_result.stdout
+    assert "N=file count" in help_result.stdout
+    assert "ALLOC(B)=allocated bytes" in help_result.stdout
 
 
 def test_ls_lists_direct_children_and_summarizes_directories(tmp_path: Path, monkeypatch) -> None:
@@ -145,4 +153,14 @@ def test_ls_lists_direct_children_and_summarizes_directories(tmp_path: Path, mon
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(app, ["ls", "source", "--db", str(database)])
     assert result.exit_code == 0
-    assert result.stdout.splitlines()[0].startswith("TYPE\tLOGICAL_BYTES\tFILES\t")
+    lines = result.stdout.splitlines()
+    assert "\t" not in result.stdout
+    assert lines[0].lstrip().startswith("T  SIZE(B)  N")
+    path_column = lines[0].index("PATH")
+    assert all(line[path_column:].startswith("source") for line in lines[1:])
+    assert {line[0] for line in lines[1:]} == {"d", "f"}
+
+    help_result = CliRunner().invoke(app, ["ls", "--help"])
+    assert help_result.exit_code == 0
+    assert "d=directory, f=file" in help_result.stdout
+    assert "size columns match du" in help_result.stdout

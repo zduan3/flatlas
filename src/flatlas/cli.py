@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from pathlib import Path
 from typing import Annotated
 
@@ -58,26 +59,49 @@ def _print_usage(
         raise FlatlasError("format must be table, json or csv")
 
     show_allocated = any(row["allocated_size"] is not None for row in rows)
-    headers = ["TYPE"] if include_kind else []
-    headers.extend(["LOGICAL_BYTES", "FILES"])
+    headers = ["T"] if include_kind else []
+    headers.extend(["SIZE(B)", "N"])
     if show_allocated:
-        headers.append("ALLOCATED_BYTES")
+        headers.append("ALLOC(B)")
     headers.append("PATH")
-    lines = ["\t".join(headers)]
+    table_rows: list[list[str]] = []
     for row in rows:
-        fields = [str(row["entry_kind"])] if include_kind else []
+        fields = [str(row["entry_kind"])[0]] if include_kind else []
         fields.extend([str(row["logical_size"]), str(row["files"])])
         if show_allocated:
             allocated = row["allocated_size"]
             fields.append("-" if allocated is None else str(allocated))
         fields.append(str(row["path"]))
-        lines.append("\t".join(fields))
+        table_rows.append(fields)
+
+    all_rows = [headers, *table_rows]
+    widths = [max(_display_width(row[index]) for row in all_rows) for index in range(len(headers))]
+    numeric_columns = set(range(1 if include_kind else 0, len(headers) - 1))
+    lines = [
+        "  ".join(
+            _pad_display(value, widths[index], right=index in numeric_columns)
+            for index, value in enumerate(row)
+        ).rstrip()
+        for row in all_rows
+    ]
     rendered = "\n".join(lines) + "\n"
     if output is None:
         typer.echo(rendered, nl=False)
     else:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(rendered, encoding="utf-8", newline="")
+
+
+def _display_width(value: str) -> int:
+    return sum(
+        0 if unicodedata.combining(character) else 2 if unicodedata.east_asian_width(character) in {"F", "W"} else 1
+        for character in value
+    )
+
+
+def _pad_display(value: str, width: int, *, right: bool) -> str:
+    padding = " " * (width - _display_width(value))
+    return f"{padding}{value}" if right else f"{value}{padding}"
 
 
 @app.command()
@@ -147,7 +171,7 @@ def du(
     output: Annotated[Path | None, typer.Option("--output")] = None,
     db: db_option = None,
 ) -> None:
-    """Summarize indexed file count and sizes in a du-like table."""
+    """Summarize indexed usage. SIZE(B)=logical bytes; N=file count; ALLOC(B)=allocated bytes."""
     connection = open_database(_database(db))
     try:
         rows = disk_usage(connection) if not paths else [row for path in paths for row in disk_usage(connection, scope=path)]
@@ -163,7 +187,7 @@ def ls_command(
     output: Annotated[Path | None, typer.Option("--output")] = None,
     db: db_option = None,
 ) -> None:
-    """List indexed child files and directories with recursive size summaries."""
+    """List indexed children. T: d=directory, f=file; size columns match du."""
     connection = open_database(_database(db))
     try:
         _print_usage(list_directory_usage(connection, scope=path), format, output, include_kind=True)
