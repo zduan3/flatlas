@@ -552,7 +552,12 @@ def scan_directory(connection: sqlite3.Connection, value: Path, *, hash_mode: st
 
 def _scope_row(connection: sqlite3.Connection, value: Path) -> sqlite3.Row:
     display = str(value.expanduser().resolve())
-    row = connection.execute("SELECT id, path_display FROM path WHERE path_display=? AND state='present'", (display,)).fetchone()
+    row = connection.execute(
+        """SELECT p.id, p.path_display, p.entry_kind, r.root_path_display
+        FROM path p JOIN root r ON r.id=p.root_id
+        WHERE p.path_display=? AND p.state='present'""",
+        (display,),
+    ).fetchone()
     if row is None:
         raise FlatlasError(f"path is not currently indexed: {display}")
     return row
@@ -585,6 +590,54 @@ def _relative_display(path_display: str, relative_to: Path, namespace_path: str)
         return os.path.relpath(path_display, namespace_path)
 
 
+def list_directory_usage(
+    connection: sqlite3.Connection,
+    *,
+    scope: Path = Path("."),
+    relative_to: Path | None = None,
+) -> list[dict[str, Any]]:
+    selected = _scope_row(connection, scope)
+    if selected["entry_kind"] not in {"root", "directory"}:
+        raise FlatlasError(f"ls path is not a directory: {selected['path_display']}")
+    display_base = Path.cwd() if relative_to is None else relative_to
+    rows = connection.execute(
+        """WITH RECURSIVE descendants(top_id, id) AS (
+            SELECT p.id, p.id FROM path p
+            WHERE p.parent_path_id=? AND p.state='present'
+              AND p.entry_kind IN ('directory', 'file')
+            UNION ALL
+            SELECT d.top_id, p.id FROM path p
+            JOIN descendants d ON p.parent_path_id=d.id
+            WHERE p.state='present'
+        )
+        SELECT top.entry_kind, top.path_display,
+               sum(CASE WHEN item.entry_kind='file' THEN 1 ELSE 0 END) AS files,
+               COALESCE(sum(CASE WHEN item.entry_kind='file' THEN item.logical_size END), 0) AS logical_size,
+               CASE
+                   WHEN sum(CASE WHEN item.entry_kind='file' THEN 1 ELSE 0 END)
+                      = sum(CASE WHEN item.entry_kind='file' AND item.allocated_size IS NOT NULL THEN 1 ELSE 0 END)
+                   THEN COALESCE(sum(CASE WHEN item.entry_kind='file' THEN item.allocated_size END), 0)
+                   ELSE NULL
+               END AS allocated_size
+        FROM descendants d
+        JOIN path top ON top.id=d.top_id
+        JOIN path item ON item.id=d.id
+        GROUP BY top.id
+        ORDER BY top.path_display""",
+        (selected["id"],),
+    )
+    return [
+        {
+            "entry_kind": row["entry_kind"],
+            "files": row["files"],
+            "logical_size": row["logical_size"],
+            "allocated_size": row["allocated_size"],
+            "path": _relative_display(row["path_display"], display_base, selected["root_path_display"]),
+        }
+        for row in rows
+    ]
+
+
 def disk_usage(
     connection: sqlite3.Connection,
     *,
@@ -613,10 +666,6 @@ def disk_usage(
             for row in rows
         ]
     selected = _scope_row(connection, scope)
-    namespace_path = connection.execute(
-        "SELECT r.root_path_display FROM root r JOIN path p ON p.root_id=r.id WHERE p.id=?",
-        (selected["id"],),
-    ).fetchone()["root_path_display"]
     row = connection.execute(
         """WITH RECURSIVE descendants(id) AS (
             SELECT id FROM path WHERE id=? UNION ALL
@@ -628,7 +677,12 @@ def disk_usage(
         WHERE p.state='present' AND p.entry_kind='file' AND p.id IN descendants""",
         (selected["id"],),
     ).fetchone()
-    return [{**dict(row), "path": _relative_display(selected["path_display"], display_base, namespace_path)}]
+    return [
+        {
+            **dict(row),
+            "path": _relative_display(selected["path_display"], display_base, selected["root_path_display"]),
+        }
+    ]
 
 def largest_files(connection: sqlite3.Connection, *, limit: int = 50) -> list[dict[str, Any]]:
     return [dict(row) for row in connection.execute(

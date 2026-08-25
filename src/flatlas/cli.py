@@ -17,6 +17,7 @@ from flatlas.core import (
     export_rows,
     get_root,
     largest_files,
+    list_directory_usage,
     list_roots,
     open_database,
     plan_operations,
@@ -43,7 +44,13 @@ def _print(rows: object, fmt: str = "json", output: Path | None = None) -> None:
         typer.echo(rendered, nl=False)
 
 
-def _print_du(rows: list[dict[str, object]], fmt: str, output: Path | None) -> None:
+def _print_usage(
+    rows: list[dict[str, object]],
+    fmt: str,
+    output: Path | None,
+    *,
+    include_kind: bool = False,
+) -> None:
     if fmt in {"json", "csv"}:
         _print(rows, fmt, output)
         return
@@ -51,13 +58,15 @@ def _print_du(rows: list[dict[str, object]], fmt: str, output: Path | None) -> N
         raise FlatlasError("format must be table, json or csv")
 
     show_allocated = any(row["allocated_size"] is not None for row in rows)
-    headers = ["LOGICAL_BYTES", "FILES"]
+    headers = ["TYPE"] if include_kind else []
+    headers.extend(["LOGICAL_BYTES", "FILES"])
     if show_allocated:
         headers.append("ALLOCATED_BYTES")
     headers.append("PATH")
     lines = ["\t".join(headers)]
     for row in rows:
-        fields = [str(row["logical_size"]), str(row["files"])]
+        fields = [str(row["entry_kind"])] if include_kind else []
+        fields.extend([str(row["logical_size"]), str(row["files"])])
         if show_allocated:
             allocated = row["allocated_size"]
             fields.append("-" if allocated is None else str(allocated))
@@ -138,7 +147,22 @@ def du(
     """Summarize indexed file count and sizes in a du-like table."""
     connection = open_database(_database(db))
     try:
-        _print_du(disk_usage(connection, scope=path), format, output)
+        _print_usage(disk_usage(connection, scope=path), format, output)
+    finally:
+        connection.close()
+
+
+@app.command("ls")
+def ls_command(
+    path: Annotated[Path, typer.Argument(help="Indexed directory whose direct children are listed.")] = Path("."),
+    format: Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")] = "table",
+    output: Annotated[Path | None, typer.Option("--output")] = None,
+    db: db_option = None,
+) -> None:
+    """List indexed child files and directories with recursive size summaries."""
+    connection = open_database(_database(db))
+    try:
+        _print_usage(list_directory_usage(connection, scope=path), format, output, include_kind=True)
     finally:
         connection.close()
 

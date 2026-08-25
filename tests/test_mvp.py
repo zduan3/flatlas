@@ -9,6 +9,7 @@ from flatlas.core import (
     discover_namespace,
     disk_usage,
     duplicate_groups,
+    list_directory_usage,
     open_database,
     plan_operations,
     register_namespace,
@@ -101,3 +102,40 @@ def test_du_defaults_to_headered_summary_with_relative_path(tmp_path: Path, monk
     json_result = runner.invoke(app, ["du", str(source), "--format", "json", "--db", str(database)])
     assert json_result.exit_code == 0
     assert json.loads(json_result.stdout)[0]["path"] == "source"
+
+
+def test_ls_lists_direct_children_and_summarizes_directories(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "index.sqlite"
+    connection, source = make_connection(tmp_path)
+    try:
+        empty = source / "empty"
+        empty.mkdir()
+        nested = source / "nested"
+        nested.mkdir()
+        deeper = nested / "deeper"
+        deeper.mkdir()
+        (nested / "child.bin").write_bytes(b"ab")
+        (deeper / "grandchild.bin").write_bytes(b"cde")
+        (source / "loose.bin").write_bytes(b"wxyz")
+        scan_directory(connection, source, hash_mode="none")
+
+        rows = list_directory_usage(connection, scope=source, relative_to=tmp_path)
+        by_path = {row["path"]: row for row in rows}
+        assert list(by_path) == [
+            str(Path("source") / "empty"),
+            str(Path("source") / "loose.bin"),
+            str(Path("source") / "nested"),
+        ]
+        assert by_path[str(Path("source") / "empty")]["files"] == 0
+        assert by_path[str(Path("source") / "loose.bin")]["entry_kind"] == "file"
+        assert by_path[str(Path("source") / "loose.bin")]["logical_size"] == 4
+        assert by_path[str(Path("source") / "nested")]["entry_kind"] == "directory"
+        assert by_path[str(Path("source") / "nested")]["files"] == 2
+        assert by_path[str(Path("source") / "nested")]["logical_size"] == 5
+    finally:
+        connection.close()
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, ["ls", "source", "--db", str(database)])
+    assert result.exit_code == 0
+    assert result.stdout.splitlines()[0].startswith("TYPE\tLOGICAL_BYTES\tFILES\t")

@@ -32,6 +32,7 @@ flatlas scan D:\Archive
 flatlas scan D:\Archive\2026\08
 flatlas duplicates
 flatlas du D:\Archive\2026
+flatlas ls D:\Archive\2026
 flatlas largest --limit 50
 flatlas export duplicates --format csv --output duplicates.csv
 flatlas plan create --root D:\Archive
@@ -47,6 +48,7 @@ flatlas roots
 flatlas scan PATH [--hash none|quick|full]
 flatlas paths [PATH]
 flatlas du [PATH] [--format table|json|csv]
+flatlas ls [PATH] [--format table|json|csv]
 flatlas largest [--limit N]
 flatlas duplicates
 flatlas export duplicates --format json|csv --output PATH
@@ -60,6 +62,7 @@ flatlas plan show PLAN_ID
 - size → quick BLAKE3 → full BLAKE3 的重复检测；默认不跟随 symlink 或 Windows reparse point。
 - 支持路径、目录大小、最大文件、重复组查询、JSON/CSV 导出和 dry-run plan。
 - `du` 默认输出带表头的单行汇总，包含逻辑字节数、文件数、可用时的实际分配字节数和相对路径。
+- `ls [PATH]` 从持久化索引列出目标目录的直接子目录与普通文件；目录行递归汇总其后代文件。
 - 不删除、移动、hardlink、reflink、symlink 或持续监听文件系统。
 
 ## 开发检查
