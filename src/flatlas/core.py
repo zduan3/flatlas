@@ -1076,10 +1076,34 @@ def disk_usage(
         }
     ]
 
-def largest_files(connection: sqlite3.Connection, *, limit: int = 50) -> list[dict[str, Any]]:
-    return [dict(row) for row in connection.execute(
-        "SELECT p.root_id, p.path_display, p.logical_size, p.allocated_size FROM path p WHERE p.state='present' AND p.entry_kind='file' ORDER BY p.logical_size DESC, p.path_display LIMIT ?", (limit,)
-    )]
+def largest_files(
+    connection: sqlite3.Connection,
+    *,
+    scope: Path = Path("."),
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    selected = _scope_row(connection, scope)
+    rows = connection.execute(
+        """WITH RECURSIVE descendants(id) AS (
+            SELECT id FROM path WHERE id=? UNION ALL
+            SELECT p.id FROM path p JOIN descendants d ON p.parent_path_id=d.id
+        )
+        SELECT p.root_id, p.path_display, p.logical_size, p.allocated_size
+        FROM path p
+        WHERE p.state='present' AND p.entry_kind='file' AND p.id IN descendants
+        ORDER BY p.logical_size DESC, p.path_display LIMIT ?""",
+        (selected["id"], limit),
+    )
+    display_base = Path(selected["path_display"])
+    return [
+        {
+            "root_id": row["root_id"],
+            "logical_size": row["logical_size"],
+            "allocated_size": row["allocated_size"],
+            "path": _relative_display(row["path_display"], display_base, selected["root_path_display"]),
+        }
+        for row in rows
+    ]
 
 
 

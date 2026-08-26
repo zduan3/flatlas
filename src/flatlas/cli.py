@@ -98,6 +98,39 @@ def _print_usage(
         output.write_text(rendered, encoding="utf-8", newline="")
 
 
+def _print_largest_files(
+    rows: list[dict[str, object]],
+    fmt: str,
+    output: Path | None,
+) -> None:
+    if fmt in {"json", "csv"}:
+        _print(rows, fmt, output)
+        return
+    if fmt != "table":
+        raise FlatlasError("format must be table, json or csv")
+
+    show_allocated = any(row["allocated_size"] is not None for row in rows)
+    headers = ["SIZE(B)"]
+    if show_allocated:
+        headers.append("ALLOC(B)")
+    headers.append("PATH")
+    table_rows: list[list[str]] = []
+    for row in rows:
+        fields = [str(row["logical_size"])]
+        if show_allocated:
+            allocated = row["allocated_size"]
+            fields.append("-" if allocated is None else str(allocated))
+        fields.append(str(row["path"]))
+        table_rows.append(fields)
+
+    rendered = _render_table(headers, table_rows, set(range(len(headers) - 1)))
+    if output is None:
+        typer.echo(rendered, nl=False)
+    else:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(rendered, encoding="utf-8", newline="")
+
+
 def _display_width(value: str) -> int:
     return sum(
         0 if unicodedata.combining(character) else 2 if unicodedata.east_asian_width(character) in {"F", "W"} else 1
@@ -452,15 +485,16 @@ def ls_command(
 
 @app.command("largest")
 def largest(
+    path: Annotated[Path, typer.Argument(help="Indexed file or directory scope.")] = Path("."),
     limit: Annotated[int, typer.Option("--limit", min=1)] = 50,
-    format: Annotated[str, typer.Option("--format")] = "json",
+    format: Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")] = "table",
     output: Annotated[Path | None, typer.Option("--output")] = None,
     db: db_option = None,
 ) -> None:
     """List the largest currently indexed files."""
     connection = open_database(_database(db))
     try:
-        _print(largest_files(connection, limit=limit), format, output)
+        _print_largest_files(largest_files(connection, scope=path, limit=limit), format, output)
     finally:
         connection.close()
 

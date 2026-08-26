@@ -13,6 +13,7 @@ from flatlas.core import (
     disk_usage,
     duplicate_groups,
     ensure_duplicate_hashes,
+    largest_files,
     list_child_directories,
     open_database,
     plan_operations,
@@ -124,6 +125,48 @@ def test_du_defaults_to_headered_summary_with_relative_path(tmp_path: Path, monk
     assert "SIZE(B)=logical bytes" in help_result.stdout
     assert "N=file count" in help_result.stdout
     assert "ALLOC(B)=allocated bytes" in help_result.stdout
+
+
+def test_largest_is_scoped_to_path_and_defaults_to_cwd(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "index.sqlite"
+    source = tmp_path / "source"
+    source.mkdir()
+    inside = source / "inside"
+    inside.mkdir()
+    nested = inside / "nested"
+    nested.mkdir()
+    (source / "outside.bin").write_bytes(b"x" * 100)
+    (inside / "small.bin").write_bytes(b"x")
+    (nested / "large.bin").write_bytes(b"xxx")
+
+    connection = open_database(database)
+    try:
+        register_namespace(connection, discover_namespace(source))
+        scan_directory(connection, source)
+        assert [row["path"] for row in largest_files(connection, scope=inside)] == [
+            str(Path("nested") / "large.bin"),
+            "small.bin",
+        ]
+        assert [row["path"] for row in largest_files(connection, scope=inside, limit=1)] == [
+            str(Path("nested") / "large.bin")
+        ]
+        assert [row["path"] for row in largest_files(connection, scope=inside / "small.bin")] == ["."]
+    finally:
+        connection.close()
+
+    runner = CliRunner()
+    explicit = runner.invoke(app, ["largest", str(inside), "--db", str(database)])
+    assert explicit.exit_code == 0
+    lines = explicit.stdout.splitlines()
+    assert lines[0].lstrip().startswith("SIZE(B)")
+    assert lines[0].endswith("PATH")
+    assert lines[1].endswith(str(Path("nested") / "large.bin"))
+    assert lines[2].endswith("small.bin")
+
+    monkeypatch.chdir(inside)
+    defaulted = runner.invoke(app, ["largest", "--limit", "1", "--format", "json", "--db", str(database)])
+    assert defaulted.exit_code == 0
+    assert [row["path"] for row in json.loads(defaulted.stdout)] == [str(Path("nested") / "large.bin")]
 
 
 def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch) -> None:
