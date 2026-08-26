@@ -1,8 +1,8 @@
-# SQLite 数据库结构草案（MVP）
+# SQLite 数据库结构草案（MVP / 0.1）
 
 ## 目标与范围
 
-本结构服务于只读 Python MVP：持久化根目录、当前路径状态、扫描覆盖、文件 metadata、哈希和 dry-run plan。它支持先全量索引、后续仅扫描新增或变化子树、再与历史已索引文件查重的流程。
+本结构服务于只读 Python MVP（版本号 0.1）；本文中的“MVP”和“0.1”是同义词。它持久化根目录、当前路径状态、扫描覆盖、文件 metadata、哈希和 dry-run plan，支持先全量索引、后续仅扫描新增或变化子树、再与历史已索引文件查找重复候选的流程。
 
 本草案的基线决策是：**保存当前状态与扫描审计，不保存可查询的完整历史快照。** 每个路径保留最近一次确认状态；`scan`、`scan_scope` 和 `scan_error` 保留扫描是否完整及失败原因。未来如需历史快照，应添加独立 snapshot 表，而不是把当前状态表变成无界 observation 日志。
 
@@ -14,7 +14,7 @@ PRAGMA journal_mode = WAL;
 PRAGMA busy_timeout = 5000;
 ```
 
-所有时间均为 UTC Unix 纳秒（`*_ns`，`INTEGER`）。文件路径以 root-relative 原始字节存为 `BLOB`；Windows MVP 将原生 Unicode 以固定 UTF-8 编码存入 BLOB，Linux 直接存 `os.fsencode()` 的结果。显示字符串只用于 UI/导出，不参与唯一性或路径比较。
+所有时间均为 UTC Unix 纳秒（`*_ns`，`INTEGER`）。文件路径以 root-relative 原始字节存为 `BLOB`；Windows 0.1 将原生 Unicode 以固定 UTF-8 编码存入 BLOB，Linux 直接存 `os.fsencode()` 的结果。显示字符串只用于 UI/导出，不参与唯一性或路径比较。0.1 发布验收只覆盖当前平台可正常表示的常规 Unicode 路径；Linux 非 UTF-8 round-trip 留给后续版本，但 schema 的 BLOB 身份设计不得退化。
 
 ## 路径编码与对象身份
 
@@ -40,9 +40,9 @@ path.parent_path_id ── path.id
 - `scan_scope`：本次扫描申请覆盖的一个子树；只有它完整完成，才允许将该子树内未再次看到的路径标为删除。
 - `path`：每个 root-relative 目录项的**当前**状态，目录、常规文件、symlink 和其他类型都占一行。
 - `file_hash`：常规文件路径的当前 quick/full hash 及其计算依据。
-- `plan` / `plan_operation`：不可变的 dry-run 去重方案；MVP 只创建和导出，不执行。
+- `plan` / `plan_operation`：不可变的 dry-run 候选建议快照；0.1 只创建和导出，不执行，也不构成删除或替换授权。
 
-## MVP DDL
+## MVP（0.1）DDL
 
 ```sql
 PRAGMA application_id = 1179402580; -- "FLAT" 的固定项目标识
@@ -198,7 +198,7 @@ CREATE TABLE plan_operation (
 
 `namespace_id_raw` 在 Windows 可保存 Volume GUID 的标准化字节形式，在 Linux 可保存挂载实例/设备身份的适配器值；无法可靠取得时允许为 `NULL`，此时 `root_path_raw` 仍是 namespace 的稳定键。`object_id_raw` 同理：Windows 适配器可保存文件 ID，纯 Python 无法可靠提供时为 `NULL`，再使用 `device` / `inode` 与时间 metadata 进行保守判断。
 
-`reparse_tag` 仅 Windows 使用，用来区分 junction、symlink 和其他 reparse point；Linux 保持 `NULL`。MVP 默认不跟随 `symlink` 或 `reparse`。POSIX FIFO、socket、device 等存为 `other`，不建立 `file_hash`。
+`reparse_tag` 仅 Windows 使用，用来区分 junction、symlink 和其他 reparse point；Linux 保持 `NULL`。0.1 默认不跟随 `symlink` 或 `reparse`。POSIX FIFO、socket、device 等存为 `other`，不建立 `file_hash`；完整 reparse tag 采集不作为 0.1 发布门槛。
 
 ## 索引
 
@@ -230,13 +230,27 @@ CREATE INDEX idx_plan_operation_plan_status ON plan_operation(plan_id, status);
 5. **仅当某个 `scan_scope.status='completed'` 时**，利用 `parent_path_id` 的递归 CTE 找到该 scope 后代，将其中 `last_seen_scan_id <> 当前 scan` 的 `present` 路径更新为 `deleted`，再填充 `deleted_by_scope_id` 与 `deleted_at_ns`。
 6. scope 只要是 `partial`、`failed` 或 `cancelled`，绝不依据本次扫描修改任何旧路径为 `deleted`。最后才汇总 `scan.status`。
 
-这满足 MVP 的关键验收：中断扫描、权限错误、过滤排除和扫描中改名均不得被解释为“文件已删除”。`deleted` 行暂不物理清理，保留至手动维护任务或保留策略落地。
+这满足 0.1 的关键验收：中断扫描、权限错误和扫描中改名均不得被解释为“文件已删除”。`deleted` 行暂不物理清理，保留至手动维护任务或保留策略落地。
+
+删除状态的用户可见流程如下：
+
+```text
+用户在 flatlas 之外删除文件或目录
+→ SQLite 中暂时仍可为 present
+→ ls 完整枚举父目录时可显示 gone，但不写数据库
+→ 用户扫描仍存在且覆盖该路径的父目录
+→ completed scope 将缺失路径及其已索引后代标记 deleted
+```
+
+已经不存在的路径不能直接作为 `scan PATH`，必须扫描其仍存在的父目录。`paths`、`du`、`largest`、`dupes` 等当前状态查询只使用 `state='present'`；关联的 `file_hash` 可以保留，但 deleted path 不参与重复组。相同 `(root_id, path_key)` 后续重新出现时，upsert 将其恢复为 `present`、清除 `deleted_by_scope_id` / `deleted_at_ns`，并在身份、size、mtime 或可用 change/birth time 与旧 basis 不匹配时把 hash 标记为 stale。
+
+`ls` 的 `gone` 与持久化 `deleted` 必须保持分离：`gone` 是一次成功实时枚举提供的现场缺失提示，可能附带最后已知文件大小或目录递归聚合；`deleted` 是 completed scan coverage 才能写入的当前状态 tombstone。
 
 ## Hash 与重复组查询
 
 quick hash 只用于缩小候选集；重复组必须以相同 `logical_size`、`full_algorithm` 和 `full_digest` 查询，并限制路径和 hash 都仍为当前有效状态：
 
-MVP 在执行 `dupes PATH` 时先用单次范围查询选出 PATH 后代中 size 大于 0 且计数大于 1 的普通文件，再按 size → quick → full 补齐 hash。0 B 文件不进入候选、不计算 hash、也不显示为重复组。小文件的 quick 读取覆盖全文，可直接写为 `full_ready`；大文件只有 quick 相同才读取全文。每次打开文件后在读取前后使用 `fstat` 与索引依据比较，变化或错误只会使该文件成为 stale/failed 并令结果不完整，不会改变 scan coverage。完成的 hash 按批提交，后续查询可保守复用。
+0.1 在执行 `dupes PATH` 时先用单次范围查询选出 PATH 后代中 size 大于 0 且计数大于 1 的普通文件，再按 size → quick → full 补齐 hash。0 B 文件不进入候选、不计算 hash、也不显示为重复组。小文件的 quick 读取覆盖全文，可直接写为 `full_ready`；大文件只有 quick 相同才读取全文。每次打开文件后在读取前后使用 `fstat` 与索引依据比较，变化或错误只会使该文件成为 stale/failed 并令结果不完整，不会改变 scan coverage。完成的 hash 按批提交，后续查询可保守复用。
 
 Windows 上 Python 的 `st_ctime` 不提供稳定的 POSIX change-time 语义，因此 `change_time_ns` 不参与 hash basis；`mtime_ns`、可用的 `birth_time_ns`、对象身份和 size 仍必须一致。Linux 上可靠的 `st_ctime_ns` 继续参与校验。
 
@@ -252,13 +266,13 @@ GROUP BY h.full_algorithm, h.full_digest, p.logical_size
 HAVING count(*) > 1;
 ```
 
-MVP 的 `full_verification` 应先写入 `hash_only`。阶段 4 的 hardlink apply 必须重新验证 metadata 和内容；安全模式应将最终逐字节比较成功记为 `byte_compare`，不得仅凭哈希创建链接。Windows 上若没有可靠的 change-time 字段，hash 复用必须更保守：任一待比较 basis 缺失即重新 hash。
+0.1 的 `full_verification` 写入 `hash_only`，因此重复组只是清理候选。未来任何 apply 都必须重新扫描和验证 metadata 与内容；安全模式应将最终逐字节比较成功记为 `byte_compare`，不得仅凭历史 hash 创建链接或删除文件。0.1 的缓存只在文件身份、size、mtime 和全部可用且可靠的 change/birth time 匹配时复用；平台最低可靠 basis 在执行器设计前必须进一步明确。
 
 ## Plan 不可变性与后续执行
 
-MVP 只能创建 `draft` / `dry_run` plan。一旦设置 `immutable_at_ns`，应用层不得更新 `policy_json`、操作目标、预期 size 或 digest；变更必须创建新 plan，并将旧 plan 标为 `superseded`。
+0.1 只能创建 `draft` / `dry_run` plan。一旦设置 `immutable_at_ns`，应用层不得更新 `policy_json`、操作目标、预期 size 或 digest；变更必须创建新 plan，并将旧 plan 标为 `superseded`。plan 是候选建议快照，不表示其操作已安全验证。
 
-阶段 4 才允许写入 `applied`、`partially_applied` 或 `failed` 状态，并应新增 `operation_attempt` 审计表来记录执行前复核、临时重命名、错误与恢复。`action` 中预留 `reflink` / `delete` 不代表它们属于 MVP。
+未来安全执行器阶段才允许写入 `applied`、`partially_applied` 或 `failed` 状态，并应新增 `operation_attempt` 审计表来记录执行前复核、临时重命名、错误与恢复。`action` 中预留 `hardlink` / `reflink` / `delete` 不代表它们属于 0.1。
 
 ## 待确认的设计点
 

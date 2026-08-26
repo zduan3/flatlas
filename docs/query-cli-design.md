@@ -2,7 +2,7 @@
 
 ## 状态与目标
 
-本文定义 File Atlas 查询体验的后续兼容基线。当前实现仍以 [MVP 实现状态](mvp-implementation.md) 为准；本文中的“目标默认行为”和参数除明确标为已实现者外，均是设计规划，不代表当前 CLI 已支持。
+本文定义 File Atlas 查询体验的后续兼容基线。当前 MVP 的版本号是 0.1，本文中的“MVP”和“0.1”是同义词。当前实现仍以 [MVP（0.1）实现状态](mvp-implementation.md) 为准；本文中的“目标默认行为”和参数除明确标为已实现者外，均是设计规划，不代表当前 CLI 已支持。
 
 兼容参照优先采用 GNU Coreutils 与 GNU Findutils。Linux 上的 BusyBox、BSD 工具和发行版 alias 可能不同，因此这里追求的是一致的用户心智模型和常用参数语义，不承诺逐字符复刻 GNU 输出。
 
@@ -27,10 +27,29 @@ GNU `ls` 和 `du` 主要读取当前文件系统；flatlas 同时使用实时目
 | 目录大小 | `ls -l` 显示目录项自身大小，`du` 递归估算空间 | 为归档浏览优化，`ls` 可附带索引中的递归总量，但必须明确它不是目录项 inode 大小 |
 | 空间指标 | `du` 默认以文件系统使用量和 block 单位输出 | 同时保存 logical 与可用时的 allocated size；任一未知不得伪装为 0 |
 | hardlink | `du` 默认对同一 inode 只计一次，`-l` 才重复计数 | 只能基于当前可靠对象身份保守去重；身份不可靠时必须标注限制 |
-| symlink / reparse | 由 `-H`、`-L`、`-P` 等控制 | MVP 默认不跟随 symlink 或 Windows reparse point；兼容参数须在跨平台策略完成后加入 |
+| symlink / reparse | 由 `-H`、`-L`、`-P` 等控制 | 0.1 默认不跟随 symlink 或 Windows reparse point；兼容参数须在跨平台策略完成后加入 |
 | 排序与字符 | locale、终端与环境变量会影响输出 | 表格按 Unicode 显示宽度对齐；机器输出使用稳定字段和排序规则 |
 
 `df` 还有一项产品边界差异：GNU `df` 无参数时列出当前系统挂载表中的文件系统；flatlas 的 `roots` / `df` 无参数时只列内部 registered namespace。两者不能静默混为一谈。
+
+## `ls` 与 `du` 的职责划分
+
+两者共享路径和空间字段，但回答不同问题：
+
+- `ls PATH` 回答“PATH 当前有哪些直接子项，它们是什么，索引对它们了解多少”。它实时枚举一层，将文件自身大小与目录的已知递归聚合大小放在同一视图中，方便选择下一步分析目标。
+- `du PATH ...` 回答“每个显式目标及其后代的索引聚合是多少”。它不枚举现场直接子项，默认每个参数一行，源目录离线时仍可查询。
+- `largest PATH` 回答“PATH 子树中最大的单个当前普通文件是什么”，避免让 `ls` 或 `du` 承担全树文件排序。
+
+GNU `ls -l` 对目录显示的是目录对象自身的 `st_size`，在常见 Linux 文件系统上经常是 4096，但这不是目录内容总量，也不保证恒为 4 KiB。flatlas 为清理指导有意不复制该数值：统一使用 `LOGICAL(B)`，普通文件表示自身 logical size，目录表示索引中以它为根的普通文件递归 logical size。`N` 对文件为 1，对目录为递归普通文件数；symlink、reparse 和其他特殊条目显示 `-`。
+
+因此目标心智模型是：
+
+```text
+ls       一层结构 + live/index 状态 + 已知空间提示
+du       显式 scope 的递归索引汇总
+largest  scope 内的最大单文件
+dupes    scope 内的重复内容候选
+```
 
 ## `ls` 的目标行为
 
@@ -48,18 +67,19 @@ flatlas ls [PATH]
 2. 只列 PATH 的直接条目，不递归展开。
 3. 文件与目录都列出，包含名称以 `.` 开头的真实条目。
 4. 最后一列只显示条目名称，不附加 PATH 前缀。
-5. 默认长表包含类型/coverage 状态、可用 metadata、索引统计和名称。
+5. 默认长表以 `T`、`S`、`LOGICAL(B)`、`N`、可用时的 `ALLOC(B)` 和 `NAME` 为稳定核心列；更多 metadata 后续按平台能力增加。
 6. 目录的统计列表示索引中的递归总量；文件的统计列表示文件自身。
-7. `new`、`part`、`gone` 的不完整或不可用统计默认显示 `-`，不能显示为精确的 0。
+7. `ok` 显示最近完整扫描的已知值；`part` 和 `gone` 在存在历史索引值时继续显示，但状态明确表示它不完整、可能过期或仅为最后已知值；`new` 目录显示 `-`，`new` 普通文件可以显示实时 stat 得到的自身大小。任何未知值都不能伪装为精确的 0。
 
 推荐的紧凑表格概念如下；实际列应根据跨平台可用性和终端宽度逐步落地：
 
 ```text
-S     MODE        NLINK  OWNER  GROUP  SIZE      ALLOC     MTIME             NAME
-ok    drwxr-xr-x      3  1000   1000   12.4 MiB  16.0 MiB  2026-08-25 10:00  archive
-new   d---------      -  -      -      -         -         -                 incoming
-part  drwx------      2  1000   1000   -         -         2026-08-25 09:30  private
-gone  d---------      -  -      -      -         -         -                 removed
+T  S     LOGICAL(B)  N    ALLOC(B)  NAME
+d  ok       13002342  83    16777216  archive
+d  new             -   -           -  incoming
+d  part      7340032  40           -  private
+f  new       2097152   1     2097152  download.tmp
+d  gone      1048576  12           -  removed
 ```
 
 其中 `S` 是 flatlas 扩展：
@@ -67,7 +87,7 @@ gone  d---------      -  -      -      -         -         -                 rem
 - `ok`：最近覆盖该目录的 scope 为 completed，且实时条目与当前索引均为 present。
 - `new`：实时存在，但没有当前有效的完整扫描覆盖。
 - `part`：最近覆盖 scope 为 running、partial、failed 或 cancelled。
-- `gone`：索引曾观察到该直接子目录，但本次完整实时枚举未观察到。它只描述本次视图，不更新 `path.state`。
+- `gone`：索引曾观察到该直接条目，但本次完整实时枚举未观察到。它只描述本次视图，不更新 `path.state`；如果索引仍保留最后已知文件大小或目录聚合，可以继续展示，但不得计为新的现场观测。
 
 实时枚举只要发生权限、I/O 或类型检查错误，命令就应非零退出，不得通过缺行暗示目录不存在。离线使用由显式的数据源参数处理。
 
@@ -100,13 +120,25 @@ gone  d---------      -  -      -      -         -         -                 rem
 | `--status=STATUS,...` | 快速筛选 `ok`、`new`、`part`、`gone`，适合发现待扫描目录。 |
 | `--dirs-only` / `--files-only` | 比 shell glob 更可靠，避免通配符在进入 flatlas 前被展开。 |
 | `--totals=logical|allocated|both|none` | 明确目录递归统计列，避免把 logical、allocated 与真实可回收空间混淆。 |
-| `--allow-partial-totals` | 默认隐藏不完整统计；显式启用后用 `~` 或独立 completeness 字段标注估计值。 |
+| `--hide-uncertain-totals` | 默认用 `part` / `gone` 状态展示仍可用的最后已知统计；需要只看完整值时将这些统计隐藏为 `-`。机器输出始终保留独立 status。 |
 | `--absolute` | 默认只显示名称；需要复制完整路径时显式请求。 |
 | `--null` | 使用 NUL 分隔名称，安全处理换行等特殊字符；语义参照 Coreutils 通用做法。 |
 
 ### `ls` 与 `coverage` 的职责边界
 
 `ls` 回答“这个目录当前有哪些直接子项”，`coverage` 回答“索引对这棵目录树了解得有多完整、哪些结论可信”。`ls` 的状态列是快速告警灯，不是完整的扫描诊断界面：它把实时存在性与索引覆盖度压缩成 `ok`、`new`、`part`、`gone`，其中 `gone` 只表示本次完整实时枚举没有看到旧索引条目，不等于数据库已经可靠确认 `deleted`。
+
+### `ls` 与删除状态
+
+`ls` 只提供实时存在性证据，不负责持久化删除：
+
+1. 用户在 flatlas 之外删除文件或目录后，索引暂时仍可保持 `present`。
+2. `ls` 完整枚举父目录时可将缺失的直接文件或目录显示为 `gone`，但不得写入 `path.state`。
+3. 要确认删除，必须扫描一个仍然存在且覆盖被删除路径的父目录；不能扫描已经不存在的目标本身。
+4. 只有该 scan scope 完整完成，缺失路径及其已索引后代才标记为 `deleted`。
+5. partial、failed、cancelled 或枚举错误均不得确认删除。
+6. `deleted` 行保留在 SQLite 作为当前状态 tombstone；`paths`、`du`、`largest` 和 `dupes` 等当前状态查询排除它。
+7. 同一路径再次出现并被扫描时恢复为 `present`，清除删除标记；metadata basis 不匹配时旧 hash 标记为 stale 并按需重算。
 
 仅给 `ls` 增加一列不能满足以下需求：
 
@@ -250,7 +282,7 @@ C:\         997482492  391581348  605901144   40%  C:\
 
 ### 产品价值优先级
 
-File Atlas 的首要用途是定位大文件、大目录和重复内容，以帮助用户减少存储占用；名称/路径查找只是持久化索引带来的附加能力。MVP 不以复刻 ncdu 的交互式空间浏览为目标，而以“在空间分析工作流中补充可靠的重复文件识别与局部子树更新”为核心差异。
+File Atlas 的首要用途是定位大文件、大目录和重复内容候选，为用户清理存储提供指导；名称/路径查找只是持久化索引带来的附加能力。0.1 不以复刻 ncdu 的交互式空间浏览为目标，而以“在空间分析工作流中补充持久化重复候选与局部子树更新”为核心差异。实际去重由 jdupes 重新扫描、独立验证并显式执行。
 
 按实际使用价值，后续工作顺序应是：
 
@@ -296,7 +328,7 @@ GNU `find` 默认遍历实时目录树，而 `flatlas find` 应默认查询 SQLi
 | `grep` | 当前不索引文件内容。 |
 | scan 间 `diff` | 数据库保存当前路径状态而非不可变历史快照，无法可靠重建任意两次扫描。 |
 | `getfacl`、`lsattr` | schema 尚未保存 ACL、xattr 或完整平台属性。 |
-| `rm`、`mv`、`ln`、`touch`、`chmod`、`chown` | 超出只读 MVP；不得借查询子命令引入文件修改。 |
+| `rm`、`mv`、`ln`、`touch`、`chmod`、`chown` | 超出只读 MVP（0.1）；不得借查询子命令引入文件修改。 |
 | 精确兼容 checksum `--check` | 需先设计实时内容读取、digest 算法选择、stale 判断及是否回写索引。 |
 | `ncdu` / TUI | 需要独立交互与性能设计，不作为查询 CLI 的近期兼容目标。 |
 
@@ -306,7 +338,7 @@ GNU `find` 默认遍历实时目录树，而 `flatlas find` 应默认查询 SQLi
 |---|---|---|---|
 | `ls` 条目范围 | 仅实时直接子目录，并合并 coverage | 像 `ls -Al` 一样列出全部直接文件与目录、包含真实隐藏条目但不合成 `.` / `..` | 先扩展核心查询与测试，再增加 `--dirs-only` 保留当前视图 |
 | `ls` 名称 | 只显示名称 | 保持只显示名称 | `--absolute` 显式请求完整路径 |
-| `ls` 长格式 | 状态、递归大小、文件数 | 增加可用 mode/nlink/owner/group/mtime，保持状态与目录总量扩展 | 缺失 metadata 显示 `-`，不得伪造 Unix 权限 |
+| `ls` 长格式 | 状态、目录递归大小、文件数 | 稳定核心列为 `T`、`S`、`LOGICAL(B)`、`N`、可用 `ALLOC(B)`、`NAME`；文件用自身值、目录用递归聚合，再逐步增加 mode/nlink/owner/group/mtime | part/gone 保留状态和最后已知值；未知显示 `-`，不得伪造 Unix 权限或目录对象 `st_size` |
 | `du` 无参数 | 聚合所有 registered namespace | 汇总当前目录 `.` | 旧行为迁移到 `--all-roots` |
 | `du` 参数 | 每个参数一条汇总 | 保持，等价隐式 `-s` | 接受显式 `-s` |
 | `du` size | logical bytes、文件数、可用 allocated bytes | used block、apparent bytes、文件数并列且语义清晰 | `-b`、`--apparent-size`、`-B`、`-h` 控制表格 |

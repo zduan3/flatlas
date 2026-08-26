@@ -4,7 +4,7 @@
 
 File Atlas 是跨平台、持久化且只读的文件系统索引工具。SQLite 保存当前路径状态、扫描 coverage、错误、hash 与 dry-run plan；它不是每次命令都重新遍历目录的即时查重工具。
 
-当前工作范围是纯 Python 3.12 MVP。除非用户明确要求并且相关设计已更新，不实现删除、移动、hardlink/reflink/symlink 替换、监听、TUI、Rust/PyO3 或 plan apply。
+当前工作范围是纯 Python 3.12 MVP，版本号为 0.1；本项目文档中的“MVP”和“0.1”是同义词。除非用户明确要求并且相关设计已更新，不实现删除、移动、hardlink/reflink/symlink 替换、监听、TUI、Rust/PyO3 或 plan apply。
 
 开始功能修改前，先阅读与任务相关的 `docs/architecture.md`、`docs/database-schema.md`、`docs/mvp-acceptance.md` 和 `docs/mvp-implementation.md`。
 
