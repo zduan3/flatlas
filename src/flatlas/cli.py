@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import unicodedata
 from pathlib import Path
 from typing import Annotated, Any
@@ -129,6 +130,34 @@ def _format_iec_size(size: int) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".") + f" {unit}"
 
 
+def _counted(count: int, noun: str) -> str:
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def _duplicate_display_paths(
+    groups: list[dict[str, Any]],
+    scope: Path,
+    *,
+    absolute: bool,
+) -> list[dict[str, Any]]:
+    if absolute:
+        return groups
+    base = scope.expanduser().resolve()
+    return [
+        {
+            **group,
+            "paths": [
+                {
+                    **path,
+                    "path_display": os.path.relpath(path["path_display"], base),
+                }
+                for path in group["paths"]
+            ],
+        }
+        for group in groups
+    ]
+
+
 def _print_duplicate_groups(
     groups: list[dict[str, Any]],
     fmt: str,
@@ -144,7 +173,8 @@ def _print_duplicate_groups(
     theoretical_savings = sum(int(group["theoretical_savings"]) for group in groups)
     lines = [
         (
-            f"{len(groups)} duplicate groups · {redundant_files} redundant files · "
+            f"{_counted(len(groups), 'duplicate group')} · "
+            f"{_counted(redundant_files, 'redundant file')} · "
             f"{_format_iec_size(theoretical_savings)} theoretical savings"
         )
     ]
@@ -321,14 +351,17 @@ def largest(
 
 @app.command("dupes")
 def dupes(
+    path: Annotated[Path, typer.Argument(help="Indexed directory whose duplicate groups are listed.")] = Path("."),
+    absolute: Annotated[bool, typer.Option("--absolute", help="Show absolute paths instead of paths relative to PATH.")] = False,
     format: Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")] = "table",
     output: Annotated[Path | None, typer.Option("--output")] = None,
     db: db_option = None,
 ) -> None:
-    """List duplicate groups confirmed with a full BLAKE3 hash."""
+    """List full-hash duplicate groups within an indexed directory."""
     connection = open_database(_database(db))
     try:
-        _print_duplicate_groups(duplicate_groups(connection), format, output)
+        groups = _duplicate_display_paths(duplicate_groups(connection, scope=path), path, absolute=absolute)
+        _print_duplicate_groups(groups, format, output)
     finally:
         connection.close()
 
@@ -340,12 +373,15 @@ app.add_typer(export_app, name="export")
 @export_app.command("dupes")
 def export_dupes(
     output: Annotated[Path, typer.Option("--output")],
+    path: Annotated[Path, typer.Argument(help="Indexed directory whose duplicate groups are exported.")] = Path("."),
+    absolute: Annotated[bool, typer.Option("--absolute", help="Show absolute paths instead of paths relative to PATH.")] = False,
     format: Annotated[str, typer.Option("--format")] = "json",
     db: db_option = None,
 ) -> None:
     connection = open_database(_database(db))
     try:
-        export_rows(duplicate_groups(connection), format, output)
+        groups = _duplicate_display_paths(duplicate_groups(connection, scope=path), path, absolute=absolute)
+        export_rows(groups, format, output)
     finally:
         connection.close()
     typer.echo(output)

@@ -30,7 +30,7 @@ flatlas --help
 flatlas init D:\Archive
 flatlas scan D:\Archive
 flatlas scan D:\Archive\2026\08
-flatlas dupes
+flatlas dupes D:\Archive
 flatlas du D:\Archive\2026
 flatlas ls D:\Archive\2026
 flatlas largest --limit 50
@@ -51,8 +51,8 @@ flatlas paths [PATH]
 flatlas du [PATH ...] [--format table|json|csv]
 flatlas ls [PATH] [--format table|json|csv]
 flatlas largest [--limit N]
-flatlas dupes [--format table|json|csv]
-flatlas export dupes --format json|csv --output PATH
+flatlas dupes [PATH] [--absolute] [--format table|json|csv]
+flatlas export dupes [PATH] [--absolute] --format json|csv --output PATH
 flatlas plan create --root PATH
 flatlas plan show PLAN_ID
 ```

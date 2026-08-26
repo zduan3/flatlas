@@ -232,14 +232,16 @@ def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch
     assert "SIZE(B)=indexed logical bytes" in help_result.stdout
 
 
-def test_dupes_defaults_to_grouped_output_sorted_by_theoretical_savings(tmp_path: Path) -> None:
+def test_dupes_scopes_grouped_output_to_path_and_defaults_to_cwd(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "index.sqlite"
     source = tmp_path / "source"
     source.mkdir()
+    inside = source / "inside"
+    inside.mkdir()
     (source / "small-a.bin").write_bytes(b"small")
     (source / "small-b.bin").write_bytes(b"small")
-    (source / "large-a.bin").write_bytes(b"larger payload")
-    (source / "large-b.bin").write_bytes(b"larger payload")
+    (inside / "large-a.bin").write_bytes(b"larger payload")
+    (inside / "large-b.bin").write_bytes(b"larger payload")
     (source / "large-c.bin").write_bytes(b"larger payload")
     connection = open_database(database)
     try:
@@ -249,25 +251,30 @@ def test_dupes_defaults_to_grouped_output_sorted_by_theoretical_savings(tmp_path
         connection.close()
 
     runner = CliRunner()
-    result = runner.invoke(app, ["dupes", "--db", str(database)])
+    result = runner.invoke(app, ["dupes", str(inside), "--db", str(database)])
     assert result.exit_code == 0
     lines = result.stdout.splitlines()
-    assert lines[0] == "2 duplicate groups · 3 redundant files · 33 B theoretical savings"
-    assert lines[2] == "[1] 14 B × 3 files · 28 B theoretical savings"
+    assert lines[0] == "1 duplicate group · 1 redundant file · 14 B theoretical savings"
+    assert lines[2] == "[1] 14 B × 2 files · 14 B theoretical savings"
     assert lines[3:] == [
-        f"    {source / 'large-a.bin'}",
-        f"    {source / 'large-b.bin'}",
-        f"    {source / 'large-c.bin'}",
-        "",
-        "[2] 5 B × 2 files · 5 B theoretical savings",
-        f"    {source / 'small-a.bin'}",
-        f"    {source / 'small-b.bin'}",
+        "    large-a.bin",
+        "    large-b.bin",
     ]
 
+    absolute_result = runner.invoke(app, ["dupes", str(inside), "--absolute", "--db", str(database)])
+    assert absolute_result.exit_code == 0
+    assert f"    {inside / 'large-a.bin'}" in absolute_result.stdout
+    assert f"    {inside / 'large-b.bin'}" in absolute_result.stdout
+
+    monkeypatch.chdir(inside)
     json_result = runner.invoke(app, ["dupes", "--format", "json", "--db", str(database)])
     assert json_result.exit_code == 0
     json_groups = json.loads(json_result.stdout)
-    assert [group["theoretical_savings"] for group in json_groups] == [28, 5]
+    assert [group["theoretical_savings"] for group in json_groups] == [14]
+    assert [path["path_display"] for path in json_groups[0]["paths"]] == [
+        "large-a.bin",
+        "large-b.bin",
+    ]
 
     old_command = runner.invoke(app, ["duplicates", "--db", str(database)])
     assert old_command.exit_code != 0

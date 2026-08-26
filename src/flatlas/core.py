@@ -801,15 +801,38 @@ def largest_files(connection: sqlite3.Connection, *, limit: int = 50) -> list[di
 
 
 
-def duplicate_groups(connection: sqlite3.Connection, *, root_id: int | None = None) -> list[dict[str, Any]]:
-    where = "AND p.root_id=?" if root_id is not None else ""
-    rows = connection.execute(
-        f"""SELECT h.full_algorithm, h.full_digest, p.logical_size, p.id, p.root_id, p.path_display
-        FROM file_hash h JOIN path p ON p.id=h.path_id
-        WHERE h.state='full_ready' AND p.state='present' AND p.entry_kind='file' {where}
-        ORDER BY h.full_algorithm, h.full_digest, p.path_display""",
-        (() if root_id is None else (root_id,)),
-    ).fetchall()
+def duplicate_groups(
+    connection: sqlite3.Connection,
+    *,
+    root_id: int | None = None,
+    scope: Path | None = None,
+) -> list[dict[str, Any]]:
+    if root_id is not None and scope is not None:
+        raise ValueError("root_id and scope cannot be combined")
+    if scope is not None:
+        selected = _scope_row(connection, scope)
+        if selected["entry_kind"] not in {"root", "directory"}:
+            raise FlatlasError(f"duplicate scope is not a directory: {selected['path_display']}")
+        rows = connection.execute(
+            """WITH RECURSIVE descendants(id) AS (
+                SELECT id FROM path WHERE id=? UNION ALL
+                SELECT p.id FROM path p JOIN descendants d ON p.parent_path_id=d.id
+            ) SELECT h.full_algorithm, h.full_digest, p.logical_size, p.id, p.root_id, p.path_display
+            FROM file_hash h JOIN path p ON p.id=h.path_id
+            WHERE h.state='full_ready' AND p.state='present' AND p.entry_kind='file'
+              AND p.id IN descendants
+            ORDER BY h.full_algorithm, h.full_digest, p.path_display""",
+            (selected["id"],),
+        ).fetchall()
+    else:
+        where = "AND p.root_id=?" if root_id is not None else ""
+        rows = connection.execute(
+            f"""SELECT h.full_algorithm, h.full_digest, p.logical_size, p.id, p.root_id, p.path_display
+            FROM file_hash h JOIN path p ON p.id=h.path_id
+            WHERE h.state='full_ready' AND p.state='present' AND p.entry_kind='file' {where}
+            ORDER BY h.full_algorithm, h.full_digest, p.path_display""",
+            (() if root_id is None else (root_id,)),
+        ).fetchall()
     grouped: dict[tuple[str, bytes, int], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         grouped[(row["full_algorithm"], row["full_digest"], row["logical_size"])].append({"id": row["id"], "root_id": row["root_id"], "path_display": row["path_display"]})

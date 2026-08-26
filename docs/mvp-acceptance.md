@@ -54,7 +54,8 @@
 | 目录状态 | 实时目录包含已完整扫描、未扫描、partial coverage 和已移除子目录 | `ls` 正确区分状态；实时缺失不写入 `deleted`；枚举错误不产生误导状态。 |
 | 文件系统容量 | 对固定 registered namespace mock 容量成功与不可访问 | `roots` 与 `df` 输出一致；1K block、used、available、use% 正确；未知显示 `-`/`null` 而不是 0。 |
 | dry-run | 生成 plan 前后对比文件系统快照 | 文件系统无新增、删除、改名、内容或 metadata 修改；plan 含预期 precondition。 |
-| 全局查询 | 两个 namespace 中各存在相同内容文件 | 全局 `dupes` 能返回该组；plan 报告跨文件系统 hardlink 不可执行的前置条件。 |
+| 重复项范围查询 | 指定目录内外均有相同内容文件 | `dupes PATH` 只用 PATH 子树内的文件构成重复组；省略 PATH 时使用当前目录。 |
+| 重复项路径显示 | 从当前目录及另一工作目录查询相同范围 | 默认路径相对于 PATH 且不随调用目录改变；`--absolute` 输出绝对路径。 |
 | Windows | Unicode、长路径、Access Denied、junction/reparse point | 不发生路径截断或越界遍历；错误被记录；reparse point 不被默认跟随。 |
 | Linux | 非 UTF-8 路径、`EACCES`、symlink、FIFO/socket/device、稀疏文件 | 原始路径可 round-trip；错误不导致假删除；特殊类型不 hash；logical/allocated size 分开报告。 |
 

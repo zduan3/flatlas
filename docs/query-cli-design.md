@@ -254,7 +254,7 @@ File Atlas 的首要用途是定位大文件、大目录和重复内容，以帮
 
 按实际使用价值，后续工作顺序应是：
 
-1. 强化 `dupes`：按理论可节省量排序和汇总、限定 root/path、最小文件大小、组内对象数、hardlink 保守去重、hash/coverage completeness，以及稳定导出。
+1. 强化 `dupes`：在已有 PATH 范围查询、理论可节省量排序和汇总之上，增加 root、最小文件大小、组内对象数、hardlink 保守去重、hash/coverage completeness，以及稳定导出。
 2. 强化 `du` 与 `largest`：同时覆盖大目录和大文件，支持 metric、top N、排序、深度、阈值和 human-readable，并明确 logical、allocated 与理论可回收量的差别。
 3. 完善局部更新：让新增子树只扫描必要范围，仍能与旧索引形成重复组；partial/error/cancelled 不产生假删除，stale hash 能被保守重算。
 4. 提供最低限度的可信度诊断：`coverage`、`errors`、scan 摘要及必要的 `verify`，服务于解释“为何这个目录总量或重复结果不完整”，而不是扩张成通用文件管理器。
