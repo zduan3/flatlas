@@ -1,0 +1,30 @@
+# 扫描中断持久化后续设计
+
+## 状态
+
+本文记录非 MVP 的后续实现参考。当前 MVP 只展示扫描进度；`KeyboardInterrupt` 仍会回滚整次扫描事务，不承诺保存中断前观察到的路径或 metadata。内容 hash 不属于 scan，另见 [`lazy-hash-future-design.md`](lazy-hash-future-design.md)。
+
+## 目标
+
+- 中断后保留已经 checkpoint 的 path 和 metadata。
+- 持久化 scan 的文件数、目录数和累计 logical bytes。
+- 将 scan 与 scan_scope 明确终结为 `cancelled`。
+- partial、failed 或 cancelled scope 绝不触发旧路径删除。
+- 正常完成时，scope 的 completed 状态与 `_mark_missing()` 在最终事务中原子提交。
+
+## 推荐实现
+
+1. 新增向前 migration，为 `scan` 增加 `logical_bytes_seen INTEGER NOT NULL DEFAULT 0`，保留既有数据和已发布 migration 语义。
+2. 创建 running scan 与 scan_scope 后立即提交；遍历阶段按路径数量或时间间隔执行短事务 checkpoint。
+3. 每个 checkpoint 同时提交 path 写入与 scan 计数，进度中的“已保存”统计只使用已提交计数。
+4. 捕获 `KeyboardInterrupt` 时回滚当前未完成批次，再用独立事务写入 cancelled 状态；CLI 输出最终已保存统计并返回退出码 130。
+5. 只有完整遍历和所需 hash 阶段成功后才在最终事务中设置 completed 并运行 `_mark_missing()`。
+6. 进程崩溃可能遗留 running scan；在支持并发扫描前，应设计不会误伤其他活跃进程的恢复或租约机制，不能仅按状态盲目改写。
+
+## 必要回归测试
+
+- 中断后重新打开数据库，已 checkpoint 路径仍可查询。
+- cancelled scan/scope 的计数、大小和结束时间正确。
+- 完整扫描后删除文件，再中断重扫，旧路径仍为 present。
+- migration 升级保留 root、path、scan、error 和 hash 数据。
+- 正常 completed scan 仍能准确标记已确认删除。

@@ -1,15 +1,18 @@
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
+from flatlas import core
 from flatlas.cli import app
 from flatlas.core import (
     create_dry_run_plan,
     discover_namespace,
     disk_usage,
     duplicate_groups,
+    ensure_duplicate_hashes,
     list_child_directories,
     open_database,
     plan_operations,
@@ -42,6 +45,7 @@ def test_full_scan_detects_duplicates_and_builds_immutable_plan(tmp_path: Path) 
         (source / "right.bin").write_bytes(b"same payload")
         result = scan_directory(connection, source)
         assert result["status"] == "completed"
+        ensure_duplicate_hashes(connection, source)
         groups = duplicate_groups(connection)
         assert len(groups) == 1
         assert groups[0]["count"] == 2
@@ -63,6 +67,7 @@ def test_subtree_scan_can_match_existing_index_and_complete_scope_marks_deletion
         incoming.mkdir()
         (incoming / "new.bin").write_bytes(b"shared")
         scan_directory(connection, incoming)
+        ensure_duplicate_hashes(connection, source)
         assert duplicate_groups(connection)[0]["count"] == 2
         (incoming / "new.bin").unlink()
         scan_directory(connection, incoming)
@@ -83,7 +88,7 @@ def test_du_defaults_to_headered_summary_with_relative_path(tmp_path: Path, monk
     connection = open_database(database)
     try:
         register_namespace(connection, discover_namespace(source))
-        scan_directory(connection, source, hash_mode="none")
+        scan_directory(connection, source)
         rows = disk_usage(connection, scope=source, relative_to=tmp_path)
         assert rows[0]["path"] == "source"
         assert rows[0]["files"] == 2
@@ -122,7 +127,6 @@ def test_du_defaults_to_headered_summary_with_relative_path(tmp_path: Path, monk
 
 
 def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch) -> None:
-    database = tmp_path / "index.sqlite"
     connection, source = make_connection(tmp_path)
     try:
         empty = source / "empty"
@@ -133,7 +137,7 @@ def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch
         nested = source / "nested"
         nested.mkdir()
         (nested / "child.bin").write_bytes(b"ab")
-        scan_directory(connection, source, hash_mode="none")
+        scan_directory(connection, source)
 
         real_scandir = __import__("os").scandir
 
@@ -144,7 +148,7 @@ def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch
 
         with monkeypatch.context() as partial_scan:
             partial_scan.setattr("flatlas.core.os.scandir", fail_nested)
-            assert scan_directory(connection, nested, hash_mode="none")["status"] == "partial"
+            assert scan_directory(connection, nested)["status"] == "partial"
 
         empty.rmdir()
         (source / "new").mkdir()
@@ -232,6 +236,29 @@ def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch
     assert "SIZE(B)=indexed logical bytes" in help_result.stdout
 
 
+def test_scan_reports_file_count_and_logical_size_progress(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "index.sqlite"
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "one.bin").write_bytes(b"a")
+    (source / "two.bin").write_bytes(b"bc")
+    connection = open_database(database)
+    try:
+        register_namespace(connection, discover_namespace(source))
+    finally:
+        connection.close()
+
+    monkeypatch.setattr("flatlas.cli._stderr_is_tty", lambda: True)
+    result = CliRunner().invoke(app, ["scan", str(source), "--db", str(database)])
+    assert result.exit_code == 0
+    summary = json.loads(result.stdout)
+    assert summary["files_seen"] == 2
+    assert summary["dirs_seen"] == 1
+    assert summary["logical_bytes_seen"] == 3
+    assert "Scanning: 0 files · 1 directory · 0 B" in result.stderr
+    assert "Completed: 2 files · 1 directory · 3 B" in result.stderr
+
+
 def test_dupes_scopes_grouped_output_to_path_and_defaults_to_cwd(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "index.sqlite"
     source = tmp_path / "source"
@@ -242,6 +269,8 @@ def test_dupes_scopes_grouped_output_to_path_and_defaults_to_cwd(tmp_path: Path,
     (source / "small-b.bin").write_bytes(b"small")
     (inside / "large-a.bin").write_bytes(b"larger payload")
     (inside / "large-b.bin").write_bytes(b"larger payload")
+    (inside / "empty-a.bin").touch()
+    (inside / "empty-b.bin").touch()
     (source / "large-c.bin").write_bytes(b"larger payload")
     connection = open_database(database)
     try:
@@ -251,8 +280,13 @@ def test_dupes_scopes_grouped_output_to_path_and_defaults_to_cwd(tmp_path: Path,
         connection.close()
 
     runner = CliRunner()
+    monkeypatch.setattr("flatlas.cli._stderr_is_tty", lambda: True)
     result = runner.invoke(app, ["dupes", str(inside), "--db", str(database)])
     assert result.exit_code == 0
+    assert "Candidates: 2 files · 28 B" in result.stderr
+    assert "Hashing: complete · 2 candidates" in result.stderr
+    assert "empty-a.bin" not in result.stdout
+    assert "empty-b.bin" not in result.stdout
     lines = result.stdout.splitlines()
     assert lines[0] == "1 duplicate group · 1 redundant file · 14 B theoretical savings"
     assert lines[2] == "[1] 14 B × 2 files · 14 B theoretical savings"
@@ -260,6 +294,14 @@ def test_dupes_scopes_grouped_output_to_path_and_defaults_to_cwd(tmp_path: Path,
         "    large-a.bin",
         "    large-b.bin",
     ]
+
+    connection = open_database(database)
+    try:
+        assert connection.execute(
+            "SELECT count(*) FROM file_hash h JOIN path p ON p.id=h.path_id WHERE p.logical_size=0"
+        ).fetchone()[0] == 0
+    finally:
+        connection.close()
 
     absolute_result = runner.invoke(app, ["dupes", str(inside), "--absolute", "--db", str(database)])
     assert absolute_result.exit_code == 0
@@ -269,12 +311,122 @@ def test_dupes_scopes_grouped_output_to_path_and_defaults_to_cwd(tmp_path: Path,
     monkeypatch.chdir(inside)
     json_result = runner.invoke(app, ["dupes", "--format", "json", "--db", str(database)])
     assert json_result.exit_code == 0
-    json_groups = json.loads(json_result.stdout)
-    assert [group["theoretical_savings"] for group in json_groups] == [14]
-    assert [path["path_display"] for path in json_groups[0]["paths"]] == [
+    payload = json.loads(json_result.stdout)
+    assert payload["hash"]["complete"] is True
+    assert [group["theoretical_savings"] for group in payload["groups"]] == [14]
+    assert [path["path_display"] for path in payload["groups"][0]["paths"]] == [
         "large-a.bin",
         "large-b.bin",
     ]
 
     old_command = runner.invoke(app, ["duplicates", "--db", str(database)])
     assert old_command.exit_code != 0
+
+
+def test_scan_is_metadata_only_and_has_no_hash_option(tmp_path: Path) -> None:
+    connection, source = make_connection(tmp_path)
+    try:
+        (source / "a.bin").write_bytes(b"same")
+        (source / "b.bin").write_bytes(b"same")
+        scan_directory(connection, source)
+        assert connection.execute("SELECT count(*) FROM file_hash").fetchone()[0] == 0
+    finally:
+        connection.close()
+
+    help_result = CliRunner().invoke(app, ["scan", "--help"])
+    assert help_result.exit_code == 0
+    assert "--hash" not in help_result.stdout
+
+
+def test_lazy_hashing_is_scoped_reads_small_files_once_and_reuses_cache(tmp_path: Path, monkeypatch) -> None:
+    connection, source = make_connection(tmp_path)
+    inside = source / "inside"
+    outside = source / "outside"
+    inside.mkdir()
+    outside.mkdir()
+    for directory in (inside, outside):
+        (directory / "a.bin").write_bytes(b"same")
+        (directory / "b.bin").write_bytes(b"same")
+    try:
+        scan_directory(connection, source)
+        original = core._validated_digest
+        reads: list[tuple[Path, bool]] = []
+
+        def tracked(candidate, *, full):
+            reads.append((Path(candidate["path_display"]), full))
+            return original(candidate, full=full)
+
+        monkeypatch.setattr(core, "_validated_digest", tracked)
+        summary = ensure_duplicate_hashes(connection, inside)
+        assert summary.as_dict() == {
+            "candidate_files": 2,
+            "candidate_bytes": 8,
+            "content_files_read": 2,
+            "changed_files": 0,
+            "errors": 0,
+            "complete": True,
+        }
+        assert reads == [(inside / "a.bin", False), (inside / "b.bin", False)]
+        assert duplicate_groups(connection, scope=inside)[0]["count"] == 2
+        assert connection.execute(
+            "SELECT count(*) FROM file_hash h JOIN path p ON p.id=h.path_id WHERE p.path_display LIKE ?",
+            (f"{outside}%",),
+        ).fetchone()[0] == 0
+
+        reads.clear()
+        cached = ensure_duplicate_hashes(connection, inside)
+        assert cached.content_files_read == 0
+        assert reads == []
+    finally:
+        connection.close()
+
+
+def test_quick_hash_avoids_full_reads_for_different_large_files(tmp_path: Path, monkeypatch) -> None:
+    connection, source = make_connection(tmp_path)
+    try:
+        size = core.QUICK_SAMPLE_BYTES * 2 + 1
+        (source / "a.bin").write_bytes(b"a" * size)
+        (source / "b.bin").write_bytes(b"b" * size)
+        (source / "c.bin").write_bytes(b"c" * size)
+        (source / "d.bin").write_bytes(b"c" * size)
+        scan_directory(connection, source)
+        original = core._validated_digest
+        phases: list[bool] = []
+
+        def tracked(candidate, *, full):
+            phases.append(full)
+            return original(candidate, full=full)
+
+        monkeypatch.setattr(core, "_validated_digest", tracked)
+        summary = ensure_duplicate_hashes(connection, source)
+        assert summary.content_files_read == 4
+        assert phases == [False, False, False, False, True, True]
+        groups = duplicate_groups(connection, scope=source)
+        assert len(groups) == 1
+        assert [Path(path["path_display"]).name for path in groups[0]["paths"]] == ["c.bin", "d.bin"]
+    finally:
+        connection.close()
+
+
+def test_lazy_hash_reports_file_changed_after_scan_as_incomplete(tmp_path: Path) -> None:
+    connection, source = make_connection(tmp_path)
+    changed = source / "changed.bin"
+    try:
+        changed.write_bytes(b"same")
+        (source / "stable.bin").write_bytes(b"same")
+        scan_directory(connection, source)
+        scanned_mtime = changed.stat().st_mtime_ns
+        changed.write_bytes(b"else")
+        os.utime(changed, ns=(scanned_mtime + 1_000_000_000, scanned_mtime + 1_000_000_000))
+
+        summary = ensure_duplicate_hashes(connection, source)
+        assert summary.complete is False
+        assert summary.changed_files == 1
+        assert summary.errors == 0
+        assert duplicate_groups(connection, scope=source) == []
+        assert connection.execute(
+            "SELECT h.state FROM file_hash h JOIN path p ON p.id=h.path_id WHERE p.path_display=?",
+            (str(changed),),
+        ).fetchone()["state"] == "stale"
+    finally:
+        connection.close()

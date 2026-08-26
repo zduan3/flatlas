@@ -46,7 +46,7 @@ flatlas plan create --root D:\Archive
 flatlas init [PATH]
 flatlas roots
 flatlas df
-flatlas scan PATH [--hash none|quick|full]
+flatlas scan PATH
 flatlas paths [PATH]
 flatlas du [PATH ...] [--format table|json|csv]
 flatlas ls [PATH] [--format table|json|csv]

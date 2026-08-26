@@ -15,7 +15,7 @@ File Atlas 首先服务于寻找大文件、大目录和重复内容，以减少
 
 - 全量 metadata 扫描与局部子树更新。
 - SQLite/文件系统查询：`roots` / `df`、`ls`、`du`、`largest`、基础 `dupes`。
-- size → quick hash → BLAKE3 full hash 流水线。
+- metadata-only scan；`dupes` 在查询范围内执行 size → quick hash → BLAKE3 full hash 惰性流水线并复用缓存。
 - JSON/CSV 导出与 dry-run plan。
 
 阶段验收：在中断扫描或目录遍历错误后，不会错误标记未覆盖路径为删除；重复组可在原目录离线后从数据库查询。
@@ -29,6 +29,7 @@ File Atlas 首先服务于寻找大文件、大目录和重复内容，以减少
 - 按 [查询命令设计](query-cli-design.md) 逐步增加 GNU 风格常用参数；`stat`、`find`、`locate` 等通用查找便利功能后置。
 - dirty state 与历史结果保留策略。
 - 基准测试与故障注入测试。
+- hash 并发、强制重算/只用缓存模式、独立运行审计、更多范围与阈值过滤，详见 [惰性 hash 后续设计](lazy-hash-future-design.md)。
 
 ## 阶段 3：Rust 扫描与 hash 后端
 

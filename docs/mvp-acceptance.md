@@ -14,6 +14,7 @@
 ### 扫描与一致性
 
 - 支持完整扫描，以及任意指定子树的局部更新。
+- scan 只读取目录项和 metadata，不读取普通文件内容；内容 hash 由 `dupes` 在查询范围内按需计算。
 - 只有某个 `scan_scope` 完整完成，才将该 scope 内本次未再次观测到的路径标记为 `deleted`。
 - 取消、权限错误、I/O 错误、过滤排除和扫描中改名都不得被解释为路径删除。
 - 源目录之后不可访问时，已索引的当前状态仍可从 SQLite 查询。
@@ -45,16 +46,21 @@
 |---|---|---|
 | 数据库 | 新库初始化、重复打开、schema 升级 | migration 可重复执行；外键与必要索引生效；既有数据不被意外丢弃。 |
 | 全量扫描 | 包含普通文件、空目录、嵌套目录的固定语料 | 路径、类型、逻辑大小和可用 metadata 与文件系统一致。 |
+| 扫描进度 | 扫描包含不同大小文件的固定语料 | 交互式 stderr 展示文件数、目录数与累计 logical bytes；最终 JSON 提供相同统计且不被进度文本污染。 |
 | 局部更新 | 初次扫描后新增子目录，只扫描该子目录 | 新文件进入索引，且可与旧索引文件形成重复组；未扫描的旧子树不被重新标记。 |
 | 安全删除语义 | 模拟取消、权限错误、I/O 错误、扫描中改名 | 对应 scope 为 `partial`、`failed` 或 `cancelled`；任何未覆盖旧路径仍为 `present`。 |
 | 已确认删除 | 对完整成功的 scope 删除一个既有文件后重扫该 scope | 已删除路径标为 `deleted`，scope 外路径不受影响。 |
 | 分级 hash | 完全相同、同大小但不同内容、文件修改后重扫 | 仅完全相同内容进入同一重复组；修改使旧 hash 失效并重算。 |
+| 惰性 hash 范围 | 大 namespace 中只查询一个小目录，目录内外均有同大小文件 | 只打开查询目录内的同大小候选；scan 不产生 hash；重复查询复用有效缓存。 |
+| 惰性 hash I/O | 小文件重复组、quick 不同的大文件、quick 相同的大文件 | 小文件只读取一次；quick 不同的大文件不读取全文；只有 quick 相同候选进入 full hash。 |
+| Hash 一致性 | scan 后、dupes 前修改文件，并注入读取错误 | 前后 metadata 不一致或读取失败的文件不进入重复组，结果明确标为 incomplete。 |
 | 离线查询 | 完成扫描后使源目录不可访问 | 仍可查询此前索引的 `path`、`du`、`largest` 和重复组。 |
 | 查询与导出 | 固定语料运行所有基础查询、JSON/CSV 导出 | 查询结果、排序和统计符合预期；JSON 可解析，CSV 列名与编码稳定。 |
 | 目录状态 | 实时目录包含已完整扫描、未扫描、partial coverage 和已移除子目录 | `ls` 正确区分状态；实时缺失不写入 `deleted`；枚举错误不产生误导状态。 |
 | 文件系统容量 | 对固定 registered namespace mock 容量成功与不可访问 | `roots` 与 `df` 输出一致；1K block、used、available、use% 正确；未知显示 `-`/`null` 而不是 0。 |
 | dry-run | 生成 plan 前后对比文件系统快照 | 文件系统无新增、删除、改名、内容或 metadata 修改；plan 含预期 precondition。 |
 | 重复项范围查询 | 指定目录内外均有相同内容文件 | `dupes PATH` 只用 PATH 子树内的文件构成重复组；省略 PATH 时使用当前目录。 |
+| 空文件 | 查询范围内包含多个 0 B 普通文件 | 0 B 文件不进入 hash 候选、不创建 hash，也不显示为重复组。 |
 | 重复项路径显示 | 从当前目录及另一工作目录查询相同范围 | 默认路径相对于 PATH 且不随调用目录改变；`--absolute` 输出绝对路径。 |
 | Windows | Unicode、长路径、Access Denied、junction/reparse point | 不发生路径截断或越界遍历；错误被记录；reparse point 不被默认跟随。 |
 | Linux | 非 UTF-8 路径、`EACCES`、symlink、FIFO/socket/device、稀疏文件 | 原始路径可 round-trip；错误不导致假删除；特殊类型不 hash；logical/allocated size 分开报告。 |

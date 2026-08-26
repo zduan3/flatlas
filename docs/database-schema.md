@@ -225,8 +225,8 @@ CREATE INDEX idx_plan_operation_plan_status ON plan_operation(plan_id, status);
 
 1. 创建 `scan(status='running')`，并为全根或请求的每个子树创建 `scan_scope(status='running')`。
 2. 枚举到路径时，以 `(root_id, path_key)` upsert `path`，更新 metadata、`state='present'` 和 `last_seen_scan_id`。Windows 使用 UTF-8 编码的原生 Unicode path；Linux 保留原始字节。任何已用于 hash 的 identity、size、mtime、change/birth time 变化或不可可靠比较时，将对应 `file_hash.state` 标记为 `stale`。
-3. 计算 hash 后更新 `file_hash`；只有 `file_hash.state='full_ready'` 的同一 size/full digest 才进入重复候选组。
-4. 遍历、stat 或 hash 失败时插入 `scan_error`，并将 scope 标为 `partial` 或 `failed`。
+3. scan 不读取普通文件内容，也不创建新的 `file_hash`。已有 hash 的依据随 metadata 变化时标为 `stale`。
+4. 遍历或 stat 失败时插入 `scan_error`，并将 scope 标为 `partial` 或 `failed`。
 5. **仅当某个 `scan_scope.status='completed'` 时**，利用 `parent_path_id` 的递归 CTE 找到该 scope 后代，将其中 `last_seen_scan_id <> 当前 scan` 的 `present` 路径更新为 `deleted`，再填充 `deleted_by_scope_id` 与 `deleted_at_ns`。
 6. scope 只要是 `partial`、`failed` 或 `cancelled`，绝不依据本次扫描修改任何旧路径为 `deleted`。最后才汇总 `scan.status`。
 
@@ -235,6 +235,10 @@ CREATE INDEX idx_plan_operation_plan_status ON plan_operation(plan_id, status);
 ## Hash 与重复组查询
 
 quick hash 只用于缩小候选集；重复组必须以相同 `logical_size`、`full_algorithm` 和 `full_digest` 查询，并限制路径和 hash 都仍为当前有效状态：
+
+MVP 在执行 `dupes PATH` 时先用单次范围查询选出 PATH 后代中 size 大于 0 且计数大于 1 的普通文件，再按 size → quick → full 补齐 hash。0 B 文件不进入候选、不计算 hash、也不显示为重复组。小文件的 quick 读取覆盖全文，可直接写为 `full_ready`；大文件只有 quick 相同才读取全文。每次打开文件后在读取前后使用 `fstat` 与索引依据比较，变化或错误只会使该文件成为 stale/failed 并令结果不完整，不会改变 scan coverage。完成的 hash 按批提交，后续查询可保守复用。
+
+Windows 上 Python 的 `st_ctime` 不提供稳定的 POSIX change-time 语义，因此 `change_time_ns` 不参与 hash basis；`mtime_ns`、可用的 `birth_time_ns`、对象身份和 size 仍必须一致。Linux 上可靠的 `st_ctime_ns` 继续参与校验。
 
 ```sql
 SELECT h.full_algorithm, h.full_digest, p.logical_size,

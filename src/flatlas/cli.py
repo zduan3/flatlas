@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import time
 import unicodedata
 from pathlib import Path
 from typing import Annotated, Any
@@ -12,10 +14,14 @@ import typer
 
 from flatlas.config import resolve_database
 from flatlas.core import (
+    HashProgress,
+    HashSummary,
+    ScanProgress,
     create_dry_run_plan,
     discover_namespace,
     disk_usage,
     duplicate_groups,
+    ensure_duplicate_hashes,
     export_rows,
     filesystem_usage,
     get_root,
@@ -134,6 +140,82 @@ def _counted(count: int, noun: str) -> str:
     return f"{count} {noun}{'' if count == 1 else 's'}"
 
 
+class _ScanProgressDisplay:
+    def __init__(self, *, enabled: bool, interval: float = 0.1) -> None:
+        self.enabled = enabled
+        self.interval = interval
+        self.last_update = 0.0
+        self.last_phase: str | None = None
+        self.width = 0
+
+    def update(self, progress: ScanProgress) -> None:
+        if not self.enabled:
+            return
+        current = time.monotonic()
+        if progress.phase == self.last_phase and current - self.last_update < self.interval:
+            return
+        phase = {
+            "scanning": "Scanning",
+            "completed": "Completed",
+            "partial": "Partial",
+        }[progress.phase]
+        line = (
+            f"{phase}: {_counted(progress.files_seen, 'file')} · "
+            f"{_counted(progress.dirs_seen, 'directory')} · "
+            f"{_format_iec_size(progress.logical_bytes_seen)}"
+        )
+        typer.echo(f"\r{line.ljust(self.width)}", err=True, nl=False)
+        self.width = max(self.width, len(line))
+        self.last_phase = progress.phase
+        self.last_update = current
+
+    def close(self) -> None:
+        if self.enabled and self.width:
+            typer.echo(err=True)
+
+
+def _stderr_is_tty() -> bool:
+    return sys.stderr.isatty()
+
+
+class _HashProgressDisplay:
+    def __init__(self, *, enabled: bool, interval: float = 0.1) -> None:
+        self.enabled = enabled
+        self.interval = interval
+        self.last_update = 0.0
+        self.last_phase: str | None = None
+        self.width = 0
+
+    def update(self, progress: HashProgress) -> None:
+        if not self.enabled:
+            return
+        current = time.monotonic()
+        if progress.phase == self.last_phase and current - self.last_update < self.interval:
+            return
+        if progress.phase == "candidates":
+            line = f"Candidates: {_counted(progress.total_files, 'file')} · {_format_iec_size(progress.total_bytes)}"
+        elif progress.phase in {"quick", "full"}:
+            label = "Quick hash" if progress.phase == "quick" else "Full hash"
+            line = (
+                f"{label}: {progress.completed_files}/{progress.total_files} files · "
+                f"{_format_iec_size(progress.completed_bytes)}/{_format_iec_size(progress.total_bytes)}"
+            )
+        elif progress.phase == "cached":
+            line = f"Hashing: cached · {_counted(progress.total_files, 'candidate')}"
+        elif progress.phase == "incomplete":
+            line = f"Hashing: incomplete · {_counted(progress.total_files, 'candidate')}"
+        else:
+            line = f"Hashing: complete · {_counted(progress.total_files, 'candidate')}"
+        typer.echo(f"\r{line.ljust(self.width)}", err=True, nl=False)
+        self.width = max(self.width, len(line))
+        self.last_phase = progress.phase
+        self.last_update = current
+
+    def close(self) -> None:
+        if self.enabled and self.width:
+            typer.echo(err=True)
+
+
 def _duplicate_display_paths(
     groups: list[dict[str, Any]],
     scope: Path,
@@ -162,9 +244,24 @@ def _print_duplicate_groups(
     groups: list[dict[str, Any]],
     fmt: str,
     output: Path | None,
+    hash_summary: HashSummary,
 ) -> None:
-    if fmt in {"json", "csv"}:
-        _print(groups, fmt, output)
+    if fmt == "json":
+        rendered = json.dumps(
+            {"hash": hash_summary.as_dict(), "groups": groups},
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        ) + "\n"
+        if output is None:
+            typer.echo(rendered, nl=False)
+        else:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(rendered, encoding="utf-8", newline="")
+        return
+    if fmt == "csv":
+        rows = [{**hash_summary.as_dict(), **group} for group in groups]
+        _print(rows, fmt, output)
         return
     if fmt != "table":
         raise FlatlasError("format must be table, json or csv")
@@ -189,12 +286,30 @@ def _print_duplicate_groups(
                 *(f"    {path['path_display']}" for path in group["paths"]),
             ]
         )
+    if not hash_summary.complete:
+        lines.extend(
+            [
+                "",
+                (
+                    f"Incomplete: {_counted(hash_summary.changed_files, 'changed file')} · "
+                    f"{_counted(hash_summary.errors, 'error')}"
+                ),
+            ]
+        )
     rendered = "\n".join(lines) + "\n"
     if output is None:
         typer.echo(rendered, nl=False)
     else:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(rendered, encoding="utf-8", newline="")
+
+
+def _warn_incomplete_hashes(summary: HashSummary) -> None:
+    if not summary.complete:
+        typer.echo(
+            f"warning: duplicate analysis incomplete: {summary.changed_files} changed files, {summary.errors} errors",
+            err=True,
+        )
 
 
 def _print_filesystems(rows: list[dict[str, object]], fmt: str) -> None:
@@ -263,16 +378,17 @@ def df_command(db: db_option = None, format: Annotated[str, typer.Option("--form
 @app.command()
 def scan(
     path: Annotated[Path, typer.Argument(help="Directory to scan; it must be on a registered filesystem.")],
-    hash_mode: Annotated[str, typer.Option("--hash", help="Hash stage: none, quick, or full.")] = "full",
     db: db_option = None,
 ) -> None:
-    """Scan a complete namespace or one subtree and update the persistent index."""
+    """Scan metadata for a complete namespace or one subtree and update the persistent index."""
     connection = open_database(_database(db))
+    progress = _ScanProgressDisplay(enabled=_stderr_is_tty())
     try:
-        result = scan_directory(connection, path, hash_mode=hash_mode)
-        _print(result)
+        result = scan_directory(connection, path, on_progress=progress.update)
     finally:
+        progress.close()
         connection.close()
+    _print(result)
 
 
 @app.command("paths")
@@ -359,11 +475,15 @@ def dupes(
 ) -> None:
     """List full-hash duplicate groups within an indexed directory."""
     connection = open_database(_database(db))
+    hash_progress = _HashProgressDisplay(enabled=_stderr_is_tty())
     try:
+        hash_summary = ensure_duplicate_hashes(connection, path, on_progress=hash_progress.update)
         groups = _duplicate_display_paths(duplicate_groups(connection, scope=path), path, absolute=absolute)
-        _print_duplicate_groups(groups, format, output)
     finally:
+        hash_progress.close()
         connection.close()
+    _warn_incomplete_hashes(hash_summary)
+    _print_duplicate_groups(groups, format, output, hash_summary)
 
 
 export_app = typer.Typer(help="Export read-only query results.")
@@ -379,11 +499,15 @@ def export_dupes(
     db: db_option = None,
 ) -> None:
     connection = open_database(_database(db))
+    hash_progress = _HashProgressDisplay(enabled=_stderr_is_tty())
     try:
+        hash_summary = ensure_duplicate_hashes(connection, path, on_progress=hash_progress.update)
         groups = _duplicate_display_paths(duplicate_groups(connection, scope=path), path, absolute=absolute)
-        export_rows(groups, format, output)
     finally:
+        hash_progress.close()
         connection.close()
+    _warn_incomplete_hashes(hash_summary)
+    _print_duplicate_groups(groups, format, output, hash_summary)
     typer.echo(output)
 
 

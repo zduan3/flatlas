@@ -7,7 +7,7 @@ File Atlas 是持久化的文件系统目录数据库，不是每次查询都重
 重复检测、生成操作计划和实际修改文件系统必须严格分层：
 
 ```text
-扫描/更新索引 → 查询重复项 → 生成不可变 plan → 审批或 dry-run → apply → 审计
+metadata 扫描/更新索引 → 查询范围内惰性 hash 与重复项 → 生成不可变 plan → 审批或 dry-run → apply → 审计
 ```
 
 ## Python MVP 范围
@@ -18,7 +18,7 @@ Python 3.12 MVP 只包含以下能力：
 - 完整扫描与指定子树的局部更新。
 - 扫描覆盖状态；只有确认子树完整遍历后才标记旧路径为删除。
 - 目录大小、最大文件、路径与基础重复组查询。
-- 以 size、quick hash、BLAKE3 full hash 分级检测重复内容。
+- scan 只采集 metadata；`dupes` 在指定范围内以 size、quick hash、BLAKE3 full hash 惰性分级检测重复内容并复用可靠缓存。
 - dry-run plan 的数据模型与导出。
 
 MVP 明确不包含：文件删除、hardlink/reflink 替换、inotify/持续监听、TUI、PyO3 和 Rust 实现。

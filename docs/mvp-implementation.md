@@ -1,6 +1,6 @@
 # 当前 MVP 实现状态
 
-更新时间：2026-08-24。
+更新时间：2026-08-26。
 
 本文描述仓库中已落地的 Python MVP，不替代 [架构与边界](architecture.md)、[数据库结构草案](database-schema.md) 和 [验收标准](mvp-acceptance.md)；后三者仍是后续功能的设计约束。
 
@@ -18,17 +18,19 @@
 
 - 首次打开数据库时创建 schema migration、root、scan、scan_scope、path、scan_error、file_hash、plan 和 plan_operation 表及必要索引。
 - SQLite 连接启用 foreign keys、WAL 和 busy timeout。
-- `flatlas scan PATH` 支持完整 namespace 扫描或任意已登记 namespace 内的 subtree 扫描。
+- `flatlas scan PATH` 支持完整 namespace 扫描或任意已登记 namespace 内的 subtree 扫描。交互式终端会在 stderr 原地显示当前阶段、已观察到的普通文件数、目录数和 logical bytes；最终 JSON 在 stdout 中包含 `logical_bytes_seen`。非交互式输出不写动态进度行。
 - 每次扫描记录 scan、scope、路径 metadata 与错误；只有 scope 成功完成，才将该 scope 内未再次发现的旧 path 标记为 `deleted`。
-- 目录枚举、stat 和 hash 失败会令 scope 变为 `partial` 或 `failed`，不会据此推断旧路径被删除。
+- 目录枚举和 stat 失败会令 scope 变为 `partial` 或 `failed`，不会据此推断旧路径被删除。scan 不读取普通文件内容。
 - 默认不递归进入 symlink；Windows reparse point（包括 junction）记录为 `reparse`，不递归进入。
 - Windows 的无符号文件身份值在写入 SQLite 前会映射到其有符号 64 位表示，保证同次及后续比较稳定。
+- Windows 的 Python `st_ctime` 不是可靠的 POSIX change time，因此不作为 hash basis；可用的 birth time 仍独立保存和校验。
 
 ### Hash、查询与计划
 
-- `scan --hash {none,quick,full}` 默认使用 `full`；重复检测先按 size 缩小候选集，再计算 quick BLAKE3 和 full BLAKE3。
-- full hash 仅在 size 与 quick hash 匹配后生成；同一 full digest、算法和大小的当前文件构成重复组。
-- 局部扫描会将新候选与已有索引中的同大小文件一并补齐 hash，从而发现新旧目录之间的重复项。
+- `scan` 只采集路径与 metadata。`dupes PATH` 才在 PATH 子树内批量选择大于 0 B 的同大小候选，按需执行 size → quick BLAKE3 → full BLAKE3；0 B 文件和目录外文件不会因为本次查询而被读取或显示。
+- 不超过 128 KiB 的候选在 quick 阶段读取全文并直接成为 `full_ready`；更大的文件 quick hash 读取首尾各 64 KiB，仅 quick 相同的组再读取全文。相同 full digest、算法和大小的当前文件构成重复组。
+- 已有 quick/full hash 只有在文件身份、size、mtime、change/birth time 和算法参数仍与索引一致时才复用。每次内容读取使用打开后的前后 `fstat` 验证依据；变化记为 stale，I/O 错误记为 failed，均不会进入重复组。
+- 惰性 hash 分批提交，重复执行 `dupes` 可复用已完成结果；交互式 stderr 显示候选、quick/full 文件数和字节进度。表格和 JSON 会明确报告 changed/error 导致的不完整结果，JSON 的稳定顶层结构为 `{"hash": ..., "groups": [...]}`。
 - 可用命令：`roots`（别名 `df`）、`paths [PATH]`、`du [PATH ...]`、`ls [PATH]`、`largest`、`dupes [PATH]`，其中路径参数均为可选索引范围。`roots` / `df` 默认以 GNU `df` 风格表格显示 registered namespace 的实时容量，容量不可访问时显示未知。`du` 默认以空格对齐的紧凑汇总表输出每个目标的逻辑字节数、文件数、可用时的 allocated 字节数和相对路径，并接受多个文件或目录路径以兼容调用层已经展开的通配结果。`ls` 实时枚举目标目录的直接子目录、仅显示目录名并合并持久化 coverage：`ok` 为完整扫描、`new` 为未扫描、`part` 为最近覆盖未完成、`gone` 为索引曾观察到但实时枚举已不存在；它不会据此写入 deleted 状态，枚举失败时整体报错。`dupes` 只在指定的已索引目录子树内构成重复组，PATH 默认为当前目录，并按理论节省 logical size 降序显示汇总和缩进路径；路径默认相对于 PATH，`--absolute` 改为绝对路径，JSON/CSV 与 `export dupes` 使用相同显示规则。
 - 查询命令的后续默认行为调整、GNU 工具兼容边界、产品优先级和推荐参数规划见 [`query-cli-design.md`](query-cli-design.md)；规划内容不应被误写为当前已实现能力。
 - 查询可用 `--format json|csv` 与 `--output PATH` 导出；`flatlas export dupes` 提供快捷导出。
@@ -54,6 +56,7 @@ src/flatlas/
 - init 仅登记 namespace，未创建 scan/path。
 - 完整扫描发现同内容文件，并生成不可变 dry-run plan。
 - 局部扫描可与已有索引文件形成重复组；成功重扫局部 scope 后，已删除文件被标记 deleted，scope 外文件仍为 present。
+- scan 不产生 hash；`dupes` 只读取查询范围的同大小候选，小文件只读一次，大文件 quick 不匹配时不做 full read，后续查询复用缓存。
 
 当前检查命令：
 
@@ -65,4 +68,4 @@ uv run pyright
 
 ## 尚未完成
 
-这不是对完整验收矩阵“已通过”的声明。以下仍需后续实现或扩展测试：Linux 非 UTF-8 路径的集成语料、权限/I/O/取消故障注入、Windows 长路径与 reparse tag 细节、allocated size 的平台校准、复杂过滤、历史 snapshot、监听、并发/Rust 后端，以及任何修改文件系统的执行器。
+这不是对完整验收矩阵“已通过”的声明。以下仍需后续实现或扩展测试：Linux 非 UTF-8 路径的集成语料、权限/I/O/取消故障注入、Windows 长路径与 reparse tag 细节、allocated size 的平台校准、复杂过滤、历史 snapshot、监听、并发/Rust 后端，以及任何修改文件系统的执行器。中断扫描的增量 checkpoint 与部分结果持久化见 [`scan-interruption-design.md`](scan-interruption-design.md)；惰性 hash 的并发、审计、强制重算、过滤和物理节省量等后续设计见 [`lazy-hash-future-design.md`](lazy-hash-future-design.md)。

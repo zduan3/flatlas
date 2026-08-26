@@ -11,7 +11,7 @@ import sys
 import time
 import uuid
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -155,6 +155,50 @@ class Observation:
     change_time_ns: int | None
     birth_time_ns: int | None
     symlink_target: bytes | None
+
+
+@dataclass(frozen=True)
+class ScanProgress:
+    phase: str
+    files_seen: int
+    dirs_seen: int
+    logical_bytes_seen: int
+
+
+@dataclass(frozen=True)
+class HashProgress:
+    phase: str
+    completed_files: int
+    total_files: int
+    completed_bytes: int
+    total_bytes: int
+
+
+@dataclass(frozen=True)
+class HashSummary:
+    candidate_files: int
+    candidate_bytes: int
+    content_files_read: int
+    changed_files: int
+    errors: int
+
+    @property
+    def complete(self) -> bool:
+        return self.changed_files == 0 and self.errors == 0
+
+    def as_dict(self) -> dict[str, int | bool]:
+        return {
+            "complete": self.complete,
+            "candidate_files": self.candidate_files,
+            "candidate_bytes": self.candidate_bytes,
+            "content_files_read": self.content_files_read,
+            "changed_files": self.changed_files,
+            "errors": self.errors,
+        }
+
+
+class _HashBasisChanged(Exception):
+    pass
 
 
 def _last_insert_id(cursor: sqlite3.Cursor) -> int:
@@ -324,7 +368,10 @@ def _observation(namespace: Namespace, value: Path, *, root: bool = False) -> Ob
         nlink=getattr(stat, "st_nlink", None),
         logical_size=stat.st_size if kind == "file" else None,
         allocated_size=(getattr(stat, "st_blocks", 0) * 512) if hasattr(stat, "st_blocks") else None,
-        mtime_ns=getattr(stat, "st_mtime_ns", None), change_time_ns=getattr(stat, "st_ctime_ns", None),
+        mtime_ns=getattr(stat, "st_mtime_ns", None),
+        # Python's Windows st_ctime is not a stable POSIX change time (and is
+        # deprecated as a creation-time alias), so it is not a reliable hash basis.
+        change_time_ns=None if sys.platform == "win32" else getattr(stat, "st_ctime_ns", None),
         birth_time_ns=getattr(stat, "st_birthtime_ns", None), symlink_target=target,
     )
 
@@ -396,31 +443,56 @@ def _ensure_ancestors(connection: sqlite3.Connection, namespace: Namespace, root
     return scope_id
 
 
-def _quick_digest(file_path: Path, size: int) -> bytes:
+def _stat_hash_basis(file_stat: os.stat_result) -> tuple[int | None, ...]:
+    return (
+        _sqlite_integer(getattr(file_stat, "st_dev", None)),
+        _sqlite_integer(getattr(file_stat, "st_ino", None)),
+        file_stat.st_size,
+        getattr(file_stat, "st_mtime_ns", None),
+        None if sys.platform == "win32" else getattr(file_stat, "st_ctime_ns", None),
+        getattr(file_stat, "st_birthtime_ns", None),
+    )
+
+
+def _candidate_hash_basis(candidate: dict[str, Any]) -> tuple[int | None, ...]:
+    return (
+        candidate["device"],
+        candidate["inode"],
+        candidate["logical_size"],
+        candidate["mtime_ns"],
+        None if sys.platform == "win32" else candidate["change_time_ns"],
+        candidate["birth_time_ns"],
+    )
+
+
+def _validated_digest(candidate: dict[str, Any], *, full: bool) -> bytes:
+    expected = _candidate_hash_basis(candidate)
+    size = int(candidate["logical_size"])
     digest = blake3()
-    with file_path.open("rb") as stream:
-        if size <= QUICK_SAMPLE_BYTES * 2:
-            digest.update(stream.read())
+    with Path(candidate["path_display"]).open("rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat_module.S_ISREG(before.st_mode) or _stat_hash_basis(before) != expected:
+            raise _HashBasisChanged
+        if full or size <= QUICK_SAMPLE_BYTES * 2:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
         else:
             digest.update(stream.read(QUICK_SAMPLE_BYTES))
             stream.seek(-QUICK_SAMPLE_BYTES, os.SEEK_END)
             digest.update(stream.read(QUICK_SAMPLE_BYTES))
+        after = os.fstat(stream.fileno())
+        if _stat_hash_basis(after) != expected:
+            raise _HashBasisChanged
     return digest.digest()
 
 
-def _full_digest(file_path: Path) -> bytes:
-    digest = blake3()
-    with file_path.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.digest()
-
-
-def _hash_basis(item: Observation) -> tuple[int | None, ...]:
-    return (item.device, item.inode, item.logical_size, item.mtime_ns, item.change_time_ns, item.birth_time_ns)
-
-
-def _save_hash(connection: sqlite3.Connection, path_id: int, scan_id: int, item: Observation, *, quick: bytes | None = None, full: bytes | None = None) -> None:
+def _save_hash(
+    connection: sqlite3.Connection,
+    candidate: dict[str, Any],
+    *,
+    quick: bytes,
+    full: bytes | None = None,
+) -> None:
     state = "full_ready" if full is not None else "quick_ready"
     connection.execute(
         """INSERT INTO file_hash(path_id, state, quick_algorithm, quick_digest, quick_sample_bytes,
@@ -429,73 +501,259 @@ def _save_hash(connection: sqlite3.Connection, path_id: int, scan_id: int, item:
         VALUES (?, ?, 'blake3', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
         ON CONFLICT(path_id) DO UPDATE SET state=excluded.state, quick_algorithm=excluded.quick_algorithm,
         quick_digest=excluded.quick_digest, quick_sample_bytes=excluded.quick_sample_bytes,
-        full_algorithm=COALESCE(excluded.full_algorithm, file_hash.full_algorithm),
-        full_digest=COALESCE(excluded.full_digest, file_hash.full_digest),
-        full_verification=COALESCE(excluded.full_verification, file_hash.full_verification),
+        full_algorithm=excluded.full_algorithm, full_digest=excluded.full_digest,
+        full_verification=excluded.full_verification,
         basis_device=excluded.basis_device, basis_inode=excluded.basis_inode, basis_size=excluded.basis_size,
         basis_mtime_ns=excluded.basis_mtime_ns, basis_change_time_ns=excluded.basis_change_time_ns,
         basis_birth_time_ns=excluded.basis_birth_time_ns, last_hashed_scan_id=excluded.last_hashed_scan_id,
         error_message=NULL""",
-        (path_id, state, quick, QUICK_SAMPLE_BYTES, "blake3" if full else None, full,
-         "hash_only" if full else None, *_hash_basis(item), scan_id),
+        (
+            candidate["id"],
+            state,
+            quick,
+            QUICK_SAMPLE_BYTES,
+            "blake3" if full else None,
+            full,
+            "hash_only" if full else None,
+            *_candidate_hash_basis(candidate),
+            candidate["last_seen_scan_id"],
+        ),
     )
 
 
-def _hash_scanned_files(connection: sqlite3.Connection, namespace: Namespace, root_id: int, scan_id: int, scope_id: int, files: list[tuple[int, Observation]], hash_mode: str) -> int:
-    candidate_rows = connection.execute(
-        """SELECT p.id, p.path_display FROM path p JOIN (SELECT logical_size FROM path WHERE root_id=?
-        AND state='present' AND entry_kind='file' GROUP BY logical_size HAVING count(*) > 1) s
-        ON p.logical_size=s.logical_size WHERE p.root_id=? AND p.state='present' AND p.entry_kind='file'""",
-        (root_id, root_id),
+def _save_hash_problem(connection: sqlite3.Connection, candidate: dict[str, Any], state: str, message: str) -> None:
+    connection.execute(
+        """INSERT INTO file_hash(path_id, state, basis_device, basis_inode, basis_size,
+        basis_mtime_ns, basis_change_time_ns, basis_birth_time_ns, last_hashed_scan_id, error_message)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(path_id) DO UPDATE SET state=excluded.state,
+        quick_algorithm=NULL, quick_digest=NULL, quick_sample_bytes=NULL,
+        full_algorithm=NULL, full_digest=NULL, full_verification=NULL,
+        basis_device=excluded.basis_device, basis_inode=excluded.basis_inode,
+        basis_size=excluded.basis_size, basis_mtime_ns=excluded.basis_mtime_ns,
+        basis_change_time_ns=excluded.basis_change_time_ns,
+        basis_birth_time_ns=excluded.basis_birth_time_ns,
+        last_hashed_scan_id=excluded.last_hashed_scan_id,
+        error_message=excluded.error_message""",
+        (
+            candidate["id"],
+            state,
+            *_candidate_hash_basis(candidate),
+            candidate["last_seen_scan_id"],
+            message,
+        ),
+    )
+
+
+def _duplicate_hash_candidates(connection: sqlite3.Connection, scope: Path) -> list[dict[str, Any]]:
+    selected = _scope_row(connection, scope)
+    if selected["entry_kind"] not in {"root", "directory"}:
+        raise FlatlasError(f"duplicate scope is not a directory: {selected['path_display']}")
+    rows = connection.execute(
+        """WITH RECURSIVE descendants(id) AS (
+            SELECT id FROM path WHERE id=? UNION ALL
+            SELECT p.id FROM path p JOIN descendants d ON p.parent_path_id=d.id
+        ), duplicate_sizes(logical_size) AS (
+            SELECT p.logical_size FROM path p JOIN descendants d ON d.id=p.id
+            WHERE p.state='present' AND p.entry_kind='file' AND p.logical_size > 0
+            GROUP BY p.logical_size HAVING count(*) > 1
+        )
+        SELECT p.id, p.path_display, p.logical_size, p.device, p.inode, p.mtime_ns,
+               p.change_time_ns, p.birth_time_ns, p.last_seen_scan_id,
+               h.state AS hash_state, h.quick_algorithm, h.quick_digest, h.quick_sample_bytes,
+               h.full_algorithm, h.full_digest,
+               h.basis_device AS hash_device, h.basis_inode AS hash_inode,
+               h.basis_size AS hash_size, h.basis_mtime_ns AS hash_mtime_ns,
+               h.basis_change_time_ns AS hash_change_time_ns,
+               h.basis_birth_time_ns AS hash_birth_time_ns
+        FROM path p JOIN descendants d ON d.id=p.id
+        JOIN duplicate_sizes s ON s.logical_size=p.logical_size
+        LEFT JOIN file_hash h ON h.path_id=p.id
+        WHERE p.state='present' AND p.entry_kind='file' AND p.logical_size > 0
+        ORDER BY p.logical_size, p.path_display""",
+        (selected["id"],),
     ).fetchall()
-    scanned = {path_id: item for path_id, item in files}
-    work_items: list[tuple[int, Observation]] = []
+    return [dict(row) for row in rows]
+
+
+def ensure_duplicate_hashes(
+    connection: sqlite3.Connection,
+    scope: Path,
+    *,
+    on_progress: Callable[[HashProgress], None] | None = None,
+    commit_batch: int = 100,
+) -> HashSummary:
+    if commit_batch < 1:
+        raise ValueError("commit_batch must be at least 1")
+    candidates = _duplicate_hash_candidates(connection, scope)
+    candidate_bytes = sum(int(candidate["logical_size"]) for candidate in candidates)
+    if on_progress is not None:
+        on_progress(HashProgress("candidates", 0, len(candidates), 0, candidate_bytes))
+
+    changed_files = 0
     errors = 0
-    for row in candidate_rows:
-        path_id = int(row["id"])
-        existing = connection.execute("SELECT state FROM file_hash WHERE path_id=?", (path_id,)).fetchone()
-        if existing is not None and existing["state"] == "full_ready":
-            continue
-        item = scanned.get(path_id)
-        if item is None:
+    writes = 0
+    content_path_ids: set[int] = set()
+
+    def save_problem(candidate: dict[str, Any], state: str, message: str) -> None:
+        nonlocal writes
+        _save_hash_problem(connection, candidate, state, message)
+        candidate["hash_state"] = state
+        candidate["quick_digest"] = None
+        candidate["full_digest"] = None
+        writes += 1
+        if writes % commit_batch == 0:
+            connection.commit()
+
+    def has_current_basis(candidate: dict[str, Any]) -> bool:
+        return (
+            candidate["hash_device"],
+            candidate["hash_inode"],
+            candidate["hash_size"],
+            candidate["hash_mtime_ns"],
+            candidate["hash_change_time_ns"],
+            candidate["hash_birth_time_ns"],
+        ) == _candidate_hash_basis(candidate)
+
+    def has_quick(candidate: dict[str, Any]) -> bool:
+        return bool(
+            candidate["hash_state"] in {"quick_ready", "full_ready"}
+            and candidate["quick_algorithm"] == "blake3"
+            and candidate["quick_digest"] is not None
+            and candidate["quick_sample_bytes"] == QUICK_SAMPLE_BYTES
+            and has_current_basis(candidate)
+        )
+
+    def has_full(candidate: dict[str, Any]) -> bool:
+        return bool(
+            has_quick(candidate)
+            and candidate["hash_state"] == "full_ready"
+            and candidate["full_algorithm"] == "blake3"
+            and candidate["full_digest"] is not None
+        )
+
+    def remember_current_basis(candidate: dict[str, Any]) -> None:
+        (
+            candidate["hash_device"],
+            candidate["hash_inode"],
+            candidate["hash_size"],
+            candidate["hash_mtime_ns"],
+            candidate["hash_change_time_ns"],
+            candidate["hash_birth_time_ns"],
+        ) = _candidate_hash_basis(candidate)
+
+    quick_work = [
+        candidate
+        for candidate in candidates
+        if not has_quick(candidate)
+    ]
+    quick_total_bytes = sum(int(candidate["logical_size"]) for candidate in quick_work)
+    if on_progress is not None and quick_work:
+        on_progress(HashProgress("quick", 0, len(quick_work), 0, quick_total_bytes))
+    quick_done_bytes = 0
+    try:
+        for index, candidate in enumerate(quick_work, start=1):
+            size = int(candidate["logical_size"])
             try:
-                item = _observation(namespace, Path(row["path_display"]))
+                quick = _validated_digest(candidate, full=False)
+                is_full = size <= QUICK_SAMPLE_BYTES * 2
+                _save_hash(connection, candidate, quick=quick, full=quick if is_full else None)
+                candidate["hash_state"] = "full_ready" if is_full else "quick_ready"
+                candidate["quick_algorithm"] = "blake3"
+                candidate["quick_digest"] = quick
+                candidate["quick_sample_bytes"] = QUICK_SAMPLE_BYTES
+                candidate["full_algorithm"] = "blake3" if is_full else None
+                candidate["full_digest"] = quick if is_full else None
+                remember_current_basis(candidate)
+                content_path_ids.add(int(candidate["id"]))
+                writes += 1
+                if writes % commit_batch == 0:
+                    connection.commit()
+            except _HashBasisChanged:
+                changed_files += 1
+                save_problem(candidate, "stale", "metadata changed since scan")
             except OSError as exc:
-                _record_error(connection, scope_id, b"", "hash_quick", exc)
                 errors += 1
-                continue
-        if item.kind == "file":
-            work_items.append((path_id, item))
-    quick_ready: list[tuple[int, Observation, bytes]] = []
-    for path_id, item in work_items:
-        existing = connection.execute("SELECT state FROM file_hash WHERE path_id=?", (path_id,)).fetchone()
-        if existing is not None and existing["state"] == "full_ready":
-            continue
-        try:
-            quick = _quick_digest(item.path, item.logical_size or 0)
-            _save_hash(connection, path_id, scan_id, item, quick=quick)
-            quick_ready.append((path_id, item, quick))
-        except OSError as exc:
-            _record_error(connection, scope_id, item.key, "hash_quick", exc)
-            errors += 1
-    if hash_mode == "quick":
-        return errors
-    for path_id, item, quick in quick_ready:
-        matches = connection.execute(
-            """SELECT count(*) AS count FROM file_hash h JOIN path p ON p.id=h.path_id
-            WHERE h.quick_algorithm='blake3' AND h.quick_digest=? AND h.state IN ('quick_ready', 'full_ready')
-            AND p.root_id=? AND p.state='present' AND p.entry_kind='file'""",
-            (quick, root_id),
-        ).fetchone()
-        if int(matches["count"]) < 2:
-            continue
-        try:
-            full = _full_digest(item.path)
-            _save_hash(connection, path_id, scan_id, item, quick=quick, full=full)
-        except OSError as exc:
-            _record_error(connection, scope_id, item.key, "hash_full", exc)
-            errors += 1
-    return errors
+                save_problem(candidate, "failed", str(exc))
+            quick_done_bytes += size
+            if on_progress is not None:
+                on_progress(HashProgress("quick", index, len(quick_work), quick_done_bytes, quick_total_bytes))
+
+        # Older quick hashes of small files already cover the entire file and can be
+        # promoted without reading the content a second time.
+        for candidate in candidates:
+            if (
+                int(candidate["logical_size"]) <= QUICK_SAMPLE_BYTES * 2
+                and has_quick(candidate)
+                and not has_full(candidate)
+            ):
+                _save_hash(
+                    connection,
+                    candidate,
+                    quick=candidate["quick_digest"],
+                    full=candidate["quick_digest"],
+                )
+                candidate["hash_state"] = "full_ready"
+                candidate["full_algorithm"] = "blake3"
+                candidate["full_digest"] = candidate["quick_digest"]
+                writes += 1
+                if writes % commit_batch == 0:
+                    connection.commit()
+
+        quick_groups: dict[tuple[int, bytes], list[dict[str, Any]]] = defaultdict(list)
+        for candidate in candidates:
+            if has_quick(candidate):
+                quick_groups[(int(candidate["logical_size"]), candidate["quick_digest"])].append(candidate)
+
+        full_work = [
+            candidate
+            for group in quick_groups.values()
+            if len(group) > 1
+            for candidate in group
+            if not has_full(candidate)
+        ]
+        full_total_bytes = sum(int(candidate["logical_size"]) for candidate in full_work)
+        if on_progress is not None and full_work:
+            on_progress(HashProgress("full", 0, len(full_work), 0, full_total_bytes))
+        full_done_bytes = 0
+        for index, candidate in enumerate(full_work, start=1):
+            size = int(candidate["logical_size"])
+            try:
+                full = _validated_digest(candidate, full=True)
+                _save_hash(connection, candidate, quick=candidate["quick_digest"], full=full)
+                candidate["hash_state"] = "full_ready"
+                candidate["full_algorithm"] = "blake3"
+                candidate["full_digest"] = full
+                remember_current_basis(candidate)
+                content_path_ids.add(int(candidate["id"]))
+                writes += 1
+                if writes % commit_batch == 0:
+                    connection.commit()
+            except _HashBasisChanged:
+                changed_files += 1
+                save_problem(candidate, "stale", "metadata changed during hash")
+            except OSError as exc:
+                errors += 1
+                save_problem(candidate, "failed", str(exc))
+            full_done_bytes += size
+            if on_progress is not None:
+                on_progress(HashProgress("full", index, len(full_work), full_done_bytes, full_total_bytes))
+        connection.commit()
+    except KeyboardInterrupt:
+        connection.commit()
+        raise
+
+    summary = HashSummary(
+        candidate_files=len(candidates),
+        candidate_bytes=candidate_bytes,
+        content_files_read=len(content_path_ids),
+        changed_files=changed_files,
+        errors=errors,
+    )
+    if on_progress is not None:
+        phase = "incomplete" if not summary.complete else "cached" if not content_path_ids else "completed"
+        on_progress(HashProgress(phase, 0, len(candidates), 0, candidate_bytes))
+    return summary
 
 def _mark_missing(connection: sqlite3.Connection, root_id: int, scan_id: int, scope_id: int, scope_path_id: int) -> None:
     connection.execute(
@@ -510,9 +768,12 @@ def _mark_missing(connection: sqlite3.Connection, root_id: int, scan_id: int, sc
     )
 
 
-def scan_directory(connection: sqlite3.Connection, value: Path, *, hash_mode: str = "full") -> dict[str, Any]:
-    if hash_mode not in {"none", "quick", "full"}:
-        raise FlatlasError("--hash must be one of: none, quick, full")
+def scan_directory(
+    connection: sqlite3.Connection,
+    value: Path,
+    *,
+    on_progress: Callable[[ScanProgress], None] | None = None,
+) -> dict[str, Any]:
     namespace = discover_namespace(value)
     root = get_root(connection, namespace)
     if root is None:
@@ -539,14 +800,25 @@ def scan_directory(connection: sqlite3.Connection, value: Path, *, hash_mode: st
             _record_error(connection, scope_id, scope_key, "stat", exc)
             connection.execute("UPDATE scan_scope SET status='failed', finished_at_ns=? WHERE id=?", (now_ns(), scope_id))
             connection.execute("UPDATE scan SET status='failed', finished_at_ns=?, errors_seen=1 WHERE id=?", (now_ns(), scan_id))
-            return {"scan_id": scan_id, "status": "failed", "files_seen": 0, "dirs_seen": 0, "errors_seen": 1}
-        files: list[tuple[int, Observation]] = []
+            return {
+                "scan_id": scan_id,
+                "status": "failed",
+                "files_seen": 0,
+                "dirs_seen": 0,
+                "logical_bytes_seen": 0,
+                "errors_seen": 1,
+            }
         files_seen = 0
         dirs_seen = 1
+        logical_bytes_seen = 0
         failed = False
 
+        def report(phase: str) -> None:
+            if on_progress is not None:
+                on_progress(ScanProgress(phase, files_seen, dirs_seen, logical_bytes_seen))
+
         def visit(directory: Path) -> None:
-            nonlocal files_seen, dirs_seen, failed
+            nonlocal files_seen, dirs_seen, logical_bytes_seen, failed
             try:
                 entries = list(os.scandir(directory))
             except OSError as exc:
@@ -561,19 +833,19 @@ def scan_directory(connection: sqlite3.Connection, value: Path, *, hash_mode: st
                     _record_error(connection, scope_id, path_key(namespace, entry_path), "stat", exc)
                     failed = True
                     continue
-                path_id = upsert_path(connection, root_id, scan_id, observed)
+                upsert_path(connection, root_id, scan_id, observed)
                 if observed.kind == "directory":
                     dirs_seen += 1
+                    report("scanning")
                     visit(entry_path)
                 elif observed.kind == "file":
                     files_seen += 1
-                    files.append((path_id, observed))
+                    logical_bytes_seen += observed.logical_size or 0
+                    report("scanning")
 
         try:
+            report("scanning")
             visit(scope)
-            if hash_mode != "none" and not failed:
-                hash_errors = _hash_scanned_files(connection, namespace, root_id, scan_id, scope_id, files, hash_mode)
-                failed = failed or hash_errors > 0
             scope_status = "partial" if failed else "completed"
             connection.execute(
                 "UPDATE scan_scope SET status=?, finished_at_ns=?, paths_seen=? WHERE id=?",
@@ -590,7 +862,17 @@ def scan_directory(connection: sqlite3.Connection, value: Path, *, hash_mode: st
             connection.execute("UPDATE scan_scope SET status='cancelled', finished_at_ns=? WHERE id=?", (now_ns(), scope_id))
             connection.execute("UPDATE scan SET status='cancelled', finished_at_ns=? WHERE id=?", (now_ns(), scan_id))
             raise
-    return {"scan_id": scan_id, "status": "partial" if failed else "completed", "files_seen": files_seen, "dirs_seen": dirs_seen, "errors_seen": int(connection.execute("SELECT error_count FROM scan_scope WHERE id=?", (scope_id,)).fetchone()["error_count"])}
+    report("partial" if failed else "completed")
+    return {
+        "scan_id": scan_id,
+        "status": "partial" if failed else "completed",
+        "files_seen": files_seen,
+        "dirs_seen": dirs_seen,
+        "logical_bytes_seen": logical_bytes_seen,
+        "errors_seen": int(
+            connection.execute("SELECT error_count FROM scan_scope WHERE id=?", (scope_id,)).fetchone()["error_count"]
+        ),
+    }
 
 
 def _scope_row(connection: sqlite3.Connection, value: Path) -> sqlite3.Row:
@@ -820,6 +1102,7 @@ def duplicate_groups(
             ) SELECT h.full_algorithm, h.full_digest, p.logical_size, p.id, p.root_id, p.path_display
             FROM file_hash h JOIN path p ON p.id=h.path_id
             WHERE h.state='full_ready' AND p.state='present' AND p.entry_kind='file'
+              AND p.logical_size > 0
               AND p.id IN descendants
             ORDER BY h.full_algorithm, h.full_digest, p.path_display""",
             (selected["id"],),
@@ -829,7 +1112,8 @@ def duplicate_groups(
         rows = connection.execute(
             f"""SELECT h.full_algorithm, h.full_digest, p.logical_size, p.id, p.root_id, p.path_display
             FROM file_hash h JOIN path p ON p.id=h.path_id
-            WHERE h.state='full_ready' AND p.state='present' AND p.entry_kind='file' {where}
+            WHERE h.state='full_ready' AND p.state='present' AND p.entry_kind='file'
+              AND p.logical_size > 0 {where}
             ORDER BY h.full_algorithm, h.full_digest, p.path_display""",
             (() if root_id is None else (root_id,)),
         ).fetchall()
