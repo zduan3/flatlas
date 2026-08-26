@@ -45,6 +45,7 @@ def test_full_scan_detects_duplicates_and_builds_immutable_plan(tmp_path: Path) 
         groups = duplicate_groups(connection)
         assert len(groups) == 1
         assert groups[0]["count"] == 2
+        assert groups[0]["theoretical_savings"] == len(b"same payload")
         root_id = connection.execute("SELECT id FROM root").fetchone()[0]
         plan_id = create_dry_run_plan(connection, root_id)
         assert len(plan_operations(connection, plan_id)) == 1
@@ -166,6 +167,7 @@ def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch
     finally:
         connection.close()
 
+
     monkeypatch.setattr(
         "flatlas.core.shutil.disk_usage",
         lambda _path: SimpleNamespace(total=10 * 1024, used=4 * 1024, free=6 * 1024),
@@ -228,3 +230,44 @@ def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch
     assert "part=incomplete" in help_result.stdout
     assert "gone=missing" in help_result.stdout
     assert "SIZE(B)=indexed logical bytes" in help_result.stdout
+
+
+def test_dupes_defaults_to_grouped_output_sorted_by_theoretical_savings(tmp_path: Path) -> None:
+    database = tmp_path / "index.sqlite"
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "small-a.bin").write_bytes(b"small")
+    (source / "small-b.bin").write_bytes(b"small")
+    (source / "large-a.bin").write_bytes(b"larger payload")
+    (source / "large-b.bin").write_bytes(b"larger payload")
+    (source / "large-c.bin").write_bytes(b"larger payload")
+    connection = open_database(database)
+    try:
+        register_namespace(connection, discover_namespace(source))
+        scan_directory(connection, source)
+    finally:
+        connection.close()
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["dupes", "--db", str(database)])
+    assert result.exit_code == 0
+    lines = result.stdout.splitlines()
+    assert lines[0] == "2 duplicate groups · 3 redundant files · 33 B theoretical savings"
+    assert lines[2] == "[1] 14 B × 3 files · 28 B theoretical savings"
+    assert lines[3:] == [
+        f"    {source / 'large-a.bin'}",
+        f"    {source / 'large-b.bin'}",
+        f"    {source / 'large-c.bin'}",
+        "",
+        "[2] 5 B × 2 files · 5 B theoretical savings",
+        f"    {source / 'small-a.bin'}",
+        f"    {source / 'small-b.bin'}",
+    ]
+
+    json_result = runner.invoke(app, ["dupes", "--format", "json", "--db", str(database)])
+    assert json_result.exit_code == 0
+    json_groups = json.loads(json_result.stdout)
+    assert [group["theoretical_savings"] for group in json_groups] == [28, 5]
+
+    old_command = runner.invoke(app, ["duplicates", "--db", str(database)])
+    assert old_command.exit_code != 0

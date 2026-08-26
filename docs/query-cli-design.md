@@ -254,7 +254,7 @@ File Atlas 的首要用途是定位大文件、大目录和重复内容，以帮
 
 按实际使用价值，后续工作顺序应是：
 
-1. 强化 `duplicates`：按理论可节省量排序和汇总、限定 root/path、最小文件大小、组内对象数、hardlink 保守去重、hash/coverage completeness，以及稳定导出。
+1. 强化 `dupes`：按理论可节省量排序和汇总、限定 root/path、最小文件大小、组内对象数、hardlink 保守去重、hash/coverage completeness，以及稳定导出。
 2. 强化 `du` 与 `largest`：同时覆盖大目录和大文件，支持 metric、top N、排序、深度、阈值和 human-readable，并明确 logical、allocated 与理论可回收量的差别。
 3. 完善局部更新：让新增子树只扫描必要范围，仍能与旧索引形成重复组；partial/error/cancelled 不产生假删除，stale hash 能被保守重算。
 4. 提供最低限度的可信度诊断：`coverage`、`errors`、scan 摘要及必要的 `verify`，服务于解释“为何这个目录总量或重复结果不完整”，而不是扩张成通用文件管理器。
@@ -276,13 +276,13 @@ File Atlas 的首要用途是定位大文件、大目录和重复内容，以帮
 | P3 | `readlink PATH...` | GNU `readlink` | 显示索引中的 symlink target、Windows reparse 类型和最后观测状态，不跟随目标。 |
 | P3 | `findmnt` | `findmnt` | 展示 registered namespace、mount 与扫描边界；只有可靠的跨平台 mount/source/type metadata 落地后实现。 |
 
-这里的 P0 是对空间回收主线的支撑优先级，不表示要先于 `duplicates`、`du`、`largest` 和局部扫描本身。`coverage`、`errors`、`scans` 应采用满足可信度诊断所需的最小设计，避免审计界面反过来延迟核心查询能力。
+这里的 P0 是对空间回收主线的支撑优先级，不表示要先于 `dupes`、`du`、`largest` 和局部扫描本身。`coverage`、`errors`、`scans` 应采用满足可信度诊断所需的最小设计，避免审计界面反过来延迟核心查询能力。
 
 ### 命令分组与默认数据源
 
 - 熟悉的系统视图：`ls`、`du`、`df`、`stat`、`find`、`locate`。
 - 索引可信度视图：`verify`、`coverage`、`errors`。
-- 索引管理与审计：`scan`、`scans`、`scan-info`、`hash`、`duplicates`、`plan`。
+- 索引管理与审计：`scan`、`scans`、`scan-info`、`hash`、`dupes`、`plan`。
 
 GNU `find` 默认遍历实时目录树，而 `flatlas find` 应默认查询 SQLite；未知或尚未支持的 expression 必须报错，不能静默忽略。若未来提供统一数据源参数，应采用显式的 `--source=index|live` 或各命令已定义的受控变体，并说明 live 查询是否只比较、是否计算 hash、是否更新数据库。
 
@@ -319,7 +319,7 @@ GNU `find` 默认遍历实时目录树，而 `flatlas find` 应默认查询 SQLi
 
 ### 空间回收主线
 
-1. `duplicates` 先提供可节省量、排序、范围/阈值筛选和 completeness，使结果可以直接指导清理决策。
+1. `dupes` 先提供可节省量、排序、范围/阈值筛选和 completeness，使结果可以直接指导清理决策。
 2. `du` / `largest` 补齐大目录与大文件的 top、depth、metric 和 human-readable 查询，形成非交互式空间定位闭环。
 3. 验证局部 scan 与旧索引的重复组交互、stale hash 重算以及 partial/error/cancelled 不产生假删除。
 4. 增加最小的 `coverage` / `errors` / scan 摘要，能够解释上述结果何时精确、何时不完整。

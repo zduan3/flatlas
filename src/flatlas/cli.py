@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import unicodedata
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -114,6 +114,57 @@ def _render_table(headers: list[str], rows: list[list[str]], numeric_columns: se
         for row in all_rows
     ]
     return "\n".join(lines) + "\n"
+
+
+def _format_iec_size(size: int) -> str:
+    units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"]
+    value = float(size)
+    unit = units[0]
+    for unit in units:
+        if abs(value) < 1024 or unit == units[-1]:
+            break
+        value /= 1024
+    if unit == "B":
+        return f"{size} B"
+    return f"{value:.2f}".rstrip("0").rstrip(".") + f" {unit}"
+
+
+def _print_duplicate_groups(
+    groups: list[dict[str, Any]],
+    fmt: str,
+    output: Path | None,
+) -> None:
+    if fmt in {"json", "csv"}:
+        _print(groups, fmt, output)
+        return
+    if fmt != "table":
+        raise FlatlasError("format must be table, json or csv")
+
+    redundant_files = sum(int(group["count"]) - 1 for group in groups)
+    theoretical_savings = sum(int(group["theoretical_savings"]) for group in groups)
+    lines = [
+        (
+            f"{len(groups)} duplicate groups · {redundant_files} redundant files · "
+            f"{_format_iec_size(theoretical_savings)} theoretical savings"
+        )
+    ]
+    for index, group in enumerate(groups, start=1):
+        lines.extend(
+            [
+                "",
+                (
+                    f"[{index}] {_format_iec_size(int(group['logical_size']))} × {group['count']} files · "
+                    f"{_format_iec_size(int(group['theoretical_savings']))} theoretical savings"
+                ),
+                *(f"    {path['path_display']}" for path in group["paths"]),
+            ]
+        )
+    rendered = "\n".join(lines) + "\n"
+    if output is None:
+        typer.echo(rendered, nl=False)
+    else:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(rendered, encoding="utf-8", newline="")
 
 
 def _print_filesystems(rows: list[dict[str, object]], fmt: str) -> None:
@@ -268,16 +319,16 @@ def largest(
         connection.close()
 
 
-@app.command("duplicates")
-def duplicates(
-    format: Annotated[str, typer.Option("--format")] = "json",
+@app.command("dupes")
+def dupes(
+    format: Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")] = "table",
     output: Annotated[Path | None, typer.Option("--output")] = None,
     db: db_option = None,
 ) -> None:
     """List duplicate groups confirmed with a full BLAKE3 hash."""
     connection = open_database(_database(db))
     try:
-        _print(duplicate_groups(connection), format, output)
+        _print_duplicate_groups(duplicate_groups(connection), format, output)
     finally:
         connection.close()
 
@@ -286,8 +337,8 @@ export_app = typer.Typer(help="Export read-only query results.")
 app.add_typer(export_app, name="export")
 
 
-@export_app.command("duplicates")
-def export_duplicates(
+@export_app.command("dupes")
+def export_dupes(
     output: Annotated[Path, typer.Option("--output")],
     format: Annotated[str, typer.Option("--format")] = "json",
     db: db_option = None,

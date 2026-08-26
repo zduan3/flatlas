@@ -2,7 +2,7 @@
 
 ## 产品优先级
 
-File Atlas 首先服务于寻找大文件、大目录和重复内容，以减少存储占用。它不以复刻 ncdu 的交互式空间浏览为首要目标，而是用持久化索引补充重复文件识别、离线查询和局部子树更新。名称/路径查找属于附加能力，不能优先于 `du`、`largest`、`duplicates`、局部扫描正确性和结果可信度。
+File Atlas 首先服务于寻找大文件、大目录和重复内容，以减少存储占用。它不以复刻 ncdu 的交互式空间浏览为首要目标，而是用持久化索引补充重复文件识别、离线查询和局部子树更新。名称/路径查找属于附加能力，不能优先于 `du`、`largest`、`dupes`、局部扫描正确性和结果可信度。
 
 ## 阶段 0：设计与实验（当前）
 
@@ -14,7 +14,7 @@ File Atlas 首先服务于寻找大文件、大目录和重复内容，以减少
 ## 阶段 1：纯 Python 只读 MVP
 
 - 全量 metadata 扫描与局部子树更新。
-- SQLite/文件系统查询：`roots` / `df`、`ls`、`du`、`largest`、基础 `duplicates`。
+- SQLite/文件系统查询：`roots` / `df`、`ls`、`du`、`largest`、基础 `dupes`。
 - size → quick hash → BLAKE3 full hash 流水线。
 - JSON/CSV 导出与 dry-run plan。
 
@@ -22,7 +22,7 @@ File Atlas 首先服务于寻找大文件、大目录和重复内容，以减少
 
 ## 阶段 2：Python 索引完善
 
-- 优先强化 `duplicates` 的理论可节省量排序/汇总、范围和阈值过滤、hardlink 去重、completeness 与稳定导出。
+- 优先强化 `dupes` 的理论可节省量排序/汇总、范围和阈值过滤、hardlink 去重、completeness 与稳定导出。
 - 强化 `du` / `largest` 的 metric、top N、排序、深度和阈值能力，服务大目录与大文件定位。
 - 完善局部子树更新、当前状态校验和 stale hash 重算，并以最小的 `coverage`、`errors`、scan 摘要解释结果可信度。
 - 配置化 include/exclude、大小与时间过滤。

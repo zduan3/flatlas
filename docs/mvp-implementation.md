@@ -29,9 +29,9 @@
 - `scan --hash {none,quick,full}` 默认使用 `full`；重复检测先按 size 缩小候选集，再计算 quick BLAKE3 和 full BLAKE3。
 - full hash 仅在 size 与 quick hash 匹配后生成；同一 full digest、算法和大小的当前文件构成重复组。
 - 局部扫描会将新候选与已有索引中的同大小文件一并补齐 hash，从而发现新旧目录之间的重复项。
-- 可用命令：`roots`（别名 `df`）、`paths [PATH]`、`du [PATH ...]`、`ls [PATH]`、`largest`、`duplicates`，其中路径参数均为可选索引范围。`roots` / `df` 默认以 GNU `df` 风格表格显示 registered namespace 的实时容量，容量不可访问时显示未知。`du` 默认以空格对齐的紧凑汇总表输出每个目标的逻辑字节数、文件数、可用时的 allocated 字节数和相对路径，并接受多个文件或目录路径以兼容调用层已经展开的通配结果。`ls` 实时枚举目标目录的直接子目录、仅显示目录名并合并持久化 coverage：`ok` 为完整扫描、`new` 为未扫描、`part` 为最近覆盖未完成、`gone` 为索引曾观察到但实时枚举已不存在；它不会据此写入 deleted 状态，枚举失败时整体报错。JSON/CSV 仍可显式选择。
+- 可用命令：`roots`（别名 `df`）、`paths [PATH]`、`du [PATH ...]`、`ls [PATH]`、`largest`、`dupes`，其中路径参数均为可选索引范围。`roots` / `df` 默认以 GNU `df` 风格表格显示 registered namespace 的实时容量，容量不可访问时显示未知。`du` 默认以空格对齐的紧凑汇总表输出每个目标的逻辑字节数、文件数、可用时的 allocated 字节数和相对路径，并接受多个文件或目录路径以兼容调用层已经展开的通配结果。`ls` 实时枚举目标目录的直接子目录、仅显示目录名并合并持久化 coverage：`ok` 为完整扫描、`new` 为未扫描、`part` 为最近覆盖未完成、`gone` 为索引曾观察到但实时枚举已不存在；它不会据此写入 deleted 状态，枚举失败时整体报错。`dupes` 默认按理论节省 logical size 降序显示汇总和缩进的重复组；JSON/CSV 仍可显式选择。
 - 查询命令的后续默认行为调整、GNU 工具兼容边界、产品优先级和推荐参数规划见 [`query-cli-design.md`](query-cli-design.md)；规划内容不应被误写为当前已实现能力。
-- 查询可用 `--format json|csv` 与 `--output PATH` 导出；`flatlas export duplicates` 提供快捷导出。
+- 查询可用 `--format json|csv` 与 `--output PATH` 导出；`flatlas export dupes` 提供快捷导出。
 - `flatlas plan create --root PATH` 生成不可变 `dry_run` hardlink plan。canonical 以字典序最小路径确定；operation 带 size、full digest 与“不执行”的前置条件。MVP 没有 `apply` 命令。
 
 ## 当前代码布局

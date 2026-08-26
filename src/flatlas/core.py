@@ -816,8 +816,23 @@ def duplicate_groups(connection: sqlite3.Connection, *, root_id: int | None = No
     result = []
     for (algorithm, digest, size), paths in grouped.items():
         if len(paths) > 1:
-            result.append({"algorithm": algorithm, "digest": digest.hex(), "logical_size": size, "count": len(paths), "paths": paths})
-    return result
+            result.append({
+                "algorithm": algorithm,
+                "digest": digest.hex(),
+                "logical_size": size,
+                "count": len(paths),
+                "theoretical_savings": size * (len(paths) - 1),
+                "paths": paths,
+            })
+    return sorted(
+        result,
+        key=lambda group: (
+            -group["theoretical_savings"],
+            -group["logical_size"],
+            group["algorithm"],
+            group["digest"],
+        ),
+    )
 
 
 def create_dry_run_plan(connection: sqlite3.Connection, root_id: int) -> str:
