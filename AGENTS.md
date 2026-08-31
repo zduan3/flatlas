@@ -2,9 +2,9 @@
 
 ## 项目定位
 
-File Atlas 是跨平台、持久化且只读的文件系统索引工具。SQLite 保存当前路径状态、扫描 coverage、错误、hash 与 dry-run plan；它不是每次命令都重新遍历目录的即时查重工具。
+File Atlas (flatlas) 是跨平台、持久化且只读的文件系统索引工具。SQLite 保存当前路径状态、扫描 coverage、错误、hash 与 dry-run plan；它不是每次命令都重新遍历目录的即时查重工具。
 
-当前工作范围是纯 Python 3.12 MVP，版本号为 0.1；本项目文档中的“MVP”和“0.1”是同义词。除非用户明确要求并且相关设计已更新，不实现删除、移动、hardlink/reflink/symlink 替换、监听、TUI、Rust/PyO3 或 plan apply。
+当前工作范围是纯 Python 3.12 MVP，版本号为 0.1；本项目文档中的“MVP”和“0.1”是同义词。除非用户明确要求并且相关设计已更新，不实现删除、移动、hardlink/reflink/symlink 替换、监听、TUI、Rust/PyO3 或 plan apply 等后续规划内容。
 
 开始功能修改前，先阅读与任务相关的 `docs/architecture.md`、`docs/database-schema.md`、`docs/mvp-acceptance.md` 和 `docs/mvp-implementation.md`。
 
@@ -63,7 +63,7 @@ File Atlas 是跨平台、持久化且只读的文件系统索引工具。SQLite
 ```
 
 - `type` 只能使用：`feat`（新用户能力）、`fix`（缺陷修复）、`docs`（仅文档）、`test`（仅测试）、`refactor`（不改变外部行为的重构）、`build`（依赖/构建）、`chore`（维护）。
-- `scope` 使用受影响边界的小写名称，例如 `cli`、`config`、`db`、`scan`、`hash`、`query`、`plan`、`docs`；跨多个边界或涉及整库时（例如重构）可省略。
+- `scope` 使用受影响边界的小写名称，例如 `cli`、`config`、`db`、`scan`、`hash`、`query`、`plan`、`docs`；与 `type` 重复、跨多个边界或涉及整库时（例如重构）可省略。
 - 摘要不超过 72 个字符，使用祈使句，说明结果而非实现步骤；可使用中文摘要，type 与 scope 保持英文。
 - 一次提交只包含一个可独立回滚的意图。功能实现、无关格式化和后续重构应拆分；实现所必需的测试、文档和锁文件可与功能同一提交。
 - 影响 schema 时，正文必须说明 migration 版本、向前迁移和数据保留策略；影响扫描 coverage、hash 或计划语义时，正文必须说明安全不变量及对应测试。
