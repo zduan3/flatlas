@@ -2,9 +2,9 @@
 
 跨 Windows/Linux 的持久化、只读文件系统索引工具。当前 MVP 的版本号是 0.1；本文档中的“MVP”和“0.1”是同义词。MVP（0.1）面向不跨文件系统的普通用户目录和归档目录，用于分析空间占用、定位最大文件和发现重复内容候选；扫描结果保存在 SQLite 中，可离线查询和导出，不会修改用户文件。
 
-当前已实现的范围、已验证行为与待补齐项见 [MVP（0.1）实现状态](docs/mvp-implementation.md)。
+本文是面向日常使用的说明；架构、实现状态、验收与后续规划请从 [开发文档导航](docs/README.md) 进入。
 
-## 安装与开发
+## 安装
 
 项目使用 Python 3.12 与 uv：
 
@@ -103,21 +103,6 @@ jdupes -r D:\Archive\Photos\2025
 
 不要把 `flatlas export dupes` 的结果直接管道到删除命令。dry-run plan 也只是候选建议快照；MVP（0.1）没有 `apply`。
 
-## 开发检查
+## 开发文档
 
-```powershell
-uv run pytest -q
-uv run ruff check .
-uv run pyright
-```
-
-## 文档
-
-- [当前 MVP（0.1）实现状态](docs/mvp-implementation.md)
-- [架构与边界](docs/architecture.md)
-- [SQLite 数据库结构草案](docs/database-schema.md)
-- [MVP（0.1）范围与验收标准](docs/mvp-acceptance.md)
-- [阶段路线图](docs/roadmap.md)
-- [查询命令设计](docs/query-cli-design.md)
-- [开发环境与依赖策略](docs/development.md)
-- [维护规则](AGENTS.md)
+架构契约、当前实现记录、验收标准、路线图和调研资料均在[开发文档导航](docs/README.md)中分类；源码开发的环境准备和检查命令见[开发环境与依赖策略](docs/development.md)。

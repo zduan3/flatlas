@@ -1,5 +1,7 @@
 # 扫描中断持久化后续设计
 
+> 状态：后续设计。不纳入当前 MVP（0.1）。
+
 ## 状态
 
 本文记录不纳入 MVP（版本号 0.1）的后续实现参考；“MVP”和“0.1”在项目文档中是同义词。当前 MVP 只展示扫描进度；`KeyboardInterrupt` 仍会回滚整次扫描事务，不承诺保存中断前观察到的路径、metadata 或持久化 `cancelled` 终态。MVP 只要求中断不得造成假删除。内容 hash 不属于 scan，另见 [`lazy-hash-future-design.md`](lazy-hash-future-design.md)。
