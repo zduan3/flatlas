@@ -232,6 +232,35 @@ def test_largest_is_scoped_to_path_and_defaults_to_cwd(tmp_path: Path, monkeypat
     assert [row["path"] for row in json.loads(defaulted.stdout)] == [str(Path("nested") / "large.bin")]
 
 
+def test_largest_defaults_to_ten_and_accepts_short_limit_alias(tmp_path: Path) -> None:
+    database = tmp_path / "index.sqlite"
+    source = tmp_path / "source"
+    source.mkdir()
+    for size in range(1, 13):
+        (source / f"{size:02d}.bin").write_bytes(b"x" * size)
+
+    connection = open_database(database)
+    try:
+        register_namespace(connection, discover_namespace(source))
+        scan_directory(connection, source)
+        assert len(largest_files(connection, scope=source)) == 10
+    finally:
+        connection.close()
+
+    runner = CliRunner()
+    default_result = runner.invoke(app, ["largest", str(source), "--format", "json", "--db", str(database)])
+    assert default_result.exit_code == 0
+    assert [row["logical_size"] for row in json.loads(default_result.stdout)] == list(range(12, 2, -1))
+
+    short_result = runner.invoke(app, ["largest", str(source), "-n", "2", "--format", "json", "--db", str(database)])
+    assert short_result.exit_code == 0
+    assert [row["logical_size"] for row in json.loads(short_result.stdout)] == [12, 11]
+
+    help_result = runner.invoke(app, ["largest", "--help"])
+    assert help_result.exit_code == 0
+    assert "-n" in help_result.stdout
+    assert "--limit" in help_result.stdout
+
 def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch) -> None:
     connection, source = make_connection(tmp_path)
     try:

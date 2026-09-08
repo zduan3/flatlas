@@ -33,7 +33,7 @@
 - `ls [PATH]` 实时列出一层直接条目并合并持久化 coverage 状态：普通文件显示自身 logical size 和 `N=1`，目录显示已知的递归索引 logical size 和文件数，symlink/reparse/其他特殊条目不跟随且统计显示未知。
 - `ls` 的目录大小有意不同于 GNU `ls -l` 的目录对象 `st_size`；表格使用 `LOGICAL(B)` 明确表示文件自身或目录树聚合。`part` / `gone` 可展示最后已知值，但状态必须保留；`new` 目录和任何未知统计显示 `-`，不能伪装成 0。
 - `ls` 回答“一层结构、现场存在性和已知空间提示”；`du` 回答“每个显式 scope 的递归索引汇总”，并可在源目录离线时使用。
-- `largest [PATH]` 查询指定文件或目录 scope 内最大的当前普通文件；PATH 默认为当前目录，按 logical size 降序、路径升序稳定排序。
+- `largest [PATH]` 查询指定文件或目录 scope 内最大的当前普通文件；PATH 默认为当前目录，默认返回 10 项；--limit 与 -n 等价，按 logical size 降序、路径升序稳定排序。
 - MVP（0.1）接受当前 `du` 的单目标汇总能力；按直接子项或深度展开的 `du --depth` 属于后续增强，而不是 MVP 发布阻塞项。
 
 ### 外部删除与索引状态

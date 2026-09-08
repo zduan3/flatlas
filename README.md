@@ -34,7 +34,7 @@ flatlas rm D:\Archive\2026\08
 flatlas dupes D:\Archive
 flatlas du D:\Archive\2026
 flatlas ls D:\Archive\2026
-flatlas largest D:\Archive\2026 --limit 50
+flatlas largest D:\Archive\2026 -n 50
 flatlas export dupes --format csv --output duplicates.csv
 flatlas plan create --root D:\Archive
 ```
@@ -52,7 +52,7 @@ flatlas paths [PATH]
 flatlas rm PATH
 flatlas du [PATH ...] [--format table|json|csv]
 flatlas ls [PATH] [--format table|json|csv]
-flatlas largest [PATH] [--limit N] [--format table|json|csv]
+flatlas largest [PATH] [-n N|--limit N] [--format table|json|csv]
 flatlas dupes [PATH] [--absolute] [--format table|json|csv]
 flatlas export dupes [PATH] [--absolute] --format json|csv --output PATH
 flatlas plan create --root PATH
@@ -69,7 +69,7 @@ flatlas plan show PLAN_ID
 - `du` 默认输出带表头且按列对齐的汇总，包含逻辑字节数、文件数、可用时的实际分配字节数和相对路径；紧凑表头使用 `SIZE(B)`、`N` 和 `ALLOC(B)`。
 - `du` 可同时接受多个文件或目录路径，因此也能处理 shell 或启动器提前展开后的通配结果。
 - 当前 `ls [PATH]` 实时枚举目标目录的直接子目录并合并持久化 scan coverage；MVP（0.1）目标还需增加直接普通文件和特殊条目。目标表格使用 `LOGICAL(B)`：文件显示自身 logical size 和 `N=1`，目录显示已知递归索引 logical size 和文件数；`ok`、`new`、`part`、`gone` 表示统计的覆盖和现场状态。
-- `largest [PATH]` 只查询指定的已索引文件或目录 scope，PATH 默认为当前目录；按 logical size 降序、路径升序稳定排序，路径默认相对于 PATH。
+- `largest [PATH]` 只查询指定的已索引文件或目录 scope，PATH 默认为当前目录；按 logical size 降序、路径升序稳定排序，路径默认相对于 PATH。默认返回 10 项；-n 是 --limit 的短别名。
 - 不删除、移动、hardlink、reflink、symlink 或持续监听文件系统。
 - rm PATH 只从 SQLite 递归移除该路径及其已索引后代，等价于对索引执行 rm -r PATH；它不访问、不验证也不改动实际文件。若子树被 dry-run plan 引用，该计划会一并移除，避免保留失效计划。
 

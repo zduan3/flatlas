@@ -1129,7 +1129,7 @@ def largest_files(
     connection: sqlite3.Connection,
     *,
     scope: Path = Path("."),
-    limit: int = 50,
+    limit: int = 10,
 ) -> list[dict[str, Any]]:
     selected = _scope_row(connection, scope)
     rows = connection.execute(

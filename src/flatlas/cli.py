@@ -499,7 +499,7 @@ def ls_command(
 @app.command("largest")
 def largest(
     path: Annotated[Path, typer.Argument(help="Indexed file or directory scope.")] = Path("."),
-    limit: Annotated[int, typer.Option("--limit", min=1)] = 50,
+    limit: Annotated[int, typer.Option("--limit", "-n", min=1)] = 10,
     format: Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")] = "table",
     output: Annotated[Path | None, typer.Option("--output")] = None,
     db: db_option = None,
