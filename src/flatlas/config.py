@@ -26,7 +26,10 @@ class UserPaths:
 
 
 def user_paths() -> UserPaths:
-    return UserPaths(Path(user_config_dir("flatlas")), Path(user_data_dir("flatlas")))
+    return UserPaths(
+        Path(user_config_dir("flatlas", appauthor=False)),
+        Path(user_data_dir("flatlas", appauthor=False))
+    )
 
 
 def resolve_database(explicit: Path | None = None, *, create: bool = False) -> Path:
