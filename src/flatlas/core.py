@@ -1258,6 +1258,21 @@ def plan_operations(connection: sqlite3.Connection, plan_id: str) -> list[dict[s
     return [dict(row) for row in rows]
 
 
+def list_plans(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return plan summaries without exposing their operation details."""
+    rows = connection.execute(
+        """SELECT plan.id, root.root_path_display, plan.source_scan_id, plan.status,
+        plan.created_at_ns, plan.immutable_at_ns, plan.exported_at_ns, plan.note,
+        COUNT(po.id) AS operation_count,
+        COALESCE(SUM(po.expected_size), 0) AS theoretical_savings
+        FROM plan
+        JOIN root ON root.id=plan.root_id
+        LEFT JOIN plan_operation po ON po.plan_id=plan.id
+        GROUP BY plan.id
+        ORDER BY plan.created_at_ns DESC, plan.id DESC"""
+    ).fetchall()
+    return [dict(row) for row in rows]
+
 def export_rows(rows: Iterable[dict[str, Any]], fmt: str, output: Path | None = None) -> str:
     materialized = list(rows)
     if fmt == "json":

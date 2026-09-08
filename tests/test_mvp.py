@@ -15,6 +15,7 @@ from flatlas.core import (
     ensure_duplicate_hashes,
     largest_files,
     list_child_directories,
+    list_plans,
     open_database,
     plan_operations,
     register_namespace,
@@ -59,6 +60,36 @@ def test_full_scan_detects_duplicates_and_builds_immutable_plan(tmp_path: Path) 
     finally:
         connection.close()
 
+
+def test_plan_show_without_id_lists_summaries_without_operations(tmp_path: Path) -> None:
+    database = tmp_path / "index.sqlite"
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "left.bin").write_bytes(b"same payload")
+    (source / "right.bin").write_bytes(b"same payload")
+    connection = open_database(database)
+    try:
+        register_namespace(connection, discover_namespace(source))
+        scan_directory(connection, source)
+        ensure_duplicate_hashes(connection, source)
+        root_id = connection.execute("SELECT id FROM root").fetchone()["id"]
+        plan_id = create_dry_run_plan(connection, root_id)
+        summaries = list_plans(connection)
+        assert len(summaries) == 1
+        assert summaries[0]["id"] == plan_id
+        assert summaries[0]["operation_count"] == 1
+        assert summaries[0]["theoretical_savings"] == len(b"same payload")
+        assert "canonical_path" not in summaries[0]
+    finally:
+        connection.close()
+
+    result = CliRunner().invoke(app, ["plan", "show", "--db", str(database)])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload[0]["id"] == plan_id
+    assert payload[0]["operation_count"] == 1
+    assert "canonical_path" not in payload[0]
+    assert "replacement_path" not in payload[0]
 
 def test_subtree_scan_can_match_existing_index_and_complete_scope_marks_deletion(tmp_path: Path) -> None:
     connection, source = make_connection(tmp_path)

@@ -27,6 +27,7 @@ from flatlas.core import (
     get_root,
     largest_files,
     list_child_directories,
+    list_plans,
     open_database,
     plan_operations,
     query_paths,
@@ -581,14 +582,15 @@ def plan_create(
 
 @plan_app.command("show")
 def plan_show(
-    plan_id: Annotated[str, typer.Argument()],
+    plan_id: Annotated[str | None, typer.Argument(help="Plan ID to inspect; omit to list plan summaries.")] = None,
     format: Annotated[str, typer.Option("--format")] = "json",
     output: Annotated[Path | None, typer.Option("--output")] = None,
     db: db_option = None,
 ) -> None:
     connection = open_database(_database(db))
     try:
-        _print(plan_operations(connection, plan_id), format, output)
+        rows = plan_operations(connection, plan_id) if plan_id is not None else list_plans(connection)
+        _print(rows, format, output)
     finally:
         connection.close()
 
