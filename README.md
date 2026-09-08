@@ -68,7 +68,7 @@ flatlas plan show PLAN_ID
 - `roots` 及其别名 `df` 默认以 GNU `df` 风格表格显示 registered filesystem 的实时容量；不可访问的容量明确显示为未知。
 - `du` 默认输出带表头且按列对齐的汇总，包含逻辑字节数、文件数、可用时的实际分配字节数和相对路径；紧凑表头使用 `SIZE(B)`、`N` 和 `ALLOC(B)`。
 - `du` 可同时接受多个文件或目录路径，因此也能处理 shell 或启动器提前展开后的通配结果。
-- 当前 `ls [PATH]` 实时枚举目标目录的直接子目录并合并持久化 scan coverage；MVP（0.1）目标还需增加直接普通文件和特殊条目。目标表格使用 `LOGICAL(B)`：文件显示自身 logical size 和 `N=1`，目录显示已知递归索引 logical size 和文件数；`ok`、`new`、`part`、`gone` 表示统计的覆盖和现场状态。
+- `ls [PATH]` 实时枚举目标目录的一层文件、目录和特殊条目，并合并持久化 scan coverage。表格使用 `LOGICAL(B)`：文件显示自身 logical size 和 `N=1`，目录显示已知递归索引 logical size 和文件数；特殊条目的统计为未知；`ok`、`new`、`part`、`gone` 表示统计的覆盖和现场状态。
 - `largest [PATH]` 只查询指定的已索引文件或目录 scope，PATH 默认为当前目录；按 logical size 降序、路径升序稳定排序，路径默认相对于 PATH。默认返回 10 项；-n 是 --limit 的短别名。
 - 不删除、移动、hardlink、reflink、symlink 或持续监听文件系统。
 - rm PATH 只从 SQLite 递归移除该路径及其已索引后代，等价于对索引执行 rm -r PATH；它不访问、不验证也不改动实际文件。若子树被 dry-run plan 引用，该计划会一并移除，避免保留失效计划。

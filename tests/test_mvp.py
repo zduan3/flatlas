@@ -324,7 +324,7 @@ def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch
         assert by_name["complete"]["status"] == "scanned"
         assert by_name["complete"]["logical_size"] == 4
         assert by_name["empty"]["status"] == "missing"
-        assert by_name["empty"]["logical_size"] is None
+        assert by_name["empty"]["logical_size"] == 0
         assert by_name["nested"]["status"] == "incomplete"
         assert by_name["nested"]["files"] == 1
         assert by_name["new"]["status"] == "unscanned"
@@ -388,10 +388,10 @@ def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch
     assert result.exit_code == 0
     lines = result.stdout.splitlines()
     assert "\t" not in result.stdout
-    assert lines[0].split()[:3] == ["S", "SIZE(B)", "N"]
+    assert lines[0].split()[:4] == ["T", "S", "LOGICAL(B)", "N"]
     name_column = lines[0].index("NAME")
     assert {line[name_column:] for line in lines[1:]} == {"complete", "empty", "nested", "new"}
-    assert {line.split()[0] for line in lines[1:]} == {"ok", "new", "part", "gone"}
+    assert {line.split()[1] for line in lines[1:]} == {"ok", "new", "part", "gone"}
 
     help_result = CliRunner().invoke(app, ["ls", "--help"])
     assert help_result.exit_code == 0
@@ -399,7 +399,7 @@ def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch
     assert "new=unscanned" in help_result.stdout
     assert "part=incomplete" in help_result.stdout
     assert "gone=missing" in help_result.stdout
-    assert "SIZE(B)=indexed logical bytes" in help_result.stdout
+    assert "LOGICAL(B)=file bytes or indexed directory bytes" in help_result.stdout
 
 
 def test_scan_reports_file_count_and_logical_size_progress(tmp_path: Path, monkeypatch) -> None:
@@ -594,5 +594,33 @@ def test_lazy_hash_reports_file_changed_after_scan_as_incomplete(tmp_path: Path)
             "SELECT h.state FROM file_hash h JOIN path p ON p.id=h.path_id WHERE p.path_display=?",
             (str(changed),),
         ).fetchone()["state"] == "stale"
+    finally:
+        connection.close()
+
+def test_ls_lists_direct_files_and_preserves_gone_file_metadata(tmp_path: Path) -> None:
+    connection, source = make_connection(tmp_path)
+    try:
+        live = source / "live.bin"
+        gone = source / "gone.bin"
+        live.write_bytes(b"abc")
+        gone.write_bytes(b"gone")
+        scan_directory(connection, source)
+
+        gone.unlink()
+        fresh = source / "fresh.bin"
+        fresh.write_bytes(b"fresh")
+
+        by_name = {row["name"]: row for row in list_child_directories(connection, scope=source)}
+        assert by_name["live.bin"]["entry_kind"] == "file"
+        assert by_name["live.bin"]["status"] == "scanned"
+        assert by_name["live.bin"]["logical_size"] == 3
+        assert by_name["live.bin"]["files"] == 1
+        assert by_name["fresh.bin"]["status"] == "unscanned"
+        assert by_name["fresh.bin"]["logical_size"] == 5
+        assert by_name["fresh.bin"]["files"] == 1
+        assert by_name["gone.bin"]["entry_kind"] == "file"
+        assert by_name["gone.bin"]["status"] == "missing"
+        assert by_name["gone.bin"]["logical_size"] == 4
+        assert by_name["gone.bin"]["files"] == 1
     finally:
         connection.close()

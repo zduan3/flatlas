@@ -62,6 +62,7 @@ def _print_usage(
     include_kind: bool = False,
     include_status: bool = False,
     name_column: bool = False,
+    logical_header: bool = False,
 ) -> None:
     if fmt in {"json", "csv"}:
         _print(rows, fmt, output)
@@ -73,7 +74,7 @@ def _print_usage(
     headers = ["T"] if include_kind else []
     if include_status:
         headers.append("S")
-    headers.extend(["SIZE(B)", "N"])
+    headers.extend(["LOGICAL(B)" if logical_header else "SIZE(B)", "N"])
     if show_allocated:
         headers.append("ALLOC(B)")
     value_column = "name" if name_column else "path"
@@ -480,9 +481,9 @@ def ls_command(
     output: Annotated[Path | None, typer.Option("--output")] = None,
     db: db_option = None,
 ) -> None:
-    """List live child directories. S: ok=scanned, new=unscanned, part=incomplete, gone=missing.
+    """List live direct entries. S: ok=scanned, new=unscanned, part=incomplete, gone=missing.
 
-    SIZE(B)=indexed logical bytes; N=indexed file count; ALLOC(B)=indexed allocated bytes.
+    LOGICAL(B)=file bytes or indexed directory bytes; N=file count; ALLOC(B)=allocated bytes.
     """
     connection = open_database(_database(db))
     try:
@@ -490,7 +491,9 @@ def ls_command(
             list_child_directories(connection, scope=path),
             format,
             output,
+            include_kind=True,
             include_status=True,
+            logical_header=True,
             name_column=True,
         )
     finally:

@@ -976,7 +976,7 @@ def list_child_directories(
         raise FlatlasError(f"filesystem is not registered; run 'flatlas init {scope}' first")
     try:
         with os.scandir(selected_path) as entries:
-            actual_paths = [Path(entry.path) for entry in entries if entry.is_dir(follow_symlinks=False)]
+            actual_paths = [Path(entry.path) for entry in entries]
     except OSError as exc:
         raise FlatlasError(f"cannot list directory {selected_path}: {exc}") from exc
 
@@ -985,8 +985,8 @@ def list_child_directories(
         (root["id"], path_key(namespace, selected_path)),
     ).fetchone()
     indexed_rows = [] if parent is None else connection.execute(
-        """SELECT id, path_key, path_display, state FROM path
-        WHERE parent_path_id=? AND entry_kind='directory'""",
+        """SELECT id, path_key, path_display, entry_kind, state, logical_size, allocated_size
+        FROM path WHERE parent_path_id=? AND state='present'""",
         (parent["id"],),
     ).fetchall()
     indexed_by_path = {_normalized_display(row["path_display"]): row for row in indexed_rows}
@@ -1032,19 +1032,17 @@ def list_child_directories(
         normalized = _normalized_display(str(actual_path))
         actual_keys.add(normalized)
         indexed = indexed_by_path.get(normalized)
+        try:
+            observed = _observation(namespace, actual_path)
+        except OSError as exc:
+            raise FlatlasError(f"cannot inspect directory entry {actual_path}: {exc}") from exc
         status = _directory_scan_status(indexed, path_key(namespace, actual_path), scopes)
         usage = None if indexed is None else usage_by_id.get(indexed["id"])
-        result.append(_directory_status_row(actual_path, status, usage))
+        result.append(_live_child_status_row(observed, status, usage))
 
     for indexed in indexed_rows:
         if _normalized_display(indexed["path_display"]) not in actual_keys:
-            result.append(
-                _directory_status_row(
-                    Path(indexed["path_display"]),
-                    "missing",
-                    None,
-                )
-            )
+            result.append(_gone_child_status_row(indexed, usage_by_id.get(indexed["id"])))
     return sorted(result, key=lambda row: os.path.normcase(str(row["name"])))
 
 
@@ -1071,11 +1069,47 @@ def _directory_status_row(
     usage: sqlite3.Row | None,
 ) -> dict[str, Any]:
     return {
+        "entry_kind": "directory",
         "status": status,
         "files": None if usage is None else usage["files"],
         "logical_size": None if usage is None else usage["logical_size"],
         "allocated_size": None if usage is None else usage["allocated_size"],
         "name": path.name,
+    }
+
+
+def _live_child_status_row(
+    observed: Observation,
+    status: str,
+    usage: sqlite3.Row | None,
+) -> dict[str, Any]:
+    if observed.kind == "directory":
+        return _directory_status_row(observed.path, status, usage)
+    if observed.kind == "file":
+        return {
+            "entry_kind": "file", "status": status, "files": 1,
+            "logical_size": observed.logical_size, "allocated_size": observed.allocated_size,
+            "name": observed.path.name,
+        }
+    return {
+        "entry_kind": observed.kind, "status": status, "files": None,
+        "logical_size": None, "allocated_size": None, "name": observed.path.name,
+    }
+
+
+def _gone_child_status_row(indexed: sqlite3.Row, usage: sqlite3.Row | None) -> dict[str, Any]:
+    kind = str(indexed["entry_kind"])
+    if kind == "directory":
+        return _directory_status_row(Path(indexed["path_display"]), "missing", usage)
+    if kind == "file":
+        return {
+            "entry_kind": "file", "status": "missing", "files": 1,
+            "logical_size": indexed["logical_size"], "allocated_size": indexed["allocated_size"],
+            "name": Path(indexed["path_display"]).name,
+        }
+    return {
+        "entry_kind": kind, "status": "missing", "files": None,
+        "logical_size": None, "allocated_size": None, "name": Path(indexed["path_display"]).name,
     }
 
 
