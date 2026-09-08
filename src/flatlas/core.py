@@ -888,6 +888,55 @@ def _scope_row(connection: sqlite3.Connection, value: Path) -> sqlite3.Row:
     return row
 
 
+def _lexical_absolute_path(value: Path) -> Path:
+    """Make an absolute path without resolving or inspecting the filesystem."""
+    return Path(os.path.abspath(os.path.expanduser(os.fspath(value))))
+
+
+def remove_indexed_subtree(connection: sqlite3.Connection, value: Path) -> dict[str, Any]:
+    """Remove one indexed path and all indexed descendants without touching the filesystem."""
+    display = str(_lexical_absolute_path(value))
+    selected = connection.execute(
+        "SELECT id FROM path WHERE path_display=?",
+        (display,),
+    ).fetchone()
+    if selected is None:
+        raise FlatlasError(f"path is not indexed: {display}")
+
+    path_id = int(selected["id"])
+    plan_ids = [
+        str(row["plan_id"])
+        for row in connection.execute(
+            """WITH RECURSIVE descendants(id) AS (
+                SELECT id FROM path WHERE id=?
+                UNION ALL
+                SELECT p.id FROM path p JOIN descendants d ON p.parent_path_id=d.id
+            )
+            SELECT DISTINCT po.plan_id FROM plan_operation po
+            WHERE po.canonical_path_id IN descendants OR po.replacement_path_id IN descendants""",
+            (path_id,),
+        )
+    ]
+    with connection:
+        if plan_ids:
+            placeholders = ", ".join("?" for _ in plan_ids)
+            connection.execute(f"DELETE FROM plan WHERE id IN ({placeholders})", plan_ids)
+        connection.execute(
+            """WITH RECURSIVE descendants(id) AS (
+                SELECT id FROM path WHERE id=?
+                UNION ALL
+                SELECT p.id FROM path p JOIN descendants d ON p.parent_path_id=d.id
+            )
+            DELETE FROM path WHERE id IN descendants""",
+            (path_id,),
+        )
+        removed_paths = int(connection.execute("SELECT changes()").fetchone()[0])
+    return {
+        "path": display,
+        "paths_removed": removed_paths,
+        "plans_removed": len(plan_ids),
+    }
+
 def query_paths(connection: sqlite3.Connection, *, scope: Path | None = None, limit: int = 500) -> list[dict[str, Any]]:
     if scope is None:
         rows = connection.execute(

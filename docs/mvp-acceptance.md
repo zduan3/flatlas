@@ -45,6 +45,8 @@
 - partial、failed、cancelled、权限错误和 I/O 错误不得确认删除。
 - deleted path 保留在 SQLite，不物理删除；当前状态查询排除它。相同路径重新出现并被扫描时恢复为 `present`，清除删除字段，并按 metadata basis 决定是否将旧 hash 标记为 stale。
 
+- rm PATH 是独立的索引维护命令：不检查 PATH 是否仍存在于文件系统，直接从 SQLite 递归删除该路径与所有已索引后代（包括关联 hash）；实际文件完全不变。若 dry-run plan 引用了其中任一路径，必须删除整个失效 plan 及其 operations。
+
 ### 重复候选与导出
 
 - `dupes [PATH]` 只在指定目录 scope 内，以 `size → quick BLAKE3 → BLAKE3 full hash` 分级发现重复内容候选。

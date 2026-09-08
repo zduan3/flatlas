@@ -27,6 +27,8 @@
 - Windows 的无符号文件身份值在写入 SQLite 前会映射到其有符号 64 位表示，保证同次及后续比较稳定。
 - Windows 的 Python `st_ctime` 不是可靠的 POSIX change time，因此不作为 hash basis；可用的 birth time 仍独立保存和校验。
 
+- flatlas rm PATH 是显式索引维护：递归物理删除 SQLite 中 PATH 的 path/hash 记录，不检查或修改实际文件。引用已移除路径的 dry-run plan 会整体删除，避免破坏其不可变快照。
+
 ### Hash、查询与候选计划
 
 - `scan` 只采集路径与 metadata。`dupes PATH` 才在 PATH 子树内批量选择大于 0 B 的同大小候选，按需执行 size → quick BLAKE3 → full BLAKE3；0 B 文件和目录外文件不会因为本次查询而被读取或显示。

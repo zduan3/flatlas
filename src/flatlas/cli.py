@@ -31,6 +31,7 @@ from flatlas.core import (
     plan_operations,
     query_paths,
     register_namespace,
+    remove_indexed_subtree,
     scan_directory,
 )
 from flatlas.errors import FlatlasError
@@ -439,6 +440,18 @@ def paths_command(
     finally:
         connection.close()
 
+
+@app.command("rm")
+def rm(
+    path: Annotated[Path, typer.Argument(help="Indexed path to remove recursively from the index only.")],
+    db: db_option = None,
+) -> None:
+    """Remove an indexed path subtree; never checks or changes filesystem entries."""
+    connection = open_database(_database(db))
+    try:
+        _print(remove_indexed_subtree(connection, path))
+    finally:
+        connection.close()
 
 @app.command("du")
 def du(

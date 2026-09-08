@@ -18,6 +18,7 @@ from flatlas.core import (
     open_database,
     plan_operations,
     register_namespace,
+    remove_indexed_subtree,
     scan_directory,
 )
 
@@ -79,6 +80,68 @@ def test_subtree_scan_can_match_existing_index_and_complete_scope_marks_deletion
     finally:
         connection.close()
 
+
+def test_rm_recursively_removes_only_indexed_paths_without_touching_files(tmp_path: Path) -> None:
+    database = tmp_path / "index.sqlite"
+    source = tmp_path / "source"
+    target = source / "target"
+    source.mkdir()
+    target.mkdir()
+    nested = target / "nested"
+    nested.mkdir()
+    indexed_file = nested / "indexed.bin"
+    indexed_file.write_bytes(b"payload")
+    retained_file = source / "retained.bin"
+    retained_file.write_bytes(b"retain")
+    absent = source / "already-absent"
+    absent.mkdir()
+    connection = open_database(database)
+    try:
+        register_namespace(connection, discover_namespace(source))
+        scan_directory(connection, source)
+    finally:
+        connection.close()
+
+    result = CliRunner().invoke(app, ["rm", str(target), "--db", str(database)])
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "path": str(target),
+        "paths_removed": 3,
+        "plans_removed": 0,
+    }
+    assert target.is_dir()
+    assert indexed_file.read_bytes() == b"payload"
+    assert retained_file.read_bytes() == b"retain"
+    absent.rmdir()
+    absent_result = CliRunner().invoke(app, ["rm", str(absent), "--db", str(database)])
+    assert absent_result.exit_code == 0
+    assert json.loads(absent_result.stdout)["paths_removed"] == 1
+
+    connection = open_database(database)
+    try:
+        assert connection.execute("SELECT count(*) FROM path WHERE path_display LIKE ?", (f"{target}%",)).fetchone()[0] == 0
+        assert connection.execute("SELECT state FROM path WHERE path_display=?", (str(retained_file),)).fetchone()["state"] == "present"
+    finally:
+        connection.close()
+
+
+def test_rm_discards_dry_run_plans_that_reference_removed_paths(tmp_path: Path) -> None:
+    connection, source = make_connection(tmp_path)
+    target = source / "target"
+    target.mkdir()
+    try:
+        (target / "a.bin").write_bytes(b"same")
+        (source / "b.bin").write_bytes(b"same")
+        scan_directory(connection, source)
+        ensure_duplicate_hashes(connection, source)
+        root_id = connection.execute("SELECT id FROM root").fetchone()["id"]
+        plan_id = create_dry_run_plan(connection, root_id)
+        summary = remove_indexed_subtree(connection, target)
+        assert summary["plans_removed"] == 1
+        assert connection.execute("SELECT count(*) FROM plan WHERE id=?", (plan_id,)).fetchone()[0] == 0
+        assert connection.execute("SELECT count(*) FROM plan_operation WHERE plan_id=?", (plan_id,)).fetchone()[0] == 0
+    finally:
+        connection.close()
 
 def test_du_defaults_to_headered_summary_with_relative_path(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "index.sqlite"

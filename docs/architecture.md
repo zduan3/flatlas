@@ -22,6 +22,7 @@ Python 3.12 MVP 的版本号是 0.1；本文中的“MVP”和“0.1”是同义
 - 目录大小、带 PATH scope 的最大文件、路径与基础重复候选查询。
 - scan 只采集 metadata；`dupes` 在指定范围内以 size、quick hash、BLAKE3 full hash 惰性分级检测重复内容并复用可靠缓存。
 - JSON/CSV 导出，以及可选 dry-run plan 的数据模型与查询。
+- rm PATH 是显式索引维护操作：它仅从 SQLite 递归删除已索引路径及其 hash，不读取、验证或修改实际文件系统；这不构成文件删除能力。
 
 MVP（0.1）的输出用于清理指导，不构成删除授权。实际去重由用户使用 jdupes 对选定目录重新扫描、逐字节验证并显式执行。MVP 明确不包含：文件删除或移动、plan apply、hardlink/reflink/symlink 替换、逐字节复核、inotify/持续监听、TUI、PyO3 和 Rust 实现。
 
