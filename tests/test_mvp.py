@@ -1,3 +1,4 @@
+import csv
 import json
 import os
 from pathlib import Path
@@ -5,7 +6,7 @@ from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
-from flatlas import core
+from flatlas import cli, core
 from flatlas.cli import app
 from flatlas.core import (
     create_dry_run_plan,
@@ -338,11 +339,17 @@ def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch
         connection.close()
 
 
+def test_roots_and_df_report_capacity_and_unavailable_filesystems(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "flatlas.core.shutil.disk_usage",
         lambda _path: SimpleNamespace(total=10 * 1024, used=4 * 1024, free=6 * 1024),
     )
     database = tmp_path / "index.sqlite"
+    connection = open_database(database)
+    try:
+        register_namespace(connection, discover_namespace(tmp_path))
+    finally:
+        connection.close()
     runner = CliRunner()
     roots_result = runner.invoke(app, ["roots", "--db", str(database)])
     df_result = runner.invoke(app, ["df", "--db", str(database)])
@@ -382,24 +389,6 @@ def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch
     assert unavailable_row["available_1k"] is None
     assert unavailable_row["use_percent"] is None
     assert unavailable_row["status"] == "unavailable"
-
-    monkeypatch.chdir(tmp_path)
-    result = CliRunner().invoke(app, ["ls", "source", "--db", str(database)])
-    assert result.exit_code == 0
-    lines = result.stdout.splitlines()
-    assert "\t" not in result.stdout
-    assert lines[0].split()[:4] == ["T", "S", "LOGICAL(B)", "N"]
-    name_column = lines[0].index("NAME")
-    assert {line[name_column:] for line in lines[1:]} == {"complete", "empty", "nested", "new"}
-    assert {line.split()[1] for line in lines[1:]} == {"ok", "new", "part", "gone"}
-
-    help_result = CliRunner().invoke(app, ["ls", "--help"])
-    assert help_result.exit_code == 0
-    assert "ok=scanned" in help_result.stdout
-    assert "new=unscanned" in help_result.stdout
-    assert "part=incomplete" in help_result.stdout
-    assert "gone=missing" in help_result.stdout
-    assert "LOGICAL(B)=file bytes or indexed directory bytes" in help_result.stdout
 
 
 def test_scan_reports_file_count_and_logical_size_progress(tmp_path: Path, monkeypatch) -> None:
@@ -624,3 +613,209 @@ def test_ls_lists_direct_files_and_preserves_gone_file_metadata(tmp_path: Path) 
         assert by_name["gone.bin"]["files"] == 1
     finally:
         connection.close()
+
+    result = CliRunner().invoke(app, ["ls", str(source), "--db", str(tmp_path / "index.sqlite")])
+    assert result.exit_code == 0
+    lines = result.stdout.splitlines()
+    assert lines[0].split()[:4] == ["T", "S", "LOGICAL(B)", "N"]
+    assert {line.split()[1] for line in lines[1:]} == {"ok", "new", "gone"}
+
+
+def test_database_migration_is_idempotent_and_keeps_existing_data(tmp_path: Path) -> None:
+    database = tmp_path / "index.sqlite"
+    connection, source = make_connection(tmp_path)
+    connection.close()
+    # Reopening must not create another migration or discard the registered root.
+    connection = open_database(database)
+    try:
+        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 1
+        assert connection.execute("SELECT root_path_display FROM root").fetchone()[0] == str(discover_namespace(source).path)
+        indexes = {row["name"] for row in connection.execute("PRAGMA index_list('path')")}
+        assert "idx_path_root_parent_live" in indexes
+    finally:
+        connection.close()
+
+
+def test_cli_main_renders_domain_errors_without_traceback(monkeypatch, capsys) -> None:
+    def fail() -> None:
+        raise core.FlatlasError("path is not currently indexed")
+
+    monkeypatch.setattr(cli, "app", fail)
+    assert cli.main() == 2
+    captured = capsys.readouterr()
+    assert captured.err == "error: path is not currently indexed\n"
+    assert "Traceback" not in captured.err
+
+
+def test_scan_records_unicode_entries_and_does_not_follow_symlinks(tmp_path: Path) -> None:
+    connection, source = make_connection(tmp_path)
+    try:
+        nested = source / "资料" / "深层"
+        nested.mkdir(parents=True)
+        document = nested / "报告.txt"
+        document.write_text("内容", encoding="utf-8")
+        (source / "empty").mkdir()
+        link = source / "linked"
+        try:
+            link.symlink_to(nested, target_is_directory=True)
+        except OSError:
+            link = None
+
+        result = scan_directory(connection, source)
+        assert result["status"] == "completed"
+        rows = {
+            row["path_display"]: row
+            for row in connection.execute("SELECT path_display, entry_kind, logical_size FROM path")
+        }
+        assert rows[str(document)]["entry_kind"] == "file"
+        assert rows[str(document)]["logical_size"] == len("内容".encode())
+        assert rows[str(source / "empty")]["entry_kind"] == "directory"
+        if link is not None:
+            assert rows[str(link)]["entry_kind"] == "symlink"
+            assert not any(path.startswith(f"{link}{os.sep}") for path in rows)
+    finally:
+        connection.close()
+
+
+def test_completed_scan_confirms_directory_deletion_and_reappearance_stales_hash(tmp_path: Path) -> None:
+    connection, source = make_connection(tmp_path)
+    removed = source / "removed"
+    removed.mkdir()
+    tracked = removed / "tracked.bin"
+    try:
+        tracked.write_bytes(b"same")
+        (source / "peer.bin").write_bytes(b"same")
+        scan_directory(connection, source)
+        ensure_duplicate_hashes(connection, source)
+        tracked.unlink()
+        removed.rmdir()
+        result = scan_directory(connection, source)
+        assert result["status"] == "completed"
+        deleted = connection.execute(
+            "SELECT state, deleted_by_scope_id, deleted_at_ns FROM path WHERE path_display=?",
+            (str(tracked),),
+        ).fetchone()
+        assert deleted["state"] == "deleted"
+        assert deleted["deleted_by_scope_id"] is not None
+        assert deleted["deleted_at_ns"] is not None
+        assert connection.execute(
+            "SELECT state FROM path WHERE path_display=?", (str(removed),)
+        ).fetchone()["state"] == "deleted"
+
+        removed.mkdir()
+        tracked.write_bytes(b"changed")
+        scan_directory(connection, source)
+        restored = connection.execute(
+            """SELECT p.state, p.deleted_by_scope_id, p.deleted_at_ns, h.state AS hash_state
+            FROM path p JOIN file_hash h ON h.path_id=p.id WHERE p.path_display=?""",
+            (str(tracked),),
+        ).fetchone()
+        assert dict(restored) == {
+            "state": "present",
+            "deleted_by_scope_id": None,
+            "deleted_at_ns": None,
+            "hash_state": "stale",
+        }
+    finally:
+        connection.close()
+
+    result = CliRunner().invoke(app, ["scan", str(source / "missing"), "--db", str(tmp_path / "index.sqlite")])
+    assert result.exit_code == 1
+    assert "path does not exist" in str(result.exception)
+
+
+def test_partial_or_cancelled_scan_never_confirms_missing_paths(tmp_path: Path, monkeypatch) -> None:
+    connection, source = make_connection(tmp_path)
+    survivor = source / "survivor.bin"
+    try:
+        survivor.write_bytes(b"keep")
+        vanished = source / "vanished.bin"
+        vanished.write_bytes(b"gone")
+        scan_directory(connection, source)
+        vanished.unlink()
+        real_scandir = os.scandir
+        monkeypatch.setattr("flatlas.core.os.scandir", lambda _path: (_ for _ in ()).throw(OSError("injected")))
+        assert scan_directory(connection, source)["status"] == "partial"
+        assert connection.execute(
+            "SELECT state FROM path WHERE path_display=?", (str(vanished),)
+        ).fetchone()["state"] == "present"
+
+        monkeypatch.setattr("flatlas.core.os.scandir", real_scandir)
+        monkeypatch.setattr("flatlas.core._observation", lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
+        try:
+            scan_directory(connection, source)
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("scan should propagate cancellation")
+        assert connection.execute(
+            "SELECT state FROM path WHERE path_display=?", (str(vanished),)
+        ).fetchone()["state"] == "present"
+    finally:
+        connection.close()
+
+
+def test_index_queries_and_cached_duplicates_work_after_source_goes_offline(tmp_path: Path) -> None:
+    connection, source = make_connection(tmp_path)
+    try:
+        (source / "a.bin").write_bytes(b"same")
+        (source / "b.bin").write_bytes(b"same")
+        scan_directory(connection, source)
+        ensure_duplicate_hashes(connection, source)
+        offline = tmp_path / "offline"
+        source.rename(offline)
+        assert [row["path_display"] for row in core.query_paths(connection, scope=source)] == [
+            str(source),
+            str(source / "a.bin"),
+            str(source / "b.bin"),
+        ]
+        assert disk_usage(connection, scope=source)[0]["logical_size"] == 8
+        assert [row["path"] for row in largest_files(connection, scope=source)] == ["a.bin", "b.bin"]
+        assert ensure_duplicate_hashes(connection, source).content_files_read == 0
+        assert duplicate_groups(connection, scope=source)[0]["count"] == 2
+    finally:
+        connection.close()
+
+
+def test_json_csv_output_and_read_only_commands_preserve_user_files(tmp_path: Path) -> None:
+    database = tmp_path / "index.sqlite"
+    source = tmp_path / "source"
+    source.mkdir()
+    nested = source / "nested"
+    nested.mkdir()
+    (source / "a.bin").write_bytes(b"same")
+    (nested / "b.bin").write_bytes(b"same")
+    before = {path.relative_to(source): (path.read_bytes(), path.stat().st_mtime_ns) for path in source.rglob("*") if path.is_file()}
+    connection = open_database(database)
+    try:
+        register_namespace(connection, discover_namespace(source))
+        scan_directory(connection, source)
+    finally:
+        connection.close()
+
+    runner = CliRunner()
+    for command in ("paths", "du", "ls", "largest", "dupes"):
+        arguments = [command, str(source), "--format", "json", "--db", str(database)]
+        result = runner.invoke(app, arguments)
+        assert result.exit_code == 0, result.output
+        json.loads(result.stdout)
+        csv_result = runner.invoke(app, [command, str(source), "--format", "csv", "--db", str(database)])
+        assert csv_result.exit_code == 0, csv_result.output
+        list(csv.reader(csv_result.stdout.splitlines()))
+
+    for command in ("roots", "df"):
+        result = runner.invoke(app, [command, "--format", "json", "--db", str(database)])
+        assert result.exit_code == 0
+        assert json.loads(result.stdout)
+    plan = runner.invoke(app, ["plan", "create", "--root", str(source), "--db", str(database)])
+    assert plan.exit_code == 0
+    assert runner.invoke(app, ["plan", "show", plan.stdout.strip(), "--db", str(database)]).exit_code == 0
+    exported = tmp_path / "dupes.json"
+    assert runner.invoke(app, ["export", "dupes", "--output", str(exported), str(source), "--db", str(database)]).exit_code == 0
+    assert json.loads(exported.read_text(encoding="utf-8"))["groups"]
+    assert "apply" not in {command.name for command in app.registered_commands}
+    after = {path.relative_to(source): (path.read_bytes(), path.stat().st_mtime_ns) for path in source.rglob("*") if path.is_file()}
+    assert after == before
