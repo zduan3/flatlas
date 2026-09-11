@@ -2,7 +2,7 @@
 
 > 状态：调研记录。用于说明产品边界与外部工具对照。
 
-本文记录 File Atlas（`flatlas`）与已调研的同类工具的功能边界。当前 MVP 的版本号是 0.1，本文中的“MVP”和“0.1”是同义词。它是产品范围记录，不要求复刻查重工具的命令行参数或交互；基础查询命令另以 GNU 工具作为用户心智模型，详见 [查询命令设计](query-cli-design.md)。
+本文记录 File Atlas（`flatlas`）与已调研的同类工具的功能边界。当前 MVP 的版本号是 0.1，本文中的“MVP”和“0.1”是同义词。它是产品范围记录，不要求复刻查重工具的命令行参数或交互；基础查询命令另以 GNU 工具作为用户心智模型，详见 [0.2 查询命令规划](0.2/query-cli.md)。
 
 调研时间：2026-08-21。
 
@@ -71,5 +71,5 @@ size 相同
 
 - Duplicate Searcher: <https://malich.ru/duplicate_searcher>
 - jdupes manual: <https://manpages.debian.org/unstable/jdupes/jdupes.1.en.html>
-- 本项目架构与边界：[architecture.md](architecture.md)
+- 本项目架构与边界：[0.1/architecture.md](0.1/architecture.md)
 - 本项目路线图：[roadmap.md](roadmap.md)

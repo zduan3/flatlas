@@ -1,10 +1,10 @@
 # 当前 MVP（0.1）实现状态
 
-> 状态：开发记录。描述当前仓库已落地的实现、已验证行为与已知缺口。
+> 状态：冻结实现记录。描述已完成的 MVP（0.1）实现与验证范围。
 
-更新时间：2026-08-26。
+更新时间：2026-09-11。
 
-本文描述仓库中已落地的 Python MVP（版本号 0.1）只读基线；本文中的“MVP”和“0.1”是同义词。本文不替代 [架构与边界](architecture.md)、[数据库结构草案](database-schema.md) 和 [MVP（0.1）验收标准](mvp-acceptance.md)；后三者仍是后续功能的设计约束。MVP 面向不跨文件系统、使用当前平台常规 Unicode 文件名的普通用户目录和归档目录，提供空间清理指导但不执行清理。
+本文描述已完成的 Python MVP（版本号 0.1）只读基线；本文中的“MVP”和“0.1”是同义词。0.1 文档不再承载新功能，后续工作写入 `docs/0.2/`。本文不替代 [架构与边界](architecture.md)、[数据库结构](database-schema.md) 和 [功能范围与验收基线](acceptance.md)。MVP 面向不跨文件系统、使用当前平台常规 Unicode 文件名的普通用户目录和归档目录，提供空间清理指导但不执行清理。
 
 ## 已实现
 
@@ -39,7 +39,7 @@
 - 惰性 hash 分批提交，重复执行 `dupes` 可复用已完成结果；交互式 stderr 显示候选、quick/full 文件数和字节进度。表格和 JSON 会明确报告 changed/error 导致的不完整结果，JSON 的稳定顶层结构为 `{"hash": ..., "groups": [...]}`。
 - 可用命令：`roots`（别名 `df`）、`paths [PATH]`、`du [PATH ...]`、`ls [PATH]`、`largest [PATH]`、`dupes [PATH]`，其中路径参数均为可选索引范围。`roots` / `df` 默认以 GNU `df` 风格表格显示 registered namespace 的实时容量，容量不可访问时显示未知。`du` 默认以空格对齐的紧凑汇总表输出每个目标的逻辑字节数、文件数、可用时的 allocated 字节数和相对路径，并接受多个文件或目录路径以兼容调用层已经展开的通配结果。`largest` 只在指定的已索引文件或目录子树内查询，PATH 默认为当前目录，默认返回 10 项，--limit 与 -n 等价；默认使用与 `du` 相近的紧凑表格，路径相对于 PATH，JSON/CSV 使用相同的相对路径字段。`dupes` 只在指定的已索引目录子树内构成重复组，PATH 默认为当前目录，并按理论节省 logical size 降序显示汇总和缩进路径；路径默认相对于 PATH，`--absolute` 改为绝对路径，JSON/CSV 与 `export dupes` 使用相同显示规则。
 - 当前 `ls` 实时枚举直接文件、目录和特殊条目，并合并持久化 coverage：`ok` 为完整扫描、`new` 为未扫描、`part` 为最近覆盖未完成、`gone` 为索引曾观察到但实时枚举已不存在；它不会据此写入 deleted 状态，枚举失败时整体报错。表头使用 `LOGICAL(B)`：文件显示自身 logical size 和 `N=1`，目录显示递归 indexed logical size，特殊条目为未知；part/gone 在有历史值时保留值和状态。
-- 查询命令的后续默认行为调整、GNU 工具兼容边界、产品优先级和推荐参数规划见 [`query-cli-design.md`](query-cli-design.md)；规划内容不应被误写为当前已实现能力。
+- 查询命令的后续默认行为调整、GNU 工具兼容边界、产品优先级和推荐参数规划见 [0.2 查询命令规划](../0.2/query-cli.md)；规划内容不应被误写为当前已实现能力。
 - 查询可用 `--format json|csv` 与 `--output PATH` 导出；`flatlas export dupes` 提供快捷导出。
 - `flatlas plan create --root PATH` 生成不可变 `dry_run` hardlink plan。canonical 以字典序最小路径确定；operation 带 size、full digest 与“不执行”的前置条件。MVP（0.1）没有 `apply` 命令。
 - `dupes` 和 dry-run plan 都是清理候选与理论 logical savings 报告，不是安全删除或替换授权。实际去重应由 jdupes 对选定目录重新扫描、逐字节验证并由用户显式执行；flatlas 导出结果不应直接接入删除脚本。
@@ -75,6 +75,6 @@ uv run pytest -q
 uv run pyright
 ```
 
-## 尚未完成
+## 完成说明
 
-这不是对 MVP（0.1）验收矩阵“已通过”的声明。MVP 发布前仍需补齐或扩展：文件和目录删除/恢复回归测试、权限/I/O/取消故障注入与无假删除、离线查询、`paths` 和所有 JSON/CSV 格式、只读文件系统快照，以及 Windows/Linux 常规 Unicode 集成语料。`du --depth`、Linux 非 UTF-8、Windows 完整长路径/reparse tag、allocated size 平台校准、复杂过滤、历史 snapshot、监听、并发/Rust 后端和任何修改文件系统的执行器已经明确后置，不阻塞 MVP（0.1）。中断扫描的增量 checkpoint 与部分结果持久化见 [`scan-interruption-design.md`](scan-interruption-design.md)；惰性 hash 的并发、审计、强制重算、过滤和物理节省量等后续设计见 [`lazy-hash-future-design.md`](lazy-hash-future-design.md)。
+0.1 功能阶段已经完成。本版本明确不包含 `du --depth`、Linux 非 UTF-8、Windows 完整长路径/reparse tag、allocated size 平台校准、复杂过滤、历史 snapshot、监听、并发/Rust 后端或任何修改文件系统的执行器；这些能力按优先级在 0.2 及后续版本规划。扫描中断的增量 checkpoint 与部分结果持久化见 [0.2 扫描中断规划](../0.2/scan-interruption.md)；惰性 hash 的并发、审计、强制重算、过滤和物理节省量见 [0.2 惰性 Hash 规划](../0.2/lazy-hash.md)。

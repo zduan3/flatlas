@@ -6,7 +6,7 @@
 
 ## 索引与历史
 
-- 0.1 只维护当前状态、扫描 coverage/error 审计与 plan/operation 记录；不保存可查询的 immutable scan snapshot。是否在后续版本引入 snapshot，取决于保留策略与数据库增长评估。详见 [数据库结构草案](database-schema.md)。
+- 0.1 只维护当前状态、扫描 coverage/error 审计与 plan/operation 记录；不保存可查询的 immutable scan snapshot。是否在后续版本引入 snapshot，取决于保留策略与数据库增长评估。详见 [0.1 数据库结构](0.1/database-schema.md)。
 - object observation 如何区分 inode 复用？哪些 `stat` 字段在各平台可用？0.1 不将 `(device, inode)` 当作跨历史永久 ID；复用 hash 时同时核验身份、size、mtime 与全部可用且可靠的 change/birth 时间。
 - 0.1 的目录聚合统计动态计算；如基准测试证明需要，再在后续版本维护可失效的增量缓存。
 

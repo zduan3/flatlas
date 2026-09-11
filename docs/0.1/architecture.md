@@ -70,7 +70,7 @@ hash 复用在两个平台均采取保守规则：仅在当前文件身份、siz
 
 `ls`、`du` 与 `df` 的后续交互设计以 GNU Coreutils 为心智模型：`flatlas ls` 的目标默认接近 `ls -Al` 的一层条目列表，但为清理指导将文件自身 logical size 与目录递归 indexed logical size 统一放在 `LOGICAL(B)` 列；`flatlas du` 默认接近 `du -s` 的显式 scope 汇总；`flatlas roots` 与别名 `df` 使用 GNU `df` 风格容量表，但默认只列 registered namespace。兼容不得牺牲持久化 coverage、离线查询、跨平台字段真实性或“只有 completed scope 才能持久化删除”的不变量。
 
-具体默认行为、与 GNU 的差异、空间回收主线、参数优先级和迁移计划见 [`query-cli-design.md`](query-cli-design.md)。
+0.2 的默认行为演进、与 GNU 的差异、空间回收主线、参数优先级和迁移计划见 [查询命令规划](../0.2/query-cli.md)。
 
 ## 后续 Rust 边界
 
