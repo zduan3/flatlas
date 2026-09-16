@@ -37,9 +37,26 @@ from flatlas.core import (
     scan_directory,
 )
 from flatlas.errors import FlatlasError
+from flatlas.version import current_version
 
 app = typer.Typer(help="Persistent, read-only filesystem indexing and duplicate analysis.", no_args_is_help=True)
 db_option = Annotated[Path | None, typer.Option("--db", help="Override the global index database for this command.")]
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(current_version().render())
+        raise typer.Exit()
+
+
+@app.callback()
+def app_callback(
+    version: Annotated[
+        bool,
+        typer.Option("--version", callback=_version_callback, is_eager=True, help="Show the current version and exit."),
+    ] = False,
+) -> None:
+    """Configure top-level flatlas options."""
 
 
 def _database(explicit: Path | None, *, create: bool = False) -> Path:

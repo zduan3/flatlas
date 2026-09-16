@@ -23,6 +23,7 @@ from flatlas.core import (
     remove_indexed_subtree,
     scan_directory,
 )
+from flatlas.version import VersionInfo
 
 
 def make_connection(tmp_path: Path):
@@ -31,6 +32,18 @@ def make_connection(tmp_path: Path):
     connection = open_database(tmp_path / "index.sqlite")
     register_namespace(connection, discover_namespace(source))
     return connection, source
+
+
+def test_version_reports_commit_and_date_without_database(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "current_version",
+        lambda: VersionInfo(version="0.2.0", commit="b1f9a4ff8e34", commit_date="2026-09-16", dirty=True),
+    )
+    result = CliRunner().invoke(app, ["--version"])
+
+    assert result.exit_code == 0
+    assert result.stdout == "flatlas 0.2.0 (b1f9a4ff8e34, 2026-09-16, dirty)\n"
 
 
 def test_init_registration_does_not_scan_and_roots_has_df_alias(tmp_path: Path, monkeypatch) -> None:

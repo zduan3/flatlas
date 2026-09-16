@@ -46,6 +46,7 @@ flatlas plan create --root D:\Archive
 ## 当前 CLI
 
 ```text
+flatlas --version
 flatlas init [PATH]
 flatlas roots
 flatlas df
@@ -60,6 +61,8 @@ flatlas export dupes [PATH] [--absolute] --format json|csv --output PATH
 flatlas plan create --root PATH
 flatlas plan show PLAN_ID
 ```
+
+在源码仓库或 editable 安装中，`flatlas --version` 同时显示当前 Git 提交、提交日期以及工作区是否为 `dirty`；无法访问 Git 元数据的安装包回退为只显示包版本。
 
 ## 当前已实现的 MVP（0.1）安全边界
 
