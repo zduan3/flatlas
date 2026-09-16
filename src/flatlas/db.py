@@ -1,0 +1,147 @@
+"""SQLite connection and schema migration support."""
+
+from __future__ import annotations
+
+import sqlite3
+import time
+from pathlib import Path
+
+SCHEMA_VERSION = 1
+
+DDL = """
+CREATE TABLE IF NOT EXISTS schema_migration (
+    version INTEGER PRIMARY KEY, applied_at_ns INTEGER NOT NULL, description TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS root (
+    id INTEGER PRIMARY KEY,
+    root_path_raw BLOB NOT NULL UNIQUE,
+    root_path_display TEXT NOT NULL,
+    platform TEXT NOT NULL CHECK (platform IN ('windows', 'linux', 'macos')),
+    namespace_kind TEXT NOT NULL CHECK (namespace_kind IN ('windows_volume', 'posix_mount', 'path_anchor')),
+    namespace_id_raw BLOB,
+    filesystem_type TEXT,
+    case_sensitive INTEGER CHECK (case_sensitive IN (0, 1)),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    config_json TEXT NOT NULL DEFAULT '{}',
+    created_at_ns INTEGER NOT NULL,
+    updated_at_ns INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS scan (
+    id INTEGER PRIMARY KEY,
+    root_id INTEGER NOT NULL REFERENCES root(id),
+    kind TEXT NOT NULL CHECK (kind IN ('full', 'subtree')),
+    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'partial', 'failed', 'cancelled')),
+    started_at_ns INTEGER NOT NULL, finished_at_ns INTEGER,
+    scanner_version TEXT NOT NULL,
+    files_seen INTEGER NOT NULL DEFAULT 0, dirs_seen INTEGER NOT NULL DEFAULT 0,
+    errors_seen INTEGER NOT NULL DEFAULT 0, note TEXT
+);
+CREATE TABLE IF NOT EXISTS scan_scope (
+    id INTEGER PRIMARY KEY,
+    scan_id INTEGER NOT NULL REFERENCES scan(id) ON DELETE CASCADE,
+    root_id INTEGER NOT NULL REFERENCES root(id),
+    scope_path_key BLOB NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'partial', 'failed', 'cancelled')),
+    started_at_ns INTEGER NOT NULL, finished_at_ns INTEGER,
+    paths_seen INTEGER NOT NULL DEFAULT 0, error_count INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(scan_id, scope_path_key)
+);
+CREATE TABLE IF NOT EXISTS path (
+    id INTEGER PRIMARY KEY,
+    root_id INTEGER NOT NULL REFERENCES root(id),
+    parent_path_id INTEGER REFERENCES path(id),
+    path_key BLOB NOT NULL, name_raw BLOB NOT NULL, path_display TEXT NOT NULL,
+    entry_kind TEXT NOT NULL CHECK (entry_kind IN ('root', 'directory', 'file', 'symlink', 'reparse', 'other')),
+    state TEXT NOT NULL CHECK (state IN ('present', 'deleted')),
+    device INTEGER, inode INTEGER, object_id_raw BLOB, mode INTEGER, uid INTEGER, gid INTEGER,
+    nlink INTEGER, logical_size INTEGER, allocated_size INTEGER, mtime_ns INTEGER,
+    change_time_ns INTEGER, birth_time_ns INTEGER, symlink_target_raw BLOB, reparse_tag INTEGER,
+    first_seen_scan_id INTEGER NOT NULL REFERENCES scan(id),
+    last_seen_scan_id INTEGER NOT NULL REFERENCES scan(id),
+    deleted_by_scope_id INTEGER REFERENCES scan_scope(id), deleted_at_ns INTEGER,
+    UNIQUE(root_id, path_key),
+    CHECK ((entry_kind = 'file' AND logical_size IS NOT NULL) OR entry_kind <> 'file')
+);
+CREATE TABLE IF NOT EXISTS scan_error (
+    id INTEGER PRIMARY KEY,
+    scan_scope_id INTEGER NOT NULL REFERENCES scan_scope(id) ON DELETE CASCADE,
+    path_key BLOB NOT NULL,
+    operation TEXT NOT NULL CHECK (operation IN ('enumerate', 'stat', 'readlink', 'hash_quick', 'hash_full')),
+    error_code TEXT, message TEXT NOT NULL, occurred_at_ns INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS file_hash (
+    path_id INTEGER PRIMARY KEY REFERENCES path(id) ON DELETE CASCADE,
+    state TEXT NOT NULL CHECK (state IN ('missing', 'quick_ready', 'full_ready', 'failed', 'stale')),
+    quick_algorithm TEXT, quick_digest BLOB, quick_sample_bytes INTEGER,
+    full_algorithm TEXT, full_digest BLOB,
+    full_verification TEXT CHECK (full_verification IN ('hash_only', 'byte_compare')),
+    basis_device INTEGER, basis_inode INTEGER, basis_size INTEGER, basis_mtime_ns INTEGER,
+    basis_change_time_ns INTEGER, basis_birth_time_ns INTEGER,
+    last_hashed_scan_id INTEGER REFERENCES scan(id), error_message TEXT,
+    CHECK ((state = 'missing' AND quick_digest IS NULL AND full_digest IS NULL) OR state <> 'missing'),
+    CHECK (full_digest IS NULL OR (full_algorithm IS NOT NULL AND basis_size IS NOT NULL))
+);
+CREATE TABLE IF NOT EXISTS plan (
+    id TEXT PRIMARY KEY, root_id INTEGER NOT NULL REFERENCES root(id),
+    source_scan_id INTEGER REFERENCES scan(id),
+    status TEXT NOT NULL CHECK (status IN ('draft', 'dry_run', 'superseded', 'applied', 'partially_applied', 'failed')),
+    policy_json TEXT NOT NULL, created_at_ns INTEGER NOT NULL, immutable_at_ns INTEGER,
+    exported_at_ns INTEGER, note TEXT
+);
+CREATE TABLE IF NOT EXISTS plan_operation (
+    id INTEGER PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES plan(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('hardlink', 'reflink', 'delete')),
+    canonical_path_id INTEGER NOT NULL REFERENCES path(id),
+    replacement_path_id INTEGER NOT NULL REFERENCES path(id),
+    expected_size INTEGER NOT NULL, expected_full_digest BLOB NOT NULL,
+    expected_algorithm TEXT NOT NULL, preconditions_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('planned', 'skipped', 'applied', 'failed')),
+    result_json TEXT, UNIQUE(plan_id, ordinal), UNIQUE(plan_id, replacement_path_id),
+    CHECK(canonical_path_id <> replacement_path_id)
+);
+CREATE INDEX IF NOT EXISTS idx_scan_root_started ON scan(root_id, started_at_ns DESC);
+CREATE INDEX IF NOT EXISTS idx_scope_scan_status ON scan_scope(scan_id, status);
+CREATE INDEX IF NOT EXISTS idx_path_root_parent_live ON path(root_id, parent_path_id, state);
+CREATE INDEX IF NOT EXISTS idx_path_root_kind_size_live ON path(root_id, entry_kind, logical_size)
+    WHERE state = 'present' AND entry_kind = 'file';
+CREATE INDEX IF NOT EXISTS idx_hash_quick ON file_hash(quick_algorithm, quick_digest)
+    WHERE state IN ('quick_ready', 'full_ready');
+CREATE INDEX IF NOT EXISTS idx_hash_full ON file_hash(full_algorithm, full_digest)
+    WHERE state = 'full_ready';
+CREATE INDEX IF NOT EXISTS idx_plan_root_created ON plan(root_id, created_at_ns DESC);
+"""
+
+
+def _last_insert_id(cursor: sqlite3.Cursor) -> int:
+    value = cursor.lastrowid
+    if value is None:
+        raise RuntimeError("SQLite insert did not return a row id")
+    return int(value)
+
+
+def now_ns() -> int:
+    return time.time_ns()
+
+
+def open_database(location: Path) -> sqlite3.Connection:
+    location.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(location)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("PRAGMA busy_timeout = 5000")
+    migrate(connection)
+    return connection
+
+
+def migrate(connection: sqlite3.Connection) -> None:
+    connection.execute("PRAGMA application_id = 1179402580")
+    connection.executescript(DDL)
+    exists = connection.execute("SELECT 1 FROM schema_migration WHERE version = ?", (SCHEMA_VERSION,)).fetchone()
+    if exists is None:
+        connection.execute(
+            "INSERT INTO schema_migration(version, applied_at_ns, description) VALUES (?, ?, ?)",
+            (SCHEMA_VERSION, now_ns(), "initial persistent index schema"),
+        )
+    connection.commit()

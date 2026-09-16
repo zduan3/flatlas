@@ -6,6 +6,8 @@ File Atlas 当前开发版本为 0.2.0。0.1 是已完成并冻结的只读 MVP 
 
 当前已实现的 0.2 阶段元数据能力：`flatlas --version` 输出正在运行的包版本；可访问源码仓库时附加 Git 提交、提交日期和 dirty 状态，否则回退为纯包版本。该命令无需初始化或打开索引数据库。
 
+当前 Python core 已按职责拆分：`db.py` 管理 schema 与连接，`paths.py` 管理 namespace 和路径身份，`scanning.py` 负责 metadata 扫描，`hashing.py` 负责惰性 hash，`queries.py` 提供只读查询，`planning.py` 保存 dry-run plan，`output.py` 负责稳定导出。`core.py` 仅保留兼容性 re-export 与既有故障注入入口；该拆分不改变 0.1 数据库或 CLI 语义。
+
 ## 计划能力摘要
 
 ### 空间与重复候选查询
