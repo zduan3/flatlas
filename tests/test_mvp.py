@@ -395,8 +395,11 @@ def test_scan_reports_file_count_and_logical_size_progress(tmp_path: Path, monke
     database = tmp_path / "index.sqlite"
     source = tmp_path / "source"
     source.mkdir()
+    nested = source / "nested" / "deeper"
+    nested.mkdir(parents=True)
     (source / "one.bin").write_bytes(b"a")
     (source / "two.bin").write_bytes(b"bc")
+    (nested / "three.bin").write_bytes(b"def")
     connection = open_database(database)
     try:
         register_namespace(connection, discover_namespace(source))
@@ -407,11 +410,44 @@ def test_scan_reports_file_count_and_logical_size_progress(tmp_path: Path, monke
     result = CliRunner().invoke(app, ["scan", str(source), "--db", str(database)])
     assert result.exit_code == 0
     summary = json.loads(result.stdout)
-    assert summary["files_seen"] == 2
-    assert summary["dirs_seen"] == 1
-    assert summary["logical_bytes_seen"] == 3
-    assert "Scanning: 0 files · 1 directory · 0 B" in result.stderr
-    assert "Completed: 2 files · 1 directory · 3 B" in result.stderr
+    assert summary["files_seen"] == 3
+    assert summary["dirs_seen"] == 3
+    assert summary["logical_bytes_seen"] == 6
+    assert "Scanning: 0 files · 1 dirs · 0 B · ." in result.stderr
+    assert str(source.resolve()) not in result.stderr
+    assert "Completed: 3 files · 3 dirs · 6 B" in result.stderr
+
+
+def test_scan_progress_truncates_long_directory_prefix_by_display_width(monkeypatch) -> None:
+    output: list[str] = []
+    monkeypatch.setattr(cli.shutil, "get_terminal_size", lambda fallback: os.terminal_size((40, 24)))
+    monkeypatch.setattr(cli.typer, "echo", lambda message="", **_kwargs: output.append(message))
+
+    display = cli._ScanProgressDisplay(enabled=True, interval=0)
+    display.update(core.ScanProgress("scanning", 0, 1, 0, "目录" * 20))
+
+    assert len(output) == 1
+    assert output[0].startswith("\r\x1b[2KScanning: 0 files · 1 dirs · 0 B · 目")
+    line = output[0].removeprefix("\r\x1b[2K")
+    assert line.endswith("…")
+    assert cli._display_width(line) <= 39
+
+
+def test_scan_progress_uses_current_directory_on_timed_refresh(monkeypatch) -> None:
+    output: list[str] = []
+    times = iter((1.0, 1.01, 1.11))
+    monkeypatch.setattr(cli.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(cli.typer, "echo", lambda message="", **_kwargs: output.append(message))
+
+    display = cli._ScanProgressDisplay(enabled=True, interval=0.1)
+    display.update(core.ScanProgress("scanning", 0, 1, 0, "."))
+    display.update(core.ScanProgress("scanning", 0, 2, 0, "first"))
+    display.update(core.ScanProgress("scanning", 0, 3, 0, "second"))
+
+    assert len(output) == 2
+    assert output[0].endswith(" · .")
+    assert "first" not in "".join(output)
+    assert output[1].endswith(" · second")
 
 
 def test_dupes_scopes_grouped_output_to_path_and_defaults_to_cwd(tmp_path: Path, monkeypatch) -> None:

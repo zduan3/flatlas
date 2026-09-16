@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import time
 import unicodedata
@@ -141,6 +142,35 @@ def _display_width(value: str) -> int:
     )
 
 
+def _truncate_display(value: str, max_width: int) -> str:
+    if max_width <= 0:
+        return ""
+    if _display_width(value) <= max_width:
+        return value
+
+    ellipsis = "…"
+    prefix_width = max_width - _display_width(ellipsis)
+    if prefix_width < 0:
+        return ""
+
+    used_width = 0
+    prefix: list[str] = []
+    for character in value:
+        character_width = _display_width(character)
+        if used_width + character_width > prefix_width:
+            break
+        prefix.append(character)
+        used_width += character_width
+    return f"{''.join(prefix)}{ellipsis}"
+
+
+def _terminal_columns() -> int:
+    try:
+        return os.get_terminal_size(sys.stderr.fileno()).columns
+    except (AttributeError, OSError, ValueError):
+        return shutil.get_terminal_size(fallback=(80, 24)).columns
+
+
 def _pad_display(value: str, width: int, *, right: bool) -> str:
     padding = " " * (width - _display_width(value))
     return f"{padding}{value}" if right else f"{value}{padding}"
@@ -173,7 +203,10 @@ def _format_iec_size(size: int) -> str:
 
 
 def _counted(count: int, noun: str) -> str:
-    return f"{count} {noun}{'' if count == 1 else 's'}"
+    if count == 1:
+        return f"{count} {noun}"
+    plural = f"{noun[:-1]}ies" if noun.endswith("y") else f"{noun}s"
+    return f"{count} {plural}"
 
 
 class _ScanProgressDisplay:
@@ -197,11 +230,19 @@ class _ScanProgressDisplay:
         }[progress.phase]
         line = (
             f"{phase}: {_counted(progress.files_seen, 'file')} · "
-            f"{_counted(progress.dirs_seen, 'directory')} · "
+            f"{progress.dirs_seen} dirs · "
             f"{_format_iec_size(progress.logical_bytes_seen)}"
         )
-        typer.echo(f"\r{line.ljust(self.width)}", err=True, nl=False)
-        self.width = max(self.width, len(line))
+        if progress.current_directory is not None:
+            separator = " · "
+            terminal_width = _terminal_columns()
+            line_width = max(terminal_width - 1, 0)
+            directory_width = max(line_width - _display_width(line) - _display_width(separator), 0)
+            if directory_width:
+                line += separator + _truncate_display(progress.current_directory, directory_width)
+            line = _truncate_display(line, line_width)
+        typer.echo(f"\r\x1b[2K{line}", err=True, nl=False)
+        self.width = max(self.width, _display_width(line))
         self.last_phase = progress.phase
         self.last_update = current
 

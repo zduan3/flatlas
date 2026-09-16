@@ -163,6 +163,7 @@ class ScanProgress:
     files_seen: int
     dirs_seen: int
     logical_bytes_seen: int
+    current_directory: str | None = None
 
 
 @dataclass(frozen=True)
@@ -813,12 +814,19 @@ def scan_directory(
         logical_bytes_seen = 0
         failed = False
 
-        def report(phase: str) -> None:
+        def report(phase: str, directory: Path | None = None) -> None:
             if on_progress is not None:
-                on_progress(ScanProgress(phase, files_seen, dirs_seen, logical_bytes_seen))
+                current_directory = None
+                if directory is not None:
+                    relative_directory = directory.relative_to(scope)
+                    current_directory = str(relative_directory) if relative_directory.parts else "."
+                on_progress(
+                    ScanProgress(phase, files_seen, dirs_seen, logical_bytes_seen, current_directory)
+                )
 
         def visit(directory: Path) -> None:
             nonlocal files_seen, dirs_seen, logical_bytes_seen, failed
+            report("scanning", directory)
             try:
                 entries = list(os.scandir(directory))
             except OSError as exc:
@@ -836,15 +844,13 @@ def scan_directory(
                 upsert_path(connection, root_id, scan_id, observed)
                 if observed.kind == "directory":
                     dirs_seen += 1
-                    report("scanning")
                     visit(entry_path)
                 elif observed.kind == "file":
                     files_seen += 1
                     logical_bytes_seen += observed.logical_size or 0
-                    report("scanning")
+                    report("scanning", directory)
 
         try:
-            report("scanning")
             visit(scope)
             scope_status = "partial" if failed else "completed"
             connection.execute(
