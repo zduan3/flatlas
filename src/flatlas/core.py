@@ -21,7 +21,7 @@ from blake3 import blake3
 from flatlas.errors import FlatlasError
 
 SCHEMA_VERSION = 1
-SCANNER_VERSION = "flatlas-python-0.1"
+SCANNER_VERSION = "flatlas-python-0.2"
 QUICK_SAMPLE_BYTES = 64 * 1024
 
 DDL = """
