@@ -32,6 +32,7 @@ from flatlas.core import (
     largest_files,
     list_child_directories,
     list_plans,
+    list_scans,
     open_database,
     plan_operations,
     query_paths,
@@ -39,6 +40,7 @@ from flatlas.core import (
     remove_indexed_subtree,
     resume_selection,
     scan_directory,
+    scan_info,
 )
 from flatlas.errors import FlatlasError
 from flatlas.version import current_version
@@ -309,6 +311,33 @@ def _format_iec_size(size: int) -> str:
     if unit == "B":
         return f"{size} B"
     return f"{value:.2f}".rstrip("0").rstrip(".") + f" {unit}"
+
+
+def _format_timestamp_ns(value: int | None) -> str:
+    if value is None:
+        return "-"
+    return datetime.fromtimestamp(value / 1_000_000_000).astimezone().isoformat(timespec="seconds")
+
+
+def _print_scans(rows: list[dict[str, Any]], fmt: str) -> None:
+    if fmt != "table":
+        _print(rows, fmt)
+        return
+    headers = ["ID", "STATUS", "STARTED", "FINISHED", "FILES", "DIRS", "ERRORS", "SCOPE"]
+    values = [
+        [
+            str(row["scan_id"]),
+            str(row["status"]),
+            _format_timestamp_ns(row["started_at_ns"]),
+            _format_timestamp_ns(row["finished_at_ns"]),
+            str(row["files_seen"]),
+            str(row["dirs_seen"]),
+            str(row["errors_seen"]),
+            str(row["scope"] or f"key:{row['scope_path_key_hex']}"),
+        ]
+        for row in rows
+    ]
+    typer.echo(_render_table(headers, values, {0, 4, 5, 6}), nl=False)
 
 
 def _counted(count: int, noun: str) -> str:
@@ -592,6 +621,38 @@ def scan(
         result = scan_directory(connection, path, refresh_before_ns=cutoff, on_progress=progress.update)
     finally:
         progress.close()
+        connection.close()
+    _print(result)
+
+
+@app.command("scans")
+def scans_command(
+    path: Annotated[Path | None, typer.Argument(help="Optional path whose related scan scopes are listed.")] = None,
+    limit: Annotated[int, typer.Option("--limit", min=1)] = 50,
+    format: Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")] = "table",
+    db: db_option = None,
+) -> None:
+    """List scan and scope audit records without accessing file contents."""
+    if format not in {"table", "json", "csv"}:
+        raise FlatlasError("format must be table, json or csv")
+    connection = _open_database(_database(db))
+    try:
+        rows = list_scans(connection, scope=path, limit=limit)
+    finally:
+        connection.close()
+    _print_scans(rows, format)
+
+
+@app.command("scan-info")
+def scan_info_command(
+    scan_id: Annotated[int, typer.Argument(min=1, help="Scan ID to inspect.")],
+    db: db_option = None,
+) -> None:
+    """Show one scan with its scopes and recorded errors as JSON."""
+    connection = _open_database(_database(db))
+    try:
+        result = scan_info(connection, scan_id)
+    finally:
         connection.close()
     _print(result)
 

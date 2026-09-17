@@ -17,12 +17,14 @@ from flatlas.core import (
     largest_files,
     list_child_directories,
     list_plans,
+    list_scans,
     open_database,
     plan_operations,
     register_namespace,
     remove_indexed_subtree,
     resume_selection,
     scan_directory,
+    scan_info,
 )
 from flatlas.summaries import refresh_directory_summaries
 from flatlas.version import VersionInfo
@@ -1340,6 +1342,87 @@ def test_cli_rejects_resume_with_refresh_before(tmp_path: Path) -> None:
 
     assert result.exit_code == 2
     assert "--resume cannot be combined with --refresh-before" in result.output
+
+
+def test_scan_audit_queries_filter_scopes_and_include_errors(tmp_path: Path, monkeypatch) -> None:
+    connection, source = make_connection(tmp_path)
+    first = source / "first"
+    second = source / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "first.bin").write_bytes(b"first")
+    (second / "second.bin").write_bytes(b"second")
+    real_scandir = os.scandir
+    try:
+        root_scan = scan_directory(connection, source)
+        first_scan = scan_directory(connection, first)
+
+        def fail_second(path):
+            if Path(path) == second:
+                raise PermissionError("injected scan audit failure")
+            return real_scandir(path)
+
+        monkeypatch.setattr("flatlas.core.os.scandir", fail_second)
+        second_scan = scan_directory(connection, second)
+        monkeypatch.setattr("flatlas.core.os.scandir", real_scandir)
+
+        rows = list_scans(connection, scope=second, limit=20)
+        assert [row["scan_id"] for row in rows] == [second_scan["scan_id"], root_scan["scan_id"]]
+        assert first_scan["scan_id"] not in {row["scan_id"] for row in rows}
+        assert rows[0]["status"] == "partial"
+        assert rows[0]["scope"] == str(second)
+        assert rows[0]["error_count"] == 1
+
+        details = scan_info(connection, second_scan["scan_id"])
+        assert details["status"] == "partial"
+        assert details["scopes"][0]["scope"] == str(second)
+        assert details["scopes"][0]["error_count"] == 1
+        assert details["errors"][0]["operation"] == "enumerate"
+        assert details["errors"][0]["message"] == "injected scan audit failure"
+        assert details["errors"][0]["path"] == str(second)
+
+        offline = source.with_name("source-offline")
+        source.rename(offline)
+        assert [row["scan_id"] for row in list_scans(connection, scope=second, limit=20)] == [
+            second_scan["scan_id"], root_scan["scan_id"],
+        ]
+    finally:
+        connection.close()
+
+
+def test_scan_audit_cli_outputs_table_and_json(tmp_path: Path) -> None:
+    database = tmp_path / "index.sqlite"
+    connection, source = make_connection(tmp_path)
+    try:
+        result = scan_directory(connection, source)
+    finally:
+        connection.close()
+
+    runner = CliRunner()
+    scans_result = runner.invoke(app, ["scans", str(source), "--db", str(database)])
+    assert scans_result.exit_code == 0
+    assert scans_result.stdout.splitlines()[0].split() == [
+        "ID", "STATUS", "STARTED", "FINISHED", "FILES", "DIRS", "ERRORS", "SCOPE",
+    ]
+    assert str(result["scan_id"]) in scans_result.stdout
+    assert str(source) in scans_result.stdout
+
+    json_result = runner.invoke(
+        app,
+        ["scans", str(source), "--format", "json", "--db", str(database)],
+    )
+    assert json_result.exit_code == 0
+    assert json.loads(json_result.stdout)[0]["scan_id"] == result["scan_id"]
+
+    info_result = runner.invoke(
+        app,
+        ["scan-info", str(result["scan_id"]), "--db", str(database)],
+    )
+    assert info_result.exit_code == 0
+    details = json.loads(info_result.stdout)
+    assert details["scan_id"] == result["scan_id"]
+    assert details["scopes"][0]["scope"] == str(source)
+    assert details["errors"] == []
 
 
 def test_second_interrupt_during_cancel_save_rolls_back_scan(tmp_path: Path) -> None:

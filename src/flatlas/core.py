@@ -43,7 +43,9 @@ from flatlas.queries import (
     largest_files,
     list_child_directories,
     list_roots,
+    list_scans,
     query_paths,
+    scan_info,
 )
 from flatlas.scanning import (
     SCANNER_VERSION,

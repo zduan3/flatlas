@@ -78,6 +78,104 @@ def query_paths(connection: sqlite3.Connection, *, scope: Path | None = None, li
     return [dict(row) for row in rows]
 
 
+def list_scans(
+    connection: sqlite3.Connection,
+    *,
+    scope: Path | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    parameters: list[Any] = []
+    where = ""
+    if scope is not None:
+        selected_path = scope.expanduser().resolve()
+        indexed = connection.execute(
+            """SELECT root_id, path_key FROM path
+               WHERE path_display=? ORDER BY state='present' DESC LIMIT 1""",
+            (str(selected_path),),
+        ).fetchone()
+        if indexed is None:
+            namespace = discover_namespace(selected_path)
+            root = get_root(connection, namespace)
+            if root is None:
+                raise FlatlasError(f"filesystem is not registered; run 'flatlas init {scope}' first")
+            root_id = int(root["id"])
+            selected_key = path_key(namespace, selected_path)
+        else:
+            root_id = int(indexed["root_id"])
+            selected_key = bytes(indexed["path_key"])
+        where = """WHERE ss.root_id=? AND (
+            substr(ss.scope_path_key, 1, length(?))=?
+            OR substr(?, 1, length(ss.scope_path_key))=ss.scope_path_key
+        )"""
+        parameters.extend((root_id, selected_key, selected_key, selected_key))
+    parameters.append(limit)
+    rows = connection.execute(
+        f"""SELECT s.id AS scan_id, s.root_id, r.root_path_display AS root,
+                   s.kind, s.status, s.started_at_ns, s.finished_at_ns,
+                   CASE WHEN s.finished_at_ns IS NULL THEN NULL
+                        ELSE s.finished_at_ns-s.started_at_ns END AS duration_ns,
+                   s.files_seen, s.dirs_seen, s.errors_seen,
+                   s.refresh_before_ns, s.scanner_version, s.note,
+                   ss.id AS scope_id, ss.status AS scope_status,
+                   ss.paths_seen, ss.error_count,
+                   p.path_display AS scope,
+                   hex(ss.scope_path_key) AS scope_path_key_hex
+            FROM scan s
+            JOIN root r ON r.id=s.root_id
+            JOIN scan_scope ss ON ss.scan_id=s.id
+            LEFT JOIN path p
+              ON p.root_id=ss.root_id AND p.path_key=ss.scope_path_key
+            {where}
+            ORDER BY s.id DESC, ss.id
+            LIMIT ?""",
+        parameters,
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def scan_info(connection: sqlite3.Connection, scan_id: int) -> dict[str, Any]:
+    scan = connection.execute(
+        """SELECT s.id AS scan_id, s.root_id, r.root_path_display AS root,
+                  s.kind, s.status, s.started_at_ns, s.finished_at_ns,
+                  CASE WHEN s.finished_at_ns IS NULL THEN NULL
+                       ELSE s.finished_at_ns-s.started_at_ns END AS duration_ns,
+                  s.files_seen, s.dirs_seen, s.errors_seen,
+                  s.refresh_before_ns, s.scanner_version, s.note
+           FROM scan s JOIN root r ON r.id=s.root_id
+           WHERE s.id=?""",
+        (scan_id,),
+    ).fetchone()
+    if scan is None:
+        raise FlatlasError(f"scan not found: {scan_id}")
+    scopes = connection.execute(
+        """SELECT ss.id AS scope_id, ss.status, ss.started_at_ns,
+                  ss.finished_at_ns, ss.paths_seen, ss.error_count,
+                  p.path_display AS scope,
+                  hex(ss.scope_path_key) AS scope_path_key_hex
+           FROM scan_scope ss
+           LEFT JOIN path p
+             ON p.root_id=ss.root_id AND p.path_key=ss.scope_path_key
+           WHERE ss.scan_id=? ORDER BY ss.id""",
+        (scan_id,),
+    ).fetchall()
+    errors = connection.execute(
+        """SELECT e.id AS error_id, e.scan_scope_id,
+                  p.path_display AS path, hex(e.path_key) AS path_key_hex,
+                  e.operation, e.error_code, e.message, e.occurred_at_ns
+           FROM scan_error e
+           JOIN scan_scope ss ON ss.id=e.scan_scope_id
+           LEFT JOIN path p
+             ON p.root_id=ss.root_id AND p.path_key=e.path_key
+           WHERE ss.scan_id=? ORDER BY e.id""",
+        (scan_id,),
+    ).fetchall()
+    return {
+        **dict(scan),
+        "scopes": [dict(row) for row in scopes],
+        "errors": [dict(row) for row in errors],
+    }
+
+
 def _relative_display(path_display: str, relative_to: Path, namespace_path: str) -> str:
     try:
         return os.path.relpath(path_display, relative_to)

@@ -302,7 +302,7 @@ File Atlas 的首要用途是定位大文件、大目录和重复内容候选，
 |---|---|---|---|
 | P0 | `coverage [PATH]` | flatlas 原生命令 | 按目录展示 completed、partial、failed、cancelled 与 unscanned，定位索引盲区和不完整统计的来源。 |
 | P0 | `errors [PATH]` | flatlas 原生命令 | 汇总遍历、权限、I/O 和 hash 错误，支持按 scan、目录、operation 与错误码筛选和聚合。 |
-| P0 | `scans` / `scan-info ID` | 审计日志 | 查询扫描历史、scope、状态、耗时、文件/目录数量与错误摘要，补足当前 `scan` 执行入口的审计视图。 |
+| 已实现 | `scans [PATH]` / `scan-info ID` | 审计日志 | `scans` 查询全部或与 PATH 互相覆盖的扫描 scope，输出状态、时间和计数；`scan-info` 以 JSON 展示单次 scan、scope 与 error 明细。 |
 | P1 | `hash PATH...` | `b2sum` 等 checksum 工具 | 仅把 `full_ready` digest 当作可用内容 hash，同时展示 algorithm、state 与 basis；实时校验和是否回写索引必须由独立参数明确控制。 |
 | P1 | `verify [PATH...]` | flatlas 原生命令 | 只读比较索引与当前文件系统，报告新增、metadata 改变、stale hash 和未确认缺失；读取失败或 coverage 不完整不得把路径判为 deleted。 |
 | P2 | `tree [PATH]` | `tree` | 以索引生成目录层级，附带 logical/allocated 总量、文件数、coverage 和错误标记；与 `du --max-depth` 重叠，只有确有层级浏览需求时实现。 |
