@@ -26,6 +26,7 @@
 - [阶段路线图](roadmap.md)：版本级目标与优先级。
 - [查询命令规划](0.2/query-cli.md)：查询体验与兼容性演进。
 - [扫描中断规划](0.2/scan-interruption.md)：中断恢复与 checkpoint。
+- [目录汇总缓存与扫描时间](0.2/directory-summary.md)：缓存聚合、目录 freshness 与增量扫描边界。
 - [惰性 Hash 规划](0.2/lazy-hash.md)：hash 调度与可观测性。
 
 ## 调研资料

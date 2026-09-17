@@ -6,6 +6,8 @@ File Atlas 当前开发版本为 0.2.0。0.1 是已完成并冻结的只读 MVP 
 
 当前已实现的 0.2 阶段元数据能力：`flatlas --version` 输出正在运行的包版本；可访问源码仓库时附加 Git 提交、提交日期和 dirty 状态，否则回退为纯包版本。该命令无需初始化或打开索引数据库。
 
+目录汇总缓存基础设施也已实现：migration 2 为每个已索引目录保存 direct/subtree 文件数、logical/allocated 汇总、目录自身最近完整枚举时间和子树 freshness 下界；扫描结束时刷新 scope 与祖先，`ls` / `du` 读取缓存。已有数据库升级时 CLI 在 stderr 提示 migration 并显示目录回填进度。按 freshness 自动选择扫描目录、持久化工作队列和真正的中断续扫仍属于后续工作，详见 [目录汇总缓存与扫描时间](directory-summary.md)。
+
 当前 Python core 已按职责拆分：`db.py` 管理 schema 与连接，`paths.py` 管理 namespace 和路径身份，`scanning.py` 负责 metadata 扫描，`hashing.py` 负责惰性 hash，`queries.py` 提供只读查询，`planning.py` 保存 dry-run plan，`output.py` 负责稳定导出。`core.py` 仅保留兼容性 re-export 与既有故障注入入口；该拆分不改变 0.1 数据库或 CLI 语义。
 
 ## 计划能力摘要
@@ -35,6 +37,8 @@ File Atlas 当前开发版本为 0.2.0。0.1 是已完成并冻结的只读 MVP 
 - 为崩溃后遗留的 running scan 设计安全恢复或租约机制，不得盲目改写可能仍活跃的任务。
 
 详细设计见 [扫描中断规划](scan-interruption.md)。
+
+目录缓存、扫描完成时间及其与后续增量扫描的边界见 [目录汇总缓存与扫描时间](directory-summary.md)。
 
 ### 惰性 hash、性能与可观测性
 

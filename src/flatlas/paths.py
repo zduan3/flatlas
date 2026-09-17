@@ -83,7 +83,8 @@ def _sqlite_integer(value: int | None) -> int | None:
 def _scope_row(connection: sqlite3.Connection, value: Path) -> sqlite3.Row:
     display = str(value.expanduser().resolve())
     row = connection.execute(
-        """SELECT p.id, p.path_display, p.entry_kind, r.root_path_display
+        """SELECT p.id, p.path_display, p.entry_kind, p.logical_size, p.allocated_size,
+                  r.root_path_display
         FROM path p JOIN root r ON r.id=p.root_id
         WHERE p.path_display=? AND p.state='present'""",
         (display,),
@@ -102,13 +103,15 @@ def remove_indexed_subtree(connection: sqlite3.Connection, value: Path) -> dict[
     """Remove one indexed path and all indexed descendants without touching the filesystem."""
     display = str(_lexical_absolute_path(value))
     selected = connection.execute(
-        "SELECT id FROM path WHERE path_display=?",
+        "SELECT id, root_id, parent_path_id FROM path WHERE path_display=?",
         (display,),
     ).fetchone()
     if selected is None:
         raise FlatlasError(f"path is not indexed: {display}")
 
     path_id = int(selected["id"])
+    root_id = int(selected["root_id"])
+    parent_path_id = selected["parent_path_id"]
     plan_ids = [
         str(row["plan_id"])
         for row in connection.execute(
@@ -136,6 +139,10 @@ def remove_indexed_subtree(connection: sqlite3.Connection, value: Path) -> dict[
             (path_id,),
         )
         removed_paths = int(connection.execute("SELECT changes()").fetchone()[0])
+        if parent_path_id is not None:
+            from flatlas.summaries import refresh_directory_summaries
+
+            refresh_directory_summaries(connection, root_id, int(parent_path_id))
     return {
         "path": display,
         "paths_removed": removed_paths,

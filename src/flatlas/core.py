@@ -15,7 +15,14 @@ from typing import Any
 
 from flatlas import hashing as _hashing
 from flatlas import scanning as _scanning
-from flatlas.db import DDL, SCHEMA_VERSION, migrate, now_ns, open_database
+from flatlas.db import (
+    DDL,
+    SCHEMA_VERSION,
+    MigrationProgress,
+    migrate,
+    now_ns,
+    open_database,
+)
 from flatlas.errors import FlatlasError
 from flatlas.hashing import QUICK_SAMPLE_BYTES, HashProgress, HashSummary
 from flatlas.output import export_rows

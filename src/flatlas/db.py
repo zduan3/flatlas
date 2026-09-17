@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_migration (
@@ -112,6 +114,33 @@ CREATE INDEX IF NOT EXISTS idx_hash_full ON file_hash(full_algorithm, full_diges
 CREATE INDEX IF NOT EXISTS idx_plan_root_created ON plan(root_id, created_at_ns DESC);
 """
 
+DIRECTORY_SUMMARY_MIGRATION = """
+CREATE TABLE IF NOT EXISTS directory_summary (
+    path_id INTEGER PRIMARY KEY REFERENCES path(id) ON DELETE CASCADE,
+    direct_files INTEGER NOT NULL DEFAULT 0 CHECK (direct_files >= 0),
+    direct_logical_size INTEGER NOT NULL DEFAULT 0 CHECK (direct_logical_size >= 0),
+    direct_allocated_size INTEGER CHECK (direct_allocated_size IS NULL OR direct_allocated_size >= 0),
+    subtree_files INTEGER NOT NULL DEFAULT 0 CHECK (subtree_files >= 0),
+    subtree_logical_size INTEGER NOT NULL DEFAULT 0 CHECK (subtree_logical_size >= 0),
+    subtree_allocated_size INTEGER CHECK (subtree_allocated_size IS NULL OR subtree_allocated_size >= 0),
+    self_completed_at_ns INTEGER,
+    subtree_complete_through_ns INTEGER,
+    last_completed_scan_id INTEGER REFERENCES scan(id),
+    updated_at_ns INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_directory_summary_freshness
+    ON directory_summary(self_completed_at_ns, subtree_complete_through_ns);
+"""
+
+
+@dataclass(frozen=True)
+class MigrationProgress:
+    version: int
+    description: str
+    phase: str
+    completed: int = 0
+    total: int = 0
+
 
 def _last_insert_id(cursor: sqlite3.Cursor) -> int:
     value = cursor.lastrowid
@@ -124,24 +153,58 @@ def now_ns() -> int:
     return time.time_ns()
 
 
-def open_database(location: Path) -> sqlite3.Connection:
+def open_database(
+    location: Path,
+    *,
+    on_migration: Callable[[MigrationProgress], None] | None = None,
+) -> sqlite3.Connection:
     location.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(location)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA journal_mode = WAL")
     connection.execute("PRAGMA busy_timeout = 5000")
-    migrate(connection)
+    try:
+        migrate(connection, on_migration=on_migration)
+    except BaseException:
+        connection.close()
+        raise
     return connection
 
 
-def migrate(connection: sqlite3.Connection) -> None:
+def migrate(
+    connection: sqlite3.Connection,
+    *,
+    on_migration: Callable[[MigrationProgress], None] | None = None,
+) -> None:
     connection.execute("PRAGMA application_id = 1179402580")
     connection.executescript(DDL)
-    exists = connection.execute("SELECT 1 FROM schema_migration WHERE version = ?", (SCHEMA_VERSION,)).fetchone()
-    if exists is None:
+    initial = connection.execute("SELECT 1 FROM schema_migration WHERE version = 1").fetchone()
+    existing_database = initial is not None
+    if initial is None:
         connection.execute(
             "INSERT INTO schema_migration(version, applied_at_ns, description) VALUES (?, ?, ?)",
-            (SCHEMA_VERSION, now_ns(), "initial persistent index schema"),
+            (1, now_ns(), "initial persistent index schema"),
+        )
+    description = "cache directory usage and scan freshness"
+    directory_summary = connection.execute("SELECT 1 FROM schema_migration WHERE version = 2").fetchone()
+    if directory_summary is None:
+        if existing_database and on_migration is not None:
+            on_migration(MigrationProgress(2, description, "started"))
+        connection.executescript(DIRECTORY_SUMMARY_MIGRATION)
+        from flatlas.summaries import backfill_directory_summaries
+
+        progress_callback = None
+        if existing_database and on_migration is not None:
+            def report_backfill(completed: int, total: int) -> None:
+                on_migration(MigrationProgress(2, description, "backfill", completed, total))
+
+            progress_callback = report_backfill
+        backfill_directory_summaries(connection, on_progress=progress_callback)
+        connection.execute(
+            "INSERT INTO schema_migration(version, applied_at_ns, description) VALUES (?, ?, ?)",
+            (2, now_ns(), description),
         )
     connection.commit()
+    if existing_database and directory_summary is None and on_migration is not None:
+        on_migration(MigrationProgress(2, description, "completed"))

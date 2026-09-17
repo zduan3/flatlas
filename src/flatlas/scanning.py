@@ -21,6 +21,7 @@ from flatlas.paths import (
     parent_key,
     path_key,
 )
+from flatlas.summaries import refresh_directory_summaries
 
 SCANNER_VERSION = "flatlas-python-0.2"
 
@@ -104,7 +105,11 @@ def _parent_id(connection: sqlite3.Connection, root_id: int, key: bytes) -> int 
 
 def upsert_path(connection: sqlite3.Connection, root_id: int, scan_id: int, item: Observation) -> int:
     parent_id = _parent_id(connection, root_id, item.key)
-    old = connection.execute("SELECT id FROM path WHERE root_id = ? AND path_key = ?", (root_id, item.key)).fetchone()
+    old = connection.execute(
+        """SELECT id, state, entry_kind, device, inode
+           FROM path WHERE root_id=? AND path_key=?""",
+        (root_id, item.key),
+    ).fetchone()
     values = (
         parent_id, item.name, str(item.path), item.kind, item.device, item.inode, item.mode,
         item.uid, item.gid, item.nlink, item.logical_size, item.allocated_size, item.mtime_ns,
@@ -120,6 +125,17 @@ def upsert_path(connection: sqlite3.Connection, root_id: int, scan_id: int, item
         )
         return _last_insert_id(cursor)
     path_id = int(old["id"])
+    if item.kind not in {"root", "directory"}:
+        connection.execute("DELETE FROM directory_summary WHERE path_id=?", (path_id,))
+    elif (
+        old["state"] == "deleted"
+        or old["entry_kind"] not in {"root", "directory"}
+        or old["device"] != item.device
+        or old["inode"] != item.inode
+    ):
+        # A successful scan timestamp belongs to the observed directory object,
+        # not merely to a path that may later be reused.
+        connection.execute("DELETE FROM directory_summary WHERE path_id=?", (path_id,))
     connection.execute(
         """UPDATE path SET parent_path_id=?, name_raw=?, path_display=?, entry_kind=?, state='present',
         device=?, inode=?, mode=?, uid=?, gid=?, nlink=?, logical_size=?, allocated_size=?, mtime_ns=?,
@@ -216,6 +232,7 @@ def scan_directory(
         dirs_seen = 1
         logical_bytes_seen = 0
         failed = False
+        completed_directories: dict[int, tuple[int, int]] = {}
 
         def report(phase: str, directory: Path | None = None) -> None:
             if on_progress is not None:
@@ -227,7 +244,7 @@ def scan_directory(
                     ScanProgress(phase, files_seen, dirs_seen, logical_bytes_seen, current_directory)
                 )
 
-        def visit(directory: Path) -> None:
+        def visit(directory: Path, directory_id: int) -> None:
             nonlocal files_seen, dirs_seen, logical_bytes_seen, failed
             report("scanning", directory)
             try:
@@ -236,6 +253,7 @@ def scan_directory(
                 _record_error(connection, scope_id, path_key(namespace, directory), "enumerate", exc)
                 failed = True
                 return
+            directory_complete = True
             for entry in entries:
                 entry_path = Path(entry.path)
                 try:
@@ -243,18 +261,21 @@ def scan_directory(
                 except OSError as exc:
                     _record_error(connection, scope_id, path_key(namespace, entry_path), "stat", exc)
                     failed = True
+                    directory_complete = False
                     continue
-                upsert_path(connection, root_id, scan_id, observed)
+                path_id = upsert_path(connection, root_id, scan_id, observed)
                 if observed.kind == "directory":
                     dirs_seen += 1
-                    visit(entry_path)
+                    visit(entry_path, path_id)
                 elif observed.kind == "file":
                     files_seen += 1
                     logical_bytes_seen += observed.logical_size or 0
                     report("scanning", directory)
+            if directory_complete:
+                completed_directories[directory_id] = (now_ns(), scan_id)
 
         try:
-            visit(scope)
+            visit(scope, scope_path_id)
             scope_status = "partial" if failed else "completed"
             connection.execute(
                 "UPDATE scan_scope SET status=?, finished_at_ns=?, paths_seen=? WHERE id=?",
@@ -262,6 +283,12 @@ def scan_directory(
             )
             if scope_status == "completed":
                 _mark_missing(connection, root_id, scan_id, scope_id, scope_path_id)
+            refresh_directory_summaries(
+                connection,
+                root_id,
+                scope_path_id,
+                completed_directories=completed_directories,
+            )
             errors = int(connection.execute("SELECT error_count FROM scan_scope WHERE id=?", (scope_id,)).fetchone()["error_count"])
             connection.execute(
                 "UPDATE scan SET status=?, finished_at_ns=?, files_seen=?, dirs_seen=?, errors_seen=? WHERE id=?",

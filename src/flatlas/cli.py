@@ -17,6 +17,7 @@ from flatlas.config import resolve_database
 from flatlas.core import (
     HashProgress,
     HashSummary,
+    MigrationProgress,
     ScanProgress,
     create_dry_run_plan,
     discover_namespace,
@@ -61,6 +62,62 @@ def app_callback(
 
 def _database(explicit: Path | None, *, create: bool = False) -> Path:
     return resolve_database(explicit, create=create)
+
+
+class _MigrationProgressDisplay:
+    def __init__(self, *, enabled: bool, interval: float = 0.1) -> None:
+        self.enabled = enabled
+        self.interval = interval
+        self.last_update = 0.0
+        self.last_percent = -1
+        self.width = 0
+        self.active = False
+
+    def update(self, progress: MigrationProgress) -> None:
+        if progress.phase == "started":
+            typer.echo(
+                f"database migration {progress.version} required: {progress.description}",
+                err=True,
+            )
+            self.active = True
+            return
+        if progress.phase == "completed":
+            if self.enabled and self.width:
+                typer.echo(err=True)
+            typer.echo(f"database migration {progress.version} completed", err=True)
+            self.active = False
+            self.width = 0
+            return
+
+        line = f"Migrating database {progress.version}: {progress.completed}/{progress.total} directories"
+        if self.enabled:
+            current = time.monotonic()
+            if progress.completed != progress.total and current - self.last_update < self.interval:
+                return
+            typer.echo(f"\r\x1b[2K{line}", err=True, nl=False)
+            self.width = max(self.width, _display_width(line))
+            self.last_update = current
+            return
+
+        percent = 100 if progress.total == 0 else progress.completed * 100 // progress.total
+        milestone = min(100, percent // 10 * 10)
+        if milestone > self.last_percent:
+            typer.echo(f"{line} ({percent}%)", err=True)
+            self.last_percent = milestone
+
+    def close(self) -> None:
+        if self.enabled and self.active and self.width:
+            typer.echo(err=True)
+        self.active = False
+        self.width = 0
+
+
+def _open_database(location: Path) -> Any:
+    progress = _MigrationProgressDisplay(enabled=sys.stderr.isatty())
+    try:
+        return open_database(location, on_migration=progress.update)
+    finally:
+        progress.close()
 
 
 def _print(rows: object, fmt: str = "json", output: Path | None = None) -> None:
@@ -440,7 +497,7 @@ def init(
 ) -> None:
     """Initialize global configuration and register a filesystem without scanning it."""
     database = _database(db, create=True)
-    connection = open_database(database)
+    connection = _open_database(database)
     try:
         namespace = discover_namespace(path)
         root_id = register_namespace(connection, namespace)
@@ -450,7 +507,7 @@ def init(
 
 
 def _show_filesystems(db: Path | None, fmt: str) -> None:
-    connection = open_database(_database(db))
+    connection = _open_database(_database(db))
     try:
         _print_filesystems(filesystem_usage(connection), fmt)
     finally:
@@ -475,7 +532,7 @@ def scan(
     db: db_option = None,
 ) -> None:
     """Scan metadata for a complete namespace or one subtree and update the persistent index."""
-    connection = open_database(_database(db))
+    connection = _open_database(_database(db))
     progress = _ScanProgressDisplay(enabled=_stderr_is_tty())
     try:
         result = scan_directory(connection, path, on_progress=progress.update)
@@ -494,7 +551,7 @@ def paths_command(
     db: db_option = None,
 ) -> None:
     """Browse current indexed paths; it remains available while sources are offline."""
-    connection = open_database(_database(db))
+    connection = _open_database(_database(db))
     try:
         _print(query_paths(connection, scope=path, limit=limit), format, output)
     finally:
@@ -507,7 +564,7 @@ def rm(
     db: db_option = None,
 ) -> None:
     """Remove an indexed path subtree; never checks or changes filesystem entries."""
-    connection = open_database(_database(db))
+    connection = _open_database(_database(db))
     try:
         _print(remove_indexed_subtree(connection, path))
     finally:
@@ -524,7 +581,7 @@ def du(
     db: db_option = None,
 ) -> None:
     """Summarize indexed usage. SIZE(B)=logical bytes; N=file count; ALLOC(B)=allocated bytes."""
-    connection = open_database(_database(db))
+    connection = _open_database(_database(db))
     try:
         rows = disk_usage(connection) if not paths else [row for path in paths for row in disk_usage(connection, scope=path)]
         _print_usage(rows, format, output)
@@ -543,7 +600,7 @@ def ls_command(
 
     LOGICAL(B)=file bytes or indexed directory bytes; N=file count; ALLOC(B)=allocated bytes.
     """
-    connection = open_database(_database(db))
+    connection = _open_database(_database(db))
     try:
         _print_usage(
             list_child_directories(connection, scope=path),
@@ -567,7 +624,7 @@ def largest(
     db: db_option = None,
 ) -> None:
     """List the largest currently indexed files."""
-    connection = open_database(_database(db))
+    connection = _open_database(_database(db))
     try:
         _print_largest_files(largest_files(connection, scope=path, limit=limit), format, output)
     finally:
@@ -583,7 +640,7 @@ def dupes(
     db: db_option = None,
 ) -> None:
     """List full-hash duplicate groups within an indexed directory."""
-    connection = open_database(_database(db))
+    connection = _open_database(_database(db))
     hash_progress = _HashProgressDisplay(enabled=_stderr_is_tty())
     try:
         hash_summary = ensure_duplicate_hashes(connection, path, on_progress=hash_progress.update)
@@ -607,7 +664,7 @@ def export_dupes(
     format: Annotated[str, typer.Option("--format")] = "json",
     db: db_option = None,
 ) -> None:
-    connection = open_database(_database(db))
+    connection = _open_database(_database(db))
     hash_progress = _HashProgressDisplay(enabled=_stderr_is_tty())
     try:
         hash_summary = ensure_duplicate_hashes(connection, path, on_progress=hash_progress.update)
@@ -630,7 +687,7 @@ def plan_create(
     db: db_option = None,
 ) -> None:
     """Create an immutable hardlink dry-run plan without changing any file."""
-    connection = open_database(_database(db))
+    connection = _open_database(_database(db))
     try:
         root = get_root(connection, discover_namespace(root_path))
         if root is None:
@@ -648,7 +705,7 @@ def plan_show(
     output: Annotated[Path | None, typer.Option("--output")] = None,
     db: db_option = None,
 ) -> None:
-    connection = open_database(_database(db))
+    connection = _open_database(_database(db))
     try:
         rows = plan_operations(connection, plan_id) if plan_id is not None else list_plans(connection)
         _print(rows, format, output)

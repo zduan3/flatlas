@@ -6,6 +6,8 @@
 
 本文记录 0.2 的扫描中断规划。0.1 只展示扫描进度；`KeyboardInterrupt` 仍会回滚整次扫描事务，不承诺保存中断前观察到的路径、metadata 或持久化 `cancelled` 终态。0.1 只要求中断不得造成假删除。内容 hash 不属于 scan，另见 [0.2 惰性 Hash 规划](lazy-hash.md)。
 
+目录汇总缓存与每目录完整枚举时间已经由 migration 2 落地，但当前仍随扫描的单一事务提交或回滚；它们尚不构成 checkpoint 或可恢复工作队列。相关字段和后续 freshness 选择边界见 [目录汇总缓存与扫描时间](directory-summary.md)。
+
 ## 目标
 
 - 中断后保留已经 checkpoint 的 path 和 metadata。
@@ -18,7 +20,7 @@
 
 1. 新增向前 migration，为 `scan` 增加 `logical_bytes_seen INTEGER NOT NULL DEFAULT 0`，保留既有数据和已发布 migration 语义。
 2. 创建 running scan 与 scan_scope 后立即提交；遍历阶段按路径数量或时间间隔执行短事务 checkpoint。
-3. 每个 checkpoint 同时提交 path 写入与 scan 计数，进度中的“已保存”统计只使用已提交计数。
+3. 每个 checkpoint 同时提交 path 写入、scan 计数与受影响的目录汇总，进度中的“已保存”统计只使用已提交计数。
 4. 捕获 `KeyboardInterrupt` 时回滚当前未完成批次，再用独立事务写入 cancelled 状态；CLI 输出最终已保存统计并返回退出码 130。
 5. 只有完整遍历和所需 hash 阶段成功后才在最终事务中设置 completed 并运行 `_mark_missing()`。
 6. 进程崩溃可能遗留 running scan；在支持并发扫描前，应设计不会误伤其他活跃进程的恢复或租约机制，不能仅按状态盲目改写。

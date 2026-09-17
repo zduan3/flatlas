@@ -115,29 +115,11 @@ def list_child_directories(
     indexed_by_path = {_normalized_display(row["path_display"]): row for row in indexed_rows}
 
     usage_rows = [] if parent is None else connection.execute(
-        """WITH RECURSIVE descendants(top_id, id) AS (
-            SELECT p.id, p.id FROM path p
-            WHERE p.parent_path_id=? AND p.state='present'
-              AND p.entry_kind='directory'
-            UNION ALL
-            SELECT d.top_id, p.id FROM path p
-            JOIN descendants d ON p.parent_path_id=d.id
-            WHERE p.state='present'
-        )
-        SELECT top.id,
-               sum(CASE WHEN item.entry_kind='file' THEN 1 ELSE 0 END) AS files,
-               COALESCE(sum(CASE WHEN item.entry_kind='file' THEN item.logical_size END), 0) AS logical_size,
-               CASE
-                   WHEN sum(CASE WHEN item.entry_kind='file' THEN 1 ELSE 0 END)
-                      = sum(CASE WHEN item.entry_kind='file' AND item.allocated_size IS NOT NULL THEN 1 ELSE 0 END)
-                   THEN COALESCE(sum(CASE WHEN item.entry_kind='file' THEN item.allocated_size END), 0)
-                   ELSE NULL
-               END AS allocated_size
-        FROM descendants d
-        JOIN path top ON top.id=d.top_id
-        JOIN path item ON item.id=d.id
-        GROUP BY top.id
-        """,
+        """SELECT p.id, ds.subtree_files AS files,
+                  ds.subtree_logical_size AS logical_size,
+                  ds.subtree_allocated_size AS allocated_size
+           FROM path p JOIN directory_summary ds ON ds.path_id=p.id
+           WHERE p.parent_path_id=? AND p.state='present' AND p.entry_kind='directory'""",
         (parent["id"],),
     ).fetchall()
     usage_by_id = {row["id"]: row for row in usage_rows}
@@ -245,13 +227,14 @@ def disk_usage(
     display_base = Path.cwd() if relative_to is None else relative_to
     if scope is None:
         rows = connection.execute(
-            """SELECT r.id AS root_id, r.root_path_display, count(p.id) AS files,
-               COALESCE(sum(p.logical_size), 0) AS logical_size,
-               CASE WHEN count(p.id) = count(p.allocated_size)
-                    THEN COALESCE(sum(p.allocated_size), 0)
-                    ELSE NULL END AS allocated_size
-               FROM root r LEFT JOIN path p ON p.root_id=r.id AND p.state='present' AND p.entry_kind='file'
-               GROUP BY r.id ORDER BY r.root_path_display"""
+            """SELECT r.id AS root_id, r.root_path_display,
+                      CASE WHEN p.id IS NULL THEN 0 ELSE ds.subtree_files END AS files,
+                      CASE WHEN p.id IS NULL THEN 0 ELSE ds.subtree_logical_size END AS logical_size,
+                      CASE WHEN p.id IS NULL THEN 0 ELSE ds.subtree_allocated_size END AS allocated_size
+               FROM root r
+               LEFT JOIN path p ON p.root_id=r.id AND p.path_key=x'' AND p.state='present'
+               LEFT JOIN directory_summary ds ON ds.path_id=p.id
+               ORDER BY r.root_path_display"""
         )
         return [
             {
@@ -264,17 +247,24 @@ def disk_usage(
             for row in rows
         ]
     selected = _scope_row(connection, scope)
-    row = connection.execute(
-        """WITH RECURSIVE descendants(id) AS (
-            SELECT id FROM path WHERE id=? UNION ALL
-            SELECT p.id FROM path p JOIN descendants d ON p.parent_path_id=d.id
-        ) SELECT count(p.id) AS files, COALESCE(sum(p.logical_size), 0) AS logical_size,
-        CASE WHEN count(p.id) = count(p.allocated_size)
-             THEN COALESCE(sum(p.allocated_size), 0)
-             ELSE NULL END AS allocated_size FROM path p
-        WHERE p.state='present' AND p.entry_kind='file' AND p.id IN descendants""",
-        (selected["id"],),
-    ).fetchone()
+    if selected["entry_kind"] == "file":
+        row = {
+            "files": 1,
+            "logical_size": selected["logical_size"],
+            "allocated_size": selected["allocated_size"],
+        }
+    elif selected["entry_kind"] in {"root", "directory"}:
+        summary = connection.execute(
+            """SELECT subtree_files AS files, subtree_logical_size AS logical_size,
+                      subtree_allocated_size AS allocated_size
+               FROM directory_summary WHERE path_id=?""",
+            (selected["id"],),
+        ).fetchone()
+        if summary is None:
+            raise FlatlasError(f"directory summary is missing: {selected['path_display']}")
+        row = dict(summary)
+    else:
+        row = {"files": 0, "logical_size": 0, "allocated_size": 0}
     return [
         {
             **dict(row),

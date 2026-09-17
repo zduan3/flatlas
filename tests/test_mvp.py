@@ -122,6 +122,7 @@ def test_subtree_scan_can_match_existing_index_and_complete_scope_marks_deletion
         assert row["state"] == "deleted"
         old = connection.execute("SELECT state FROM path WHERE path_display=?", (str(source / "old.bin"),)).fetchone()
         assert old["state"] == "present"
+        assert disk_usage(connection, scope=source)[0]["logical_size"] == len(b"shared")
     finally:
         connection.close()
 
@@ -166,6 +167,7 @@ def test_rm_recursively_removes_only_indexed_paths_without_touching_files(tmp_pa
     try:
         assert connection.execute("SELECT count(*) FROM path WHERE path_display LIKE ?", (f"{target}%",)).fetchone()[0] == 0
         assert connection.execute("SELECT state FROM path WHERE path_display=?", (str(retained_file),)).fetchone()["state"] == "present"
+        assert disk_usage(connection, scope=source)[0]["logical_size"] == len(b"retain")
     finally:
         connection.close()
 
@@ -673,17 +675,191 @@ def test_ls_lists_direct_files_and_preserves_gone_file_metadata(tmp_path: Path) 
 def test_database_migration_is_idempotent_and_keeps_existing_data(tmp_path: Path) -> None:
     database = tmp_path / "index.sqlite"
     connection, source = make_connection(tmp_path)
+    (source / "preserved.bin").write_bytes(b"data")
+    scan_directory(connection, source)
+    preserved_path_count = connection.execute("SELECT count(*) FROM path").fetchone()[0]
+    # Recreate the exact pre-v2 state so reopening exercises the forward migration.
+    connection.execute("DROP TABLE directory_summary")
+    connection.execute("DELETE FROM schema_migration WHERE version=2")
+    connection.commit()
     connection.close()
-    # Reopening must not create another migration or discard the registered root.
-    connection = open_database(database)
+    # Reopening must migrate once, retain v1 data, and backfill the cache.
+    migration_progress = []
+    connection = open_database(database, on_migration=migration_progress.append)
     try:
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
         assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
-        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 1
+        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 2
         assert connection.execute("SELECT root_path_display FROM root").fetchone()[0] == str(discover_namespace(source).path)
+        assert connection.execute("SELECT count(*) FROM path").fetchone()[0] == preserved_path_count
+        summary = connection.execute(
+            """SELECT ds.subtree_files, ds.subtree_logical_size,
+                      ds.self_completed_at_ns, ds.subtree_complete_through_ns
+               FROM directory_summary ds JOIN path p ON p.id=ds.path_id
+               WHERE p.path_display=?""",
+            (str(source),),
+        ).fetchone()
+        assert dict(summary) == {
+            "subtree_files": 1,
+            "subtree_logical_size": 4,
+            "self_completed_at_ns": summary["self_completed_at_ns"],
+            "subtree_complete_through_ns": summary["self_completed_at_ns"],
+        }
+        assert summary["self_completed_at_ns"] is not None
         indexes = {row["name"] for row in connection.execute("PRAGMA index_list('path')")}
         assert "idx_path_root_parent_live" in indexes
+        assert migration_progress[0].phase == "started"
+        assert migration_progress[0].version == 2
+        backfill = [event for event in migration_progress if event.phase == "backfill"]
+        assert backfill[0].completed == 0
+        assert backfill[-1].completed == backfill[-1].total
+        assert migration_progress[-1].phase == "completed"
+    finally:
+        connection.close()
+
+
+def test_cli_reports_pending_migration_progress_to_stderr(tmp_path: Path) -> None:
+    database = tmp_path / "index.sqlite"
+    connection, source = make_connection(tmp_path)
+    (source / "payload.bin").write_bytes(b"payload")
+    scan_directory(connection, source)
+    connection.execute("DROP TABLE directory_summary")
+    connection.execute("DELETE FROM schema_migration WHERE version=2")
+    connection.commit()
+    connection.close()
+
+    result = CliRunner().invoke(app, ["du", str(source), "--format", "json", "--db", str(database)])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)[0]["logical_size"] == len(b"payload")
+    assert "database migration 2 required: cache directory usage and scan freshness" in result.stderr
+    assert "Migrating database 2:" in result.stderr
+    assert "database migration 2 completed" in result.stderr
+
+
+def test_directory_summary_records_partial_and_complete_scan_freshness(tmp_path: Path, monkeypatch) -> None:
+    connection, source = make_connection(tmp_path)
+    nested = source / "nested"
+    nested.mkdir()
+    (nested / "payload.bin").write_bytes(b"payload")
+    real_scandir = os.scandir
+
+    def fail_nested(path):
+        if Path(path) == nested:
+            raise PermissionError("injected summary coverage failure")
+        return real_scandir(path)
+
+    try:
+        monkeypatch.setattr("flatlas.core.os.scandir", fail_nested)
+        assert scan_directory(connection, source)["status"] == "partial"
+        rows = {
+            row["path_display"]: row
+            for row in connection.execute(
+                """SELECT p.path_display, ds.subtree_files, ds.subtree_logical_size,
+                          ds.self_completed_at_ns, ds.subtree_complete_through_ns
+                   FROM directory_summary ds JOIN path p ON p.id=ds.path_id"""
+            )
+        }
+        assert rows[str(source)]["self_completed_at_ns"] is not None
+        assert rows[str(source)]["subtree_complete_through_ns"] is None
+        assert rows[str(nested)]["self_completed_at_ns"] is None
+        assert rows[str(nested)]["subtree_complete_through_ns"] is None
+        assert rows[str(source)]["subtree_files"] == 0
+        assert rows[str(source)]["subtree_logical_size"] == 0
+
+        monkeypatch.setattr("flatlas.core.os.scandir", real_scandir)
+        assert scan_directory(connection, source)["status"] == "completed"
+        completed = connection.execute(
+            """SELECT ds.subtree_files, ds.subtree_logical_size,
+                      ds.self_completed_at_ns, ds.subtree_complete_through_ns
+               FROM directory_summary ds JOIN path p ON p.id=ds.path_id
+               WHERE p.path_display=?""",
+            (str(source),),
+        ).fetchone()
+        assert completed["subtree_files"] == 1
+        assert completed["subtree_logical_size"] == 7
+        assert completed["self_completed_at_ns"] is not None
+        assert completed["subtree_complete_through_ns"] is not None
+        nested_last_success = connection.execute(
+            """SELECT ds.self_completed_at_ns FROM directory_summary ds
+               JOIN path p ON p.id=ds.path_id WHERE p.path_display=?""",
+            (str(nested),),
+        ).fetchone()[0]
+
+        monkeypatch.setattr("flatlas.core.os.scandir", fail_nested)
+        assert scan_directory(connection, source)["status"] == "partial"
+        invalidated = connection.execute(
+            """SELECT p.path_display, ds.self_completed_at_ns, ds.subtree_complete_through_ns
+               FROM directory_summary ds JOIN path p ON p.id=ds.path_id
+               WHERE p.path_display IN (?, ?) ORDER BY p.path_display""",
+            (str(source), str(nested)),
+        ).fetchall()
+        by_path = {row["path_display"]: row for row in invalidated}
+        assert by_path[str(source)]["self_completed_at_ns"] is not None
+        assert by_path[str(source)]["subtree_complete_through_ns"] == nested_last_success
+        assert by_path[str(nested)]["self_completed_at_ns"] == nested_last_success
+        assert by_path[str(nested)]["subtree_complete_through_ns"] == nested_last_success
+    finally:
+        connection.close()
+
+
+def test_reappeared_directory_does_not_reuse_previous_success_time(tmp_path: Path, monkeypatch) -> None:
+    connection, source = make_connection(tmp_path)
+    nested = source / "nested"
+    nested.mkdir()
+    real_scandir = os.scandir
+    try:
+        scan_directory(connection, source)
+        nested.rmdir()
+        scan_directory(connection, source)
+        nested.mkdir()
+
+        def fail_reappeared(path):
+            if Path(path) == nested:
+                raise PermissionError("injected reappearance failure")
+            return real_scandir(path)
+
+        monkeypatch.setattr("flatlas.core.os.scandir", fail_reappeared)
+        assert scan_directory(connection, source)["status"] == "partial"
+        summary = connection.execute(
+            """SELECT ds.self_completed_at_ns, ds.subtree_complete_through_ns
+               FROM directory_summary ds JOIN path p ON p.id=ds.path_id
+               WHERE p.path_display=?""",
+            (str(nested),),
+        ).fetchone()
+        assert summary["self_completed_at_ns"] is None
+        assert summary["subtree_complete_through_ns"] is None
+    finally:
+        connection.close()
+
+
+def test_subtree_scan_refreshes_cached_ancestor_totals_without_rescanning_ancestor(tmp_path: Path) -> None:
+    connection, source = make_connection(tmp_path)
+    nested = source / "nested"
+    nested.mkdir()
+    payload = nested / "payload.bin"
+    payload.write_bytes(b"a")
+    try:
+        scan_directory(connection, source)
+        root_before = connection.execute(
+            """SELECT ds.self_completed_at_ns FROM directory_summary ds
+               JOIN path p ON p.id=ds.path_id WHERE p.path_display=?""",
+            (str(source),),
+        ).fetchone()[0]
+
+        payload.write_bytes(b"four")
+        scan_directory(connection, nested)
+        root_after = connection.execute(
+            """SELECT ds.subtree_files, ds.subtree_logical_size, ds.self_completed_at_ns
+               FROM directory_summary ds JOIN path p ON p.id=ds.path_id
+               WHERE p.path_display=?""",
+            (str(source),),
+        ).fetchone()
+        assert root_after["subtree_files"] == 1
+        assert root_after["subtree_logical_size"] == 4
+        assert root_after["self_completed_at_ns"] == root_before
+        assert disk_usage(connection, scope=source)[0]["logical_size"] == 4
     finally:
         connection.close()
 
