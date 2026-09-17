@@ -32,6 +32,8 @@
 6. 显式 `flatlas rm PATH` 删除索引子树后，刷新其仍存在的父目录与祖先汇总。
 7. 目录从 deleted 重现、由其他类型变为目录或可靠对象身份变化时，旧成功时间失效；在新目录对象完成枚举前保持 `NULL`。
 
+缓存刷新采用批量、自底向上的实现：先批量读取目标目录、直接文件统计和直接子目录缓存，在内存中按路径深度从叶子计算到祖先，最后使用 `executemany` 批量 UPSERT。SQLite 参数按最多 800 个目录分批，避免逐目录执行多条 SELECT，也避免超过变量数量限制。局部扫描只处理请求 scope 的 present 目录及其祖先；migration 回填按 root 处理全部当前目录。
+
 migration 2 原地创建该表并回填既有索引。历史完成时间只从覆盖相应目录的 completed `scan_scope` 保守恢复；partial、failed 或 cancelled scope 不用于推断完整时间。migration 不重建或清空现有 root、path、scan、error、hash 或 plan 数据。
 
 CLI 打开已有数据库并检测到待执行 migration 时，必须先在 stderr 输出 migration 版本与说明。目录回填期间交互式终端原地显示“已完成目录数 / 总目录数”，非交互式调用按进度里程碑输出；提交 migration 版本记录后再显示完成提示。stdout 不得混入 migration 信息，以保持 JSON/CSV 可解析。新建空数据库的 schema 初始化默认静默。migration 中断时不写完成版本，下次打开数据库可幂等重试。
@@ -45,7 +47,7 @@ CLI 打开已有数据库并检测到待执行 migration 时，必须先在 stde
 
 ## 当前限制与后续工作
 
-当前扫描仍使用 0.1 的单事务遍历，因此 `KeyboardInterrupt` 会回滚本次 path 与 summary 更新。后续短事务 checkpoint 必须在同一事务中提交 path 写入、扫描计数和受影响 summary，进程崩溃后通过持久化 work queue 恢复，不能仅根据时间戳猜测遍历位置。
+当前扫描仍使用单个事务，但实现了两段式用户取消：遍历阶段第一次 `KeyboardInterrupt` 停止继续枚举，转入批量汇总收尾，将 scan/scope 记为 `cancelled`，保留已观测 path、metadata 和缓存，同时绝不运行缺失删除；收尾阶段再次中断才回滚本次扫描事务并放弃保存。进程崩溃仍会丢失整个未提交事务。后续短事务 checkpoint 必须在同一事务中提交 path 写入、扫描计数和受影响 summary，崩溃后通过持久化 work queue 恢复，不能仅根据时间戳猜测遍历位置。
 
 未来按时间选择目录时，应使用各目录的 `self_completed_at_ns`，而不是用祖先的 `subtree_complete_through_ns` 直接决定重扫整个子树。扫描开始时还必须冻结 work set；否则扫描过程中更新的时间会改变待处理集合。
 

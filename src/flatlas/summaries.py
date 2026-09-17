@@ -6,6 +6,28 @@ import sqlite3
 import time
 from collections.abc import Callable, Mapping
 
+_SUMMARY_UPSERT = """INSERT INTO directory_summary(
+       path_id, direct_files, direct_logical_size, direct_allocated_size,
+       subtree_files, subtree_logical_size, subtree_allocated_size,
+       self_completed_at_ns, subtree_complete_through_ns,
+       last_completed_scan_id, updated_at_ns
+   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   ON CONFLICT(path_id) DO UPDATE SET
+       direct_files=excluded.direct_files,
+       direct_logical_size=excluded.direct_logical_size,
+       direct_allocated_size=excluded.direct_allocated_size,
+       subtree_files=excluded.subtree_files,
+       subtree_logical_size=excluded.subtree_logical_size,
+       subtree_allocated_size=excluded.subtree_allocated_size,
+       self_completed_at_ns=excluded.self_completed_at_ns,
+       subtree_complete_through_ns=excluded.subtree_complete_through_ns,
+       last_completed_scan_id=excluded.last_completed_scan_id,
+       updated_at_ns=excluded.updated_at_ns"""
+
+
+def _id_batches(path_ids: list[int], size: int = 800) -> list[list[int]]:
+    return [path_ids[offset:offset + size] for offset in range(0, len(path_ids), size)]
+
 
 def _directory_rows(
     connection: sqlite3.Connection,
@@ -26,8 +48,10 @@ def _directory_rows(
             SELECT p.parent_path_id FROM path p JOIN ancestors a ON p.id=a.id
             WHERE p.parent_path_id IS NOT NULL
         )
-        SELECT DISTINCT p.id, p.parent_path_id, p.path_key
+        SELECT DISTINCT p.id, p.parent_path_id, p.path_key,
+               ds.self_completed_at_ns, ds.last_completed_scan_id
         FROM path p
+        LEFT JOIN directory_summary ds ON ds.path_id=p.id
         WHERE p.root_id=? AND p.state='present'
           AND p.entry_kind IN ('root', 'directory')
           AND (p.id IN descendants OR p.id IN ancestors)""",
@@ -61,53 +85,79 @@ def refresh_directory_summaries(
     total = len(rows)
     if on_progress is not None:
         on_progress(0, total)
+    if not rows:
+        return
+
+    path_ids = [int(row["id"]) for row in rows]
+    direct_by_parent: dict[int, tuple[int, int, int | None]] = {}
+    children_by_parent: dict[int, list[tuple[int, int | None, int | None, int | None, int | None]]] = {}
+    for batch in _id_batches(path_ids):
+        placeholders = ", ".join("?" for _ in batch)
+        direct_rows = connection.execute(
+            f"""SELECT parent_path_id, count(*) AS files,
+                       COALESCE(sum(logical_size), 0) AS logical_size,
+                       CASE WHEN count(*)=count(allocated_size)
+                            THEN COALESCE(sum(allocated_size), 0)
+                            ELSE NULL END AS allocated_size
+                FROM path
+                WHERE parent_path_id IN ({placeholders})
+                  AND state='present' AND entry_kind='file'
+                GROUP BY parent_path_id""",
+            batch,
+        ).fetchall()
+        for direct in direct_rows:
+            direct_by_parent[int(direct["parent_path_id"])] = (
+                int(direct["files"]),
+                int(direct["logical_size"]),
+                direct["allocated_size"],
+            )
+
+        child_rows = connection.execute(
+            f"""SELECT p.parent_path_id, p.id, ds.subtree_files,
+                       ds.subtree_logical_size, ds.subtree_allocated_size,
+                       ds.subtree_complete_through_ns
+                FROM path p LEFT JOIN directory_summary ds ON ds.path_id=p.id
+                WHERE p.parent_path_id IN ({placeholders})
+                  AND p.state='present' AND p.entry_kind='directory'""",
+            batch,
+        ).fetchall()
+        for child in child_rows:
+            children_by_parent.setdefault(int(child["parent_path_id"]), []).append(
+                (
+                    int(child["id"]),
+                    child["subtree_files"],
+                    child["subtree_logical_size"],
+                    child["subtree_allocated_size"],
+                    child["subtree_complete_through_ns"],
+                )
+            )
+
     updated_at = time.time_ns()
+    computed: dict[int, tuple[int, int, int | None, int | None]] = {}
+    upserts: list[tuple[int | None, ...]] = []
     for completed_count, directory in enumerate(rows, start=1):
         path_id = int(directory["id"])
-        direct = connection.execute(
-            """SELECT count(*) AS files,
-                      COALESCE(sum(logical_size), 0) AS logical_size,
-                      CASE WHEN count(*)=count(allocated_size)
-                           THEN COALESCE(sum(allocated_size), 0)
-                           ELSE NULL END AS allocated_size
-               FROM path
-               WHERE parent_path_id=? AND state='present' AND entry_kind='file'""",
-            (path_id,),
-        ).fetchone()
-        children = connection.execute(
-            """SELECT ds.subtree_files, ds.subtree_logical_size,
-                      ds.subtree_allocated_size, ds.subtree_complete_through_ns
-               FROM path p LEFT JOIN directory_summary ds ON ds.path_id=p.id
-               WHERE p.parent_path_id=? AND p.state='present' AND p.entry_kind='directory'""",
-            (path_id,),
-        ).fetchall()
-        existing = connection.execute(
-            """SELECT self_completed_at_ns, last_completed_scan_id
-               FROM directory_summary WHERE path_id=?""",
-            (path_id,),
-        ).fetchone()
-
         if path_id in completed:
             self_completed_at, last_completed_scan_id = completed[path_id]
-        elif existing is None:
-            self_completed_at = last_completed_scan_id = None
         else:
-            self_completed_at = existing["self_completed_at_ns"]
-            last_completed_scan_id = existing["last_completed_scan_id"]
+            self_completed_at = directory["self_completed_at_ns"]
+            last_completed_scan_id = directory["last_completed_scan_id"]
 
-        direct_files = int(direct["files"])
-        direct_logical = int(direct["logical_size"])
-        direct_allocated = direct["allocated_size"]
-        subtree_files = direct_files + sum(int(child["subtree_files"] or 0) for child in children)
-        subtree_logical = direct_logical + sum(int(child["subtree_logical_size"] or 0) for child in children)
+        direct_files, direct_logical, direct_allocated = direct_by_parent.get(path_id, (0, 0, 0))
+        children = []
+        for child in children_by_parent.get(path_id, []):
+            cached = computed.get(int(child[0]))
+            children.append(child[1:] if cached is None else cached)
 
-        child_allocated = [child["subtree_allocated_size"] for child in children]
+        subtree_files = direct_files + sum(int(child[0] or 0) for child in children)
+        subtree_logical = direct_logical + sum(int(child[1] or 0) for child in children)
+        child_allocated = [child[2] for child in children]
         if direct_allocated is None or any(value is None for value in child_allocated):
             subtree_allocated = None
         else:
             subtree_allocated = int(direct_allocated) + sum(int(value) for value in child_allocated)
 
-        child_completed = [child["subtree_complete_through_ns"] for child in children]
+        child_completed = [child[3] for child in children]
         if self_completed_at is None or any(value is None for value in child_completed):
             subtree_complete_through = None
         else:
@@ -115,24 +165,13 @@ def refresh_directory_summaries(
                 [int(self_completed_at), *(int(value) for value in child_completed)]
             )
 
-        connection.execute(
-            """INSERT INTO directory_summary(
-                   path_id, direct_files, direct_logical_size, direct_allocated_size,
-                   subtree_files, subtree_logical_size, subtree_allocated_size,
-                   self_completed_at_ns, subtree_complete_through_ns,
-                   last_completed_scan_id, updated_at_ns
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(path_id) DO UPDATE SET
-                   direct_files=excluded.direct_files,
-                   direct_logical_size=excluded.direct_logical_size,
-                   direct_allocated_size=excluded.direct_allocated_size,
-                   subtree_files=excluded.subtree_files,
-                   subtree_logical_size=excluded.subtree_logical_size,
-                   subtree_allocated_size=excluded.subtree_allocated_size,
-                   self_completed_at_ns=excluded.self_completed_at_ns,
-                   subtree_complete_through_ns=excluded.subtree_complete_through_ns,
-                   last_completed_scan_id=excluded.last_completed_scan_id,
-                   updated_at_ns=excluded.updated_at_ns""",
+        computed[path_id] = (
+            subtree_files,
+            subtree_logical,
+            subtree_allocated,
+            subtree_complete_through,
+        )
+        upserts.append(
             (
                 path_id,
                 direct_files,
@@ -145,10 +184,11 @@ def refresh_directory_summaries(
                 subtree_complete_through,
                 last_completed_scan_id,
                 updated_at,
-            ),
+            )
         )
         if on_progress is not None:
             on_progress(completed_count, total)
+    connection.executemany(_SUMMARY_UPSERT, upserts)
 
 
 def backfill_directory_summaries(

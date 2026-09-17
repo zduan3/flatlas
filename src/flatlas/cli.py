@@ -299,8 +299,10 @@ class _ScanProgressDisplay:
             return
         phase = {
             "scanning": "Scanning",
+            "saving": "Saving observed data",
             "completed": "Completed",
             "partial": "Partial",
+            "cancelled": "Cancelled; observed data saved",
         }[progress.phase]
         line = (
             f"{phase}: {_counted(progress.files_seen, 'file')} · "

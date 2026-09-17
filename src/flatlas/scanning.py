@@ -274,34 +274,37 @@ def scan_directory(
             if directory_complete:
                 completed_directories[directory_id] = (now_ns(), scan_id)
 
+        cancelled = False
         try:
             visit(scope, scope_path_id)
-            scope_status = "partial" if failed else "completed"
-            connection.execute(
-                "UPDATE scan_scope SET status=?, finished_at_ns=?, paths_seen=? WHERE id=?",
-                (scope_status, now_ns(), files_seen + dirs_seen, scope_id),
-            )
-            if scope_status == "completed":
-                _mark_missing(connection, root_id, scan_id, scope_id, scope_path_id)
-            refresh_directory_summaries(
-                connection,
-                root_id,
-                scope_path_id,
-                completed_directories=completed_directories,
-            )
-            errors = int(connection.execute("SELECT error_count FROM scan_scope WHERE id=?", (scope_id,)).fetchone()["error_count"])
-            connection.execute(
-                "UPDATE scan SET status=?, finished_at_ns=?, files_seen=?, dirs_seen=?, errors_seen=? WHERE id=?",
-                (scope_status, now_ns(), files_seen, dirs_seen, errors, scan_id),
-            )
         except KeyboardInterrupt:
-            connection.execute("UPDATE scan_scope SET status='cancelled', finished_at_ns=? WHERE id=?", (now_ns(), scope_id))
-            connection.execute("UPDATE scan SET status='cancelled', finished_at_ns=? WHERE id=?", (now_ns(), scan_id))
-            raise
-    report("partial" if failed else "completed")
+            cancelled = True
+
+        scope_status = "cancelled" if cancelled else "partial" if failed else "completed"
+        report("saving")
+        connection.execute(
+            "UPDATE scan_scope SET status=?, finished_at_ns=?, paths_seen=? WHERE id=?",
+            (scope_status, now_ns(), files_seen + dirs_seen, scope_id),
+        )
+        if scope_status == "completed":
+            _mark_missing(connection, root_id, scan_id, scope_id, scope_path_id)
+        refresh_directory_summaries(
+            connection,
+            root_id,
+            scope_path_id,
+            completed_directories=completed_directories,
+        )
+        errors = int(connection.execute("SELECT error_count FROM scan_scope WHERE id=?", (scope_id,)).fetchone()["error_count"])
+        connection.execute(
+            "UPDATE scan SET status=?, finished_at_ns=?, files_seen=?, dirs_seen=?, errors_seen=? WHERE id=?",
+            (scope_status, now_ns(), files_seen, dirs_seen, errors, scan_id),
+        )
+    report(scope_status)
+    if cancelled:
+        raise KeyboardInterrupt
     return {
         "scan_id": scan_id,
-        "status": "partial" if failed else "completed",
+        "status": scope_status,
         "files_seen": files_seen,
         "dirs_seen": dirs_seen,
         "logical_bytes_seen": logical_bytes_seen,

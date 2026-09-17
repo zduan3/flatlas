@@ -23,6 +23,7 @@ from flatlas.core import (
     remove_indexed_subtree,
     scan_directory,
 )
+from flatlas.summaries import refresh_directory_summaries
 from flatlas.version import VersionInfo
 
 
@@ -979,6 +980,105 @@ def test_partial_or_cancelled_scan_never_confirms_missing_paths(tmp_path: Path, 
         assert connection.execute(
             "SELECT state FROM path WHERE path_display=?", (str(vanished),)
         ).fetchone()["state"] == "present"
+    finally:
+        connection.close()
+
+
+def test_first_scan_interrupt_saves_observed_paths_and_cached_totals(tmp_path: Path) -> None:
+    connection, source = make_connection(tmp_path)
+    payload = source / "payload.bin"
+    payload.write_bytes(b"saved")
+    interrupted = False
+
+    def interrupt_once(progress) -> None:
+        nonlocal interrupted
+        if progress.phase == "scanning" and progress.files_seen == 1 and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+
+    try:
+        try:
+            scan_directory(connection, source, on_progress=interrupt_once)
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("scan should propagate cancellation after saving")
+
+        scan = connection.execute(
+            "SELECT status, files_seen, dirs_seen FROM scan ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert dict(scan) == {"status": "cancelled", "files_seen": 1, "dirs_seen": 1}
+        assert connection.execute(
+            "SELECT state FROM path WHERE path_display=?", (str(payload),)
+        ).fetchone()["state"] == "present"
+        summary = connection.execute(
+            """SELECT ds.subtree_files, ds.subtree_logical_size, ds.self_completed_at_ns
+               FROM directory_summary ds JOIN path p ON p.id=ds.path_id
+               WHERE p.path_display=?""",
+            (str(source),),
+        ).fetchone()
+        assert dict(summary) == {
+            "subtree_files": 1,
+            "subtree_logical_size": 5,
+            "self_completed_at_ns": None,
+        }
+    finally:
+        connection.close()
+
+
+def test_second_interrupt_during_cancel_save_rolls_back_scan(tmp_path: Path) -> None:
+    connection, source = make_connection(tmp_path)
+    payload = source / "payload.bin"
+    payload.write_bytes(b"discarded")
+    interruptions = 0
+
+    def interrupt_twice(progress) -> None:
+        nonlocal interruptions
+        if progress.phase == "scanning" and progress.files_seen == 1 and interruptions == 0:
+            interruptions += 1
+            raise KeyboardInterrupt
+        if progress.phase == "saving" and interruptions == 1:
+            interruptions += 1
+            raise KeyboardInterrupt
+
+    try:
+        try:
+            scan_directory(connection, source, on_progress=interrupt_twice)
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("second interrupt should abort saving")
+
+        assert interruptions == 2
+        assert connection.execute("SELECT count(*) FROM scan").fetchone()[0] == 0
+        assert connection.execute("SELECT count(*) FROM path").fetchone()[0] == 0
+        assert connection.execute("SELECT count(*) FROM directory_summary").fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_directory_summary_refresh_reads_directory_data_in_batches(tmp_path: Path) -> None:
+    connection, source = make_connection(tmp_path)
+    for index in range(25):
+        child = source / f"child-{index}"
+        child.mkdir()
+        (child / "payload.bin").write_bytes(b"x")
+    try:
+        scan_directory(connection, source)
+        root = connection.execute(
+            "SELECT id, root_id FROM path WHERE path_display=?", (str(source),)
+        ).fetchone()
+        statements: list[str] = []
+        connection.set_trace_callback(statements.append)
+        refresh_directory_summaries(connection, int(root["root_id"]), int(root["id"]))
+        connection.set_trace_callback(None)
+
+        reads = [
+            statement for statement in statements
+            if statement.lstrip().upper().startswith(("SELECT", "WITH"))
+        ]
+        assert len(reads) == 3
+        assert disk_usage(connection, scope=source)[0]["logical_size"] == 25
     finally:
         connection.close()
 
