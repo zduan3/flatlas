@@ -45,7 +45,14 @@ from flatlas.queries import (
     list_roots,
     query_paths,
 )
-from flatlas.scanning import SCANNER_VERSION, Observation, ScanProgress, upsert_path
+from flatlas.scanning import (
+    SCANNER_VERSION,
+    Observation,
+    ResumeSelection,
+    ScanProgress,
+    resume_selection,
+    upsert_path,
+)
 
 _observation = _scanning._observation
 _validated_digest = _hashing._validated_digest

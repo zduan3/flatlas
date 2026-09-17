@@ -37,6 +37,7 @@ from flatlas.core import (
     query_paths,
     register_namespace,
     remove_indexed_subtree,
+    resume_selection,
     scan_directory,
 )
 from flatlas.errors import FlatlasError
@@ -572,13 +573,22 @@ def scan(
             help="Only refresh directories last completely scanned before this ISO 8601 time or duration (for example 7d).",
         ),
     ] = None,
+    resume: Annotated[
+        bool,
+        typer.Option("--resume", help="Continue the latest incomplete scan for this exact directory scope."),
+    ] = False,
     db: db_option = None,
 ) -> None:
     """Scan metadata for a complete namespace or one subtree and update the persistent index."""
+    if resume and refresh_before is not None:
+        raise typer.BadParameter("--resume cannot be combined with --refresh-before")
     connection = _open_database(_database(db))
     progress = _ScanProgressDisplay(enabled=_stderr_is_tty())
     try:
-        cutoff = _parse_refresh_before(refresh_before) if refresh_before is not None else None
+        if resume:
+            cutoff = resume_selection(connection, path).refresh_before_ns
+        else:
+            cutoff = _parse_refresh_before(refresh_before) if refresh_before is not None else None
         result = scan_directory(connection, path, refresh_before_ns=cutoff, on_progress=progress.update)
     finally:
         progress.close()

@@ -21,6 +21,7 @@ from flatlas.core import (
     plan_operations,
     register_namespace,
     remove_indexed_subtree,
+    resume_selection,
     scan_directory,
 )
 from flatlas.summaries import refresh_directory_summaries
@@ -727,6 +728,54 @@ def test_database_migration_is_idempotent_and_keeps_existing_data(tmp_path: Path
         connection.close()
 
 
+def test_ls_shows_completed_active_and_unvisited_branches_after_cancellation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    connection, source = make_connection(tmp_path)
+    completed = source / "a-completed"
+    active = source / "b-active"
+    untouched = source / "c-untouched"
+    for directory in (completed, active, untouched):
+        directory.mkdir()
+        (directory / "payload.bin").write_bytes(directory.name.encode())
+    real_scandir = os.scandir
+
+    def sorted_scandir(path):
+        return iter(sorted(real_scandir(path), key=lambda entry: entry.name))
+
+    interrupted = False
+
+    def interrupt_active(progress) -> None:
+        nonlocal interrupted
+        if progress.phase == "scanning" and progress.current_directory == active.name and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+
+    try:
+        monkeypatch.setattr("flatlas.core.os.scandir", sorted_scandir)
+        scan_directory(connection, source)
+        try:
+            scan_directory(connection, source, on_progress=interrupt_active)
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("scan should be cancelled in the active branch")
+
+        monkeypatch.setattr("flatlas.core.os.scandir", real_scandir)
+        statuses = {
+            row["name"]: row["status"]
+            for row in list_child_directories(connection, scope=source)
+        }
+        assert statuses == {
+            completed.name: "scanned",
+            active.name: "incomplete",
+            untouched.name: "scanned",
+        }
+    finally:
+        connection.close()
+
+
 def test_cli_reports_pending_migration_progress_to_stderr(tmp_path: Path) -> None:
     database = tmp_path / "index.sqlite"
     connection, source = make_connection(tmp_path)
@@ -1191,6 +1240,106 @@ def test_first_scan_interrupt_saves_observed_paths_and_cached_totals(tmp_path: P
         }
     finally:
         connection.close()
+
+
+def test_resume_uses_original_start_and_skips_completed_directories(tmp_path: Path, monkeypatch) -> None:
+    connection, source = make_connection(tmp_path)
+    first = source / "a"
+    remaining = source / "b"
+    first.mkdir()
+    remaining.mkdir()
+    (first / "first.bin").write_bytes(b"first")
+    (remaining / "remaining.bin").write_bytes(b"remaining")
+    real_scandir = os.scandir
+
+    def sorted_scandir(path):
+        return iter(sorted(real_scandir(path), key=lambda entry: entry.name))
+
+    interrupted = False
+
+    def interrupt_before_remaining(progress) -> None:
+        nonlocal interrupted
+        if progress.phase == "scanning" and progress.current_directory == "b" and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+
+    try:
+        monkeypatch.setattr("flatlas.core.os.scandir", sorted_scandir)
+        try:
+            scan_directory(connection, source, on_progress=interrupt_before_remaining)
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("scan should be cancelled before the remaining directory")
+
+        cancelled = connection.execute(
+            "SELECT id, status, started_at_ns, refresh_before_ns FROM scan ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert cancelled["status"] == "cancelled"
+        assert cancelled["refresh_before_ns"] is None
+        selection = resume_selection(connection, source)
+        assert selection.scan_id == cancelled["id"]
+        assert selection.refresh_before_ns == cancelled["started_at_ns"]
+
+        scanned = {first: 0, remaining: 0}
+
+        def count_scandir(path):
+            directory = Path(path)
+            if directory in scanned:
+                scanned[directory] += 1
+            return real_scandir(path)
+
+        monkeypatch.setattr("flatlas.core.os.scandir", count_scandir)
+        result = scan_directory(connection, source, refresh_before_ns=selection.refresh_before_ns)
+
+        assert result["status"] == "completed"
+        assert scanned == {first: 0, remaining: 1}
+        resumed = connection.execute(
+            "SELECT refresh_before_ns FROM scan ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert resumed["refresh_before_ns"] == cancelled["started_at_ns"]
+    finally:
+        connection.close()
+
+
+def test_resume_preserves_existing_refresh_cutoff(tmp_path: Path) -> None:
+    connection, source = make_connection(tmp_path)
+    (source / "payload.bin").write_bytes(b"payload")
+    cutoff = 1
+    interrupted = False
+
+    def interrupt_once(progress) -> None:
+        nonlocal interrupted
+        if progress.phase == "scanning" and progress.files_seen == 1 and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+
+    try:
+        try:
+            scan_directory(
+                connection,
+                source,
+                refresh_before_ns=cutoff,
+                on_progress=interrupt_once,
+            )
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("refresh scan should be cancelled")
+
+        assert resume_selection(connection, source).refresh_before_ns == cutoff
+    finally:
+        connection.close()
+
+
+def test_cli_rejects_resume_with_refresh_before(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["scan", str(tmp_path), "--resume", "--refresh-before", "7d", "--db", str(tmp_path / "index.sqlite")],
+    )
+
+    assert result.exit_code == 2
+    assert "--resume cannot be combined with --refresh-before" in result.output
 
 
 def test_second_interrupt_during_cancel_save_rolls_back_scan(tmp_path: Path) -> None:

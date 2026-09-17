@@ -108,7 +108,8 @@ def list_child_directories(
         (root["id"], path_key(namespace, selected_path)),
     ).fetchone()
     indexed_rows = [] if parent is None else connection.execute(
-        """SELECT id, path_key, path_display, entry_kind, state, logical_size, allocated_size
+        """SELECT id, path_key, path_display, entry_kind, state, logical_size, allocated_size,
+                  last_seen_scan_id
         FROM path WHERE parent_path_id=? AND state='present'""",
         (parent["id"],),
     ).fetchall()
@@ -117,17 +118,26 @@ def list_child_directories(
     usage_rows = [] if parent is None else connection.execute(
         """SELECT p.id, ds.subtree_files AS files,
                   ds.subtree_logical_size AS logical_size,
-                  ds.subtree_allocated_size AS allocated_size
+                  ds.subtree_allocated_size AS allocated_size,
+                  ds.self_completed_at_ns, ds.subtree_complete_through_ns,
+                  ds.last_completed_scan_id
            FROM path p JOIN directory_summary ds ON ds.path_id=p.id
            WHERE p.parent_path_id=? AND p.state='present' AND p.entry_kind='directory'""",
         (parent["id"],),
     ).fetchall()
     usage_by_id = {row["id"]: row for row in usage_rows}
+    parent_summary = None if parent is None else connection.execute(
+        """SELECT self_completed_at_ns, last_completed_scan_id
+           FROM directory_summary WHERE path_id=?""",
+        (parent["id"],),
+    ).fetchone()
     scopes = connection.execute(
-        """SELECT ss.scope_path_key, ss.status FROM scan_scope ss
+        """SELECT ss.scope_path_key, ss.status, ss.scan_id,
+                  s.started_at_ns, s.refresh_before_ns
+           FROM scan_scope ss
         JOIN scan s ON s.id=ss.scan_id
         WHERE ss.root_id=?
-        ORDER BY s.started_at_ns DESC, ss.id DESC""",
+        ORDER BY s.id DESC, ss.id DESC""",
         (root["id"],),
     ).fetchall()
 
@@ -141,8 +151,15 @@ def list_child_directories(
             observed = _observation(namespace, actual_path)
         except OSError as exc:
             raise FlatlasError(f"cannot inspect directory entry {actual_path}: {exc}") from exc
-        status = _directory_scan_status(indexed, path_key(namespace, actual_path), scopes)
         usage = None if indexed is None else usage_by_id.get(indexed["id"])
+        status = _entry_scan_status(
+            indexed,
+            observed.kind,
+            path_key(namespace, actual_path),
+            scopes,
+            usage,
+            parent_summary,
+        )
         result.append(_live_child_status_row(observed, status, usage))
 
     for indexed in indexed_rows:
@@ -155,17 +172,42 @@ def _normalized_display(path_display: str) -> str:
     return os.path.normcase(os.path.normpath(path_display))
 
 
-def _directory_scan_status(
+def _entry_scan_status(
     indexed: sqlite3.Row | None,
-    directory_key: bytes,
+    entry_kind: str,
+    entry_key: bytes,
     scopes: list[sqlite3.Row],
+    usage: sqlite3.Row | None,
+    parent_summary: sqlite3.Row | None,
 ) -> str:
-    if indexed is None or indexed["state"] != "present":
+    if (
+        indexed is None
+        or indexed["state"] != "present"
+        or indexed["entry_kind"] != entry_kind
+    ):
         return "unscanned"
-    latest = next((scope for scope in scopes if directory_key.startswith(scope["scope_path_key"])), None)
-    if latest is None:
+    covering = [scope for scope in scopes if entry_key.startswith(scope["scope_path_key"])]
+    if not covering:
         return "unscanned"
-    return "scanned" if latest["status"] == "completed" else "incomplete"
+    latest = covering[0]
+    if latest["status"] == "completed":
+        return "scanned"
+
+    refresh_before = latest["refresh_before_ns"]
+    cutoff = int(latest["started_at_ns"] if refresh_before is None else refresh_before)
+    if entry_kind == "directory":
+        complete_through = None if usage is None else usage["subtree_complete_through_ns"]
+    else:
+        complete_through = None if parent_summary is None else parent_summary["self_completed_at_ns"]
+    if complete_through is not None and int(complete_through) >= cutoff:
+        return "scanned"
+    if int(indexed["last_seen_scan_id"]) == int(latest["scan_id"]):
+        return "incomplete"
+
+    previous = covering[1] if len(covering) > 1 else None
+    if previous is None:
+        return "unscanned"
+    return "scanned" if previous["status"] == "completed" else "incomplete"
 
 
 def _directory_status_row(

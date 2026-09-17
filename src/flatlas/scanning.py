@@ -55,6 +55,12 @@ class ScanProgress:
     current_directory: str | None = None
 
 
+@dataclass(frozen=True)
+class ResumeSelection:
+    scan_id: int
+    refresh_before_ns: int
+
+
 def _observation(namespace: Namespace, value: Path, *, root: bool = False) -> Observation:
     stat = value.lstat()
     mode = stat.st_mode
@@ -240,6 +246,37 @@ def _indexed_directories(
            ORDER BY p.path_key""",
         (root_id, parent_id),
     ).fetchall()
+
+
+def resume_selection(connection: sqlite3.Connection, value: Path) -> ResumeSelection:
+    """Resolve the latest incomplete attempt for one exact directory scope."""
+
+    namespace = discover_namespace(value)
+    root = get_root(connection, namespace)
+    if root is None:
+        raise FlatlasError(f"filesystem is not registered; run 'flatlas init {value}' first")
+    scope = value.expanduser().resolve()
+    if not scope.is_dir():
+        raise FlatlasError(f"scan path must be a directory: {scope}")
+    row = connection.execute(
+        """SELECT s.id, s.status, s.started_at_ns, s.refresh_before_ns
+           FROM scan s JOIN scan_scope ss ON ss.scan_id=s.id
+           WHERE ss.root_id=? AND ss.scope_path_key=?
+           ORDER BY s.id DESC LIMIT 1""",
+        (int(root["id"]), path_key(namespace, scope)),
+    ).fetchone()
+    if row is None:
+        raise FlatlasError(f"no previous scan found for {scope}; run without --resume")
+    status = str(row["status"])
+    if status == "completed":
+        raise FlatlasError(f"latest scan for {scope} is completed; run without --resume")
+    if status == "running":
+        raise FlatlasError(f"latest scan for {scope} is still running; cannot resume it")
+    refresh_before = row["refresh_before_ns"]
+    return ResumeSelection(
+        scan_id=int(row["id"]),
+        refresh_before_ns=int(row["started_at_ns"] if refresh_before is None else refresh_before),
+    )
 
 
 def scan_directory(
