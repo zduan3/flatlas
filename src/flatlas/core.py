@@ -53,6 +53,7 @@ from flatlas.scanning import (
     ResumeSelection,
     ScanProgress,
     resume_selection,
+    resume_selection_from_scan,
     upsert_path,
 )
 

@@ -59,6 +59,7 @@ class ScanProgress:
 class ResumeSelection:
     scan_id: int
     refresh_before_ns: int
+    scope: Path
 
 
 def _observation(namespace: Namespace, value: Path, *, root: bool = False) -> Observation:
@@ -248,7 +249,10 @@ def _indexed_directories(
     ).fetchall()
 
 
-def resume_selection(connection: sqlite3.Connection, value: Path) -> ResumeSelection:
+def resume_selection(
+    connection: sqlite3.Connection,
+    value: Path,
+) -> ResumeSelection:
     """Resolve the latest incomplete attempt for one exact directory scope."""
 
     namespace = discover_namespace(value)
@@ -258,24 +262,52 @@ def resume_selection(connection: sqlite3.Connection, value: Path) -> ResumeSelec
     scope = value.expanduser().resolve()
     if not scope.is_dir():
         raise FlatlasError(f"scan path must be a directory: {scope}")
+    scope_key = path_key(namespace, scope)
     row = connection.execute(
         """SELECT s.id, s.status, s.started_at_ns, s.refresh_before_ns
            FROM scan s JOIN scan_scope ss ON ss.scan_id=s.id
            WHERE ss.root_id=? AND ss.scope_path_key=?
            ORDER BY s.id DESC LIMIT 1""",
-        (int(root["id"]), path_key(namespace, scope)),
+        (int(root["id"]), scope_key),
     ).fetchone()
     if row is None:
         raise FlatlasError(f"no previous scan found for {scope}; run without --resume")
+    return _resume_selection_from_row(row, scope)
+
+
+def resume_selection_from_scan(connection: sqlite3.Connection, scan_id: int) -> ResumeSelection:
+    """Resolve one incomplete scan ID and infer its unique scope path."""
+
+    rows = connection.execute(
+        """SELECT s.id, s.status, s.started_at_ns, s.refresh_before_ns,
+                  p.path_display AS scope
+           FROM scan s JOIN scan_scope ss ON ss.scan_id=s.id
+           LEFT JOIN path p
+             ON p.root_id=ss.root_id AND p.path_key=ss.scope_path_key
+           WHERE s.id=? ORDER BY ss.id""",
+        (scan_id,),
+    ).fetchall()
+    if not rows:
+        raise FlatlasError(f"scan not found: {scan_id}")
+    if len(rows) != 1:
+        raise FlatlasError(f"scan {scan_id} has multiple scopes; --resume-from cannot infer a unique PATH")
+    row = rows[0]
+    if row["scope"] is None:
+        raise FlatlasError(f"scan {scan_id} scope path is unavailable")
+    return _resume_selection_from_row(row, Path(str(row["scope"])))
+
+
+def _resume_selection_from_row(row: sqlite3.Row, scope: Path) -> ResumeSelection:
     status = str(row["status"])
     if status == "completed":
-        raise FlatlasError(f"latest scan for {scope} is completed; run without --resume")
+        raise FlatlasError(f"scan {row['id']} for {scope} is completed; run without resume options")
     if status == "running":
-        raise FlatlasError(f"latest scan for {scope} is still running; cannot resume it")
+        raise FlatlasError(f"scan {row['id']} for {scope} is still running; cannot resume it")
     refresh_before = row["refresh_before_ns"]
     return ResumeSelection(
         scan_id=int(row["id"]),
         refresh_before_ns=int(row["started_at_ns"] if refresh_before is None else refresh_before),
+        scope=scope,
     )
 
 

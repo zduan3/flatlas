@@ -23,6 +23,7 @@ from flatlas.core import (
     register_namespace,
     remove_indexed_subtree,
     resume_selection,
+    resume_selection_from_scan,
     scan_directory,
     scan_info,
 )
@@ -1300,6 +1301,10 @@ def test_resume_uses_original_start_and_skips_completed_directories(tmp_path: Pa
             "SELECT refresh_before_ns FROM scan ORDER BY id DESC LIMIT 1"
         ).fetchone()
         assert resumed["refresh_before_ns"] == cancelled["started_at_ns"]
+        explicit = resume_selection_from_scan(connection, cancelled["id"])
+        assert explicit.scan_id == cancelled["id"]
+        assert explicit.refresh_before_ns == cancelled["started_at_ns"]
+        assert explicit.scope == source
     finally:
         connection.close()
 
@@ -1341,7 +1346,54 @@ def test_cli_rejects_resume_with_refresh_before(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 2
-    assert "--resume cannot be combined with --refresh-before" in result.output
+    assert "--resume, --resume-from, and --refresh-before" in result.output
+    assert "mutually" in result.output
+
+
+def test_cli_resumes_from_explicit_scan_id(tmp_path: Path) -> None:
+    database = tmp_path / "index.sqlite"
+    connection, source = make_connection(tmp_path)
+    (source / "payload.bin").write_bytes(b"payload")
+    interrupted = False
+
+    def interrupt_once(progress) -> None:
+        nonlocal interrupted
+        if progress.phase == "scanning" and progress.files_seen == 1 and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+
+    try:
+        try:
+            scan_directory(connection, source, on_progress=interrupt_once)
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("scan should be cancelled")
+        cancelled = connection.execute(
+            "SELECT id, started_at_ns FROM scan ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        connection.close()
+
+    result = CliRunner().invoke(
+        app,
+        ["scan", "--resume-from", str(cancelled["id"]), "--db", str(database)],
+    )
+
+    assert result.exit_code == 0
+    summary = json.loads(result.stdout)
+    assert summary["status"] == "completed"
+    assert summary["refresh_before_ns"] == cancelled["started_at_ns"]
+
+
+def test_cli_rejects_path_with_resume_from(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["scan", str(tmp_path), "--resume-from", "1", "--db", str(tmp_path / "index.sqlite")],
+    )
+
+    assert result.exit_code == 2
+    assert "PATH must be omitted with --resume-from" in result.output
 
 
 def test_scan_audit_queries_filter_scopes_and_include_errors(tmp_path: Path, monkeypatch) -> None:

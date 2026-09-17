@@ -10,6 +10,8 @@
 
 `flatlas scan PATH --resume` 只匹配 root 与规范化 scope 完全相同的最近 scan。最近状态必须是 `cancelled`、`partial` 或 `failed`；`completed` 不可恢复，`running` 不会被自动接管。恢复调用创建新的独立 scan，不保存 `resumed_from_scan_id`：若上次 scan 已有 `refresh_before_ns` 则原值继承，否则使用上次 scan 的 `started_at_ns`。因此多次用户中断始终使用最初的固定 cutoff，目录仍记录各自实际完成时间，失败目录的成功时间不推进并会在下次恢复时重试。
 
+`flatlas scan --resume-from ID` 使用相同规则显式选择历史 scan，并从其唯一 `scan_scope` 读取 `scan-info ID` 所展示的 PATH；ID 必须存在、状态未完成且只有一个 scope。显式选择允许在存在更新的扫描记录时仍从指定的旧 cutoff 刷新，但不会修改或关联原 scan。`--resume`、`--resume-from` 与 `--refresh-before` 互斥，使用 `--resume-from` 时不得再传 PATH。
+
 当前恢复只适用于已经成功保存 `cancelled`/`partial`/`failed` 记录的调用。首次中断后的收尾阶段若再次中断、进程崩溃或异常导致单事务回滚，本次观察和 scan 记录均不存在，不能从该调用恢复；此限制仍需短事务 checkpoint 和持久化工作队列解决。
 
 ## 目标

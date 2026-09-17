@@ -39,6 +39,7 @@ from flatlas.core import (
     register_namespace,
     remove_indexed_subtree,
     resume_selection,
+    resume_selection_from_scan,
     scan_directory,
     scan_info,
 )
@@ -594,7 +595,10 @@ def df_command(db: db_option = None, format: Annotated[str, typer.Option("--form
 
 @app.command()
 def scan(
-    path: Annotated[Path, typer.Argument(help="Directory to scan; it must be on a registered filesystem.")],
+    path: Annotated[
+        Path | None,
+        typer.Argument(help="Directory to scan; omit when using --resume-from."),
+    ] = None,
     refresh_before: Annotated[
         str | None,
         typer.Option(
@@ -606,19 +610,34 @@ def scan(
         bool,
         typer.Option("--resume", help="Continue the latest incomplete scan for this exact directory scope."),
     ] = False,
+    resume_from: Annotated[
+        int | None,
+        typer.Option("--resume-from", min=1, help="Continue an incomplete scan ID using its recorded scope."),
+    ] = None,
     db: db_option = None,
 ) -> None:
     """Scan metadata for a complete namespace or one subtree and update the persistent index."""
-    if resume and refresh_before is not None:
-        raise typer.BadParameter("--resume cannot be combined with --refresh-before")
+    if sum((resume, resume_from is not None, refresh_before is not None)) > 1:
+        raise typer.BadParameter("--resume, --resume-from, and --refresh-before are mutually exclusive")
+    if resume_from is not None and path is not None:
+        raise typer.BadParameter("PATH must be omitted with --resume-from; the scan scope is read from the record")
+    if resume_from is None and path is None:
+        raise typer.BadParameter("PATH is required unless --resume-from is used")
     connection = _open_database(_database(db))
     progress = _ScanProgressDisplay(enabled=_stderr_is_tty())
     try:
-        if resume:
+        scan_path = path
+        if resume_from is not None:
+            selection = resume_selection_from_scan(connection, resume_from)
+            scan_path = selection.scope
+            cutoff = selection.refresh_before_ns
+        elif resume:
+            assert path is not None
             cutoff = resume_selection(connection, path).refresh_before_ns
         else:
             cutoff = _parse_refresh_before(refresh_before) if refresh_before is not None else None
-        result = scan_directory(connection, path, refresh_before_ns=cutoff, on_progress=progress.update)
+        assert scan_path is not None
+        result = scan_directory(connection, scan_path, refresh_before_ns=cutoff, on_progress=progress.update)
     finally:
         progress.close()
         connection.close()
