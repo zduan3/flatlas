@@ -434,6 +434,13 @@ def test_scan_reports_file_count_and_logical_size_progress(tmp_path: Path, monke
     assert "Completed: 3 files · 3 dirs · 6 B" in result.stderr
 
 
+def test_refresh_before_parser_accepts_absolute_time_and_duration() -> None:
+    current = 2_000_000_000_000_000_000
+
+    assert cli._parse_refresh_before("7d", current_ns=current) == current - 7 * 24 * 60 * 60 * 1_000_000_000
+    assert cli._parse_refresh_before("1970-01-01T00:00:01Z", current_ns=current) == 1_000_000_000
+
+
 def test_scan_progress_truncates_long_directory_prefix_by_display_width(monkeypatch) -> None:
     output: list[str] = []
     monkeypatch.setattr(cli.shutil, "get_terminal_size", lambda fallback: os.terminal_size((40, 24)))
@@ -691,7 +698,7 @@ def test_database_migration_is_idempotent_and_keeps_existing_data(tmp_path: Path
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
         assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
-        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 2
+        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 3
         assert connection.execute("SELECT root_path_display FROM root").fetchone()[0] == str(discover_namespace(source).path)
         assert connection.execute("SELECT count(*) FROM path").fetchone()[0] == preserved_path_count
         summary = connection.execute(
@@ -737,6 +744,28 @@ def test_cli_reports_pending_migration_progress_to_stderr(tmp_path: Path) -> Non
     assert "database migration 2 required: cache directory usage and scan freshness" in result.stderr
     assert "Migrating database 2:" in result.stderr
     assert "database migration 2 completed" in result.stderr
+
+
+def test_refresh_cutoff_migration_keeps_existing_scans(tmp_path: Path) -> None:
+    database = tmp_path / "index.sqlite"
+    connection, source = make_connection(tmp_path)
+    scan_directory(connection, source)
+    scan_count = connection.execute("SELECT count(*) FROM scan").fetchone()[0]
+    connection.execute("ALTER TABLE scan DROP COLUMN refresh_before_ns")
+    connection.execute("DELETE FROM schema_migration WHERE version=3")
+    connection.commit()
+    connection.close()
+
+    progress = []
+    connection = open_database(database, on_migration=progress.append)
+    try:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info('scan')")}
+        assert "refresh_before_ns" in columns
+        assert connection.execute("SELECT count(*) FROM scan").fetchone()[0] == scan_count
+        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 3
+        assert [(event.version, event.phase) for event in progress] == [(3, "started"), (3, "completed")]
+    finally:
+        connection.close()
 
 
 def test_directory_summary_records_partial_and_complete_scan_freshness(tmp_path: Path, monkeypatch) -> None:
@@ -801,6 +830,144 @@ def test_directory_summary_records_partial_and_complete_scan_freshness(tmp_path:
         assert by_path[str(source)]["subtree_complete_through_ns"] == nested_last_success
         assert by_path[str(nested)]["self_completed_at_ns"] == nested_last_success
         assert by_path[str(nested)]["subtree_complete_through_ns"] == nested_last_success
+    finally:
+        connection.close()
+
+
+def test_refresh_before_scans_old_directories_and_preserves_fresh_subtrees(tmp_path: Path) -> None:
+    connection, source = make_connection(tmp_path)
+    fresh = source / "fresh"
+    old = source / "old"
+    fresh.mkdir()
+    old.mkdir()
+    fresh_file = fresh / "fresh.bin"
+    old_file = old / "old.bin"
+    fresh_file.write_bytes(b"fresh")
+    old_file.write_bytes(b"old")
+    cutoff = 2_000_000_000
+    try:
+        scan_directory(connection, source)
+        connection.execute(
+            """UPDATE directory_summary
+               SET self_completed_at_ns=?, subtree_complete_through_ns=?
+               WHERE path_id=(SELECT id FROM path WHERE path_display=?)""",
+            (cutoff + 100, cutoff - 100, str(source)),
+        )
+        connection.execute(
+            """UPDATE directory_summary
+               SET self_completed_at_ns=?, subtree_complete_through_ns=?
+               WHERE path_id=(SELECT id FROM path WHERE path_display=?)""",
+            (cutoff + 100, cutoff + 100, str(fresh)),
+        )
+        connection.execute(
+            """UPDATE directory_summary
+               SET self_completed_at_ns=?, subtree_complete_through_ns=?
+               WHERE path_id=(SELECT id FROM path WHERE path_display=?)""",
+            (cutoff - 100, cutoff - 100, str(old)),
+        )
+        connection.commit()
+        fresh_file.unlink()
+        old_file.unlink()
+
+        result = scan_directory(connection, source, refresh_before_ns=cutoff)
+
+        assert result["status"] == "completed"
+        assert result["refresh_before_ns"] == cutoff
+        states = {
+            row["path_display"]: row["state"]
+            for row in connection.execute(
+                "SELECT path_display, state FROM path WHERE path_display IN (?, ?)",
+                (str(fresh_file), str(old_file)),
+            )
+        }
+        assert states[str(fresh_file)] == "present"
+        assert states[str(old_file)] == "deleted"
+        scan = connection.execute(
+            "SELECT refresh_before_ns FROM scan ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert scan["refresh_before_ns"] == cutoff
+        freshness = connection.execute(
+            """SELECT ds.self_completed_at_ns
+               FROM directory_summary ds JOIN path p ON p.id=ds.path_id
+               WHERE p.path_display=?""",
+            (str(old),),
+        ).fetchone()[0]
+        assert freshness > cutoff
+    finally:
+        connection.close()
+
+
+def test_partial_refresh_never_confirms_missing_entries(tmp_path: Path, monkeypatch) -> None:
+    connection, source = make_connection(tmp_path)
+    first = source / "first"
+    blocked = source / "blocked"
+    first.mkdir()
+    blocked.mkdir()
+    vanished = first / "vanished.bin"
+    vanished.write_bytes(b"gone")
+    cutoff = 2_000_000_000
+    real_scandir = os.scandir
+    try:
+        scan_directory(connection, source)
+        connection.execute(
+            "UPDATE directory_summary SET self_completed_at_ns=?, subtree_complete_through_ns=?",
+            (cutoff - 1, cutoff - 1),
+        )
+        connection.commit()
+        vanished.unlink()
+
+        def fail_one_directory(path):
+            if Path(path) == blocked:
+                raise PermissionError("injected refresh failure")
+            return real_scandir(path)
+
+        monkeypatch.setattr("flatlas.core.os.scandir", fail_one_directory)
+        result = scan_directory(connection, source, refresh_before_ns=cutoff)
+
+        assert result["status"] == "partial"
+        assert connection.execute(
+            "SELECT state FROM path WHERE path_display=?", (str(vanished),)
+        ).fetchone()["state"] == "present"
+    finally:
+        connection.close()
+
+
+def test_refresh_falls_back_to_parent_when_indexed_child_disappears(tmp_path: Path) -> None:
+    connection, source = make_connection(tmp_path)
+    removed = source / "removed"
+    removed.mkdir()
+    payload = removed / "payload.bin"
+    payload.write_bytes(b"gone")
+    cutoff = 2_000_000_000
+    try:
+        scan_directory(connection, source)
+        connection.execute(
+            """UPDATE directory_summary
+               SET self_completed_at_ns=?, subtree_complete_through_ns=?
+               WHERE path_id=(SELECT id FROM path WHERE path_display=?)""",
+            (cutoff + 100, cutoff - 100, str(source)),
+        )
+        connection.execute(
+            """UPDATE directory_summary
+               SET self_completed_at_ns=?, subtree_complete_through_ns=?
+               WHERE path_id=(SELECT id FROM path WHERE path_display=?)""",
+            (cutoff - 100, cutoff - 100, str(removed)),
+        )
+        connection.commit()
+        payload.unlink()
+        removed.rmdir()
+
+        result = scan_directory(connection, source, refresh_before_ns=cutoff)
+
+        assert result["status"] == "completed"
+        states = {
+            row["path_display"]: row["state"]
+            for row in connection.execute(
+                "SELECT path_display, state FROM path WHERE path_display IN (?, ?)",
+                (str(removed), str(payload)),
+            )
+        }
+        assert states == {str(removed): "deleted", str(payload): "deleted"}
     finally:
         connection.close()
 

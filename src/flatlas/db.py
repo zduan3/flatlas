@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_migration (
@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS scan (
     started_at_ns INTEGER NOT NULL, finished_at_ns INTEGER,
     scanner_version TEXT NOT NULL,
     files_seen INTEGER NOT NULL DEFAULT 0, dirs_seen INTEGER NOT NULL DEFAULT 0,
-    errors_seen INTEGER NOT NULL DEFAULT 0, note TEXT
+    errors_seen INTEGER NOT NULL DEFAULT 0, note TEXT,
+    refresh_before_ns INTEGER
 );
 CREATE TABLE IF NOT EXISTS scan_scope (
     id INTEGER PRIMARY KEY,
@@ -132,6 +133,8 @@ CREATE INDEX IF NOT EXISTS idx_directory_summary_freshness
     ON directory_summary(self_completed_at_ns, subtree_complete_through_ns);
 """
 
+REFRESH_SCAN_MIGRATION_DESCRIPTION = "record directory refresh cutoff"
+
 
 @dataclass(frozen=True)
 class MigrationProgress:
@@ -205,6 +208,20 @@ def migrate(
             "INSERT INTO schema_migration(version, applied_at_ns, description) VALUES (?, ?, ?)",
             (2, now_ns(), description),
         )
+        connection.commit()
+        if existing_database and on_migration is not None:
+            on_migration(MigrationProgress(2, description, "completed"))
+    refresh_scan = connection.execute("SELECT 1 FROM schema_migration WHERE version = 3").fetchone()
+    if refresh_scan is None:
+        if existing_database and on_migration is not None:
+            on_migration(MigrationProgress(3, REFRESH_SCAN_MIGRATION_DESCRIPTION, "started"))
+        scan_columns = {row["name"] for row in connection.execute("PRAGMA table_info('scan')")}
+        if "refresh_before_ns" not in scan_columns:
+            connection.execute("ALTER TABLE scan ADD COLUMN refresh_before_ns INTEGER")
+        connection.execute(
+            "INSERT INTO schema_migration(version, applied_at_ns, description) VALUES (?, ?, ?)",
+            (3, now_ns(), REFRESH_SCAN_MIGRATION_DESCRIPTION),
+        )
     connection.commit()
-    if existing_database and directory_summary is None and on_migration is not None:
-        on_migration(MigrationProgress(2, description, "completed"))
+    if existing_database and refresh_scan is None and on_migration is not None:
+        on_migration(MigrationProgress(3, REFRESH_SCAN_MIGRATION_DESCRIPTION, "completed"))

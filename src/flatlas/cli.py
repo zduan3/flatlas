@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import time
 import unicodedata
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -43,6 +45,15 @@ from flatlas.version import current_version
 app = typer.Typer(help="Persistent, read-only filesystem indexing and duplicate analysis.", no_args_is_help=True)
 db_option = Annotated[Path | None, typer.Option("--db", help="Override the global index database for this command.")]
 
+_REFRESH_DURATION = re.compile(r"^(?P<amount>[1-9]\d*)(?P<unit>[smhdw])$")
+_DURATION_NS = {
+    "s": 1_000_000_000,
+    "m": 60 * 1_000_000_000,
+    "h": 60 * 60 * 1_000_000_000,
+    "d": 24 * 60 * 60 * 1_000_000_000,
+    "w": 7 * 24 * 60 * 60 * 1_000_000_000,
+}
+
 
 def _version_callback(value: bool) -> None:
     if value:
@@ -62,6 +73,29 @@ def app_callback(
 
 def _database(explicit: Path | None, *, create: bool = False) -> Path:
     return resolve_database(explicit, create=create)
+
+
+def _parse_refresh_before(value: str, *, current_ns: int | None = None) -> int:
+    text = value.strip()
+    now = time.time_ns() if current_ns is None else current_ns
+    duration = _REFRESH_DURATION.fullmatch(text)
+    if duration is not None:
+        return now - int(duration["amount"]) * _DURATION_NS[duration["unit"]]
+    try:
+        parsed = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text)
+    except ValueError as exc:
+        raise typer.BadParameter(
+            "expected an ISO 8601 datetime or a duration such as 7d, 12h, or 30m"
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    utc = parsed.astimezone(UTC)
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    delta = utc - epoch
+    resolved = (delta.days * 86_400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1_000
+    if resolved > now:
+        raise typer.BadParameter("refresh time must not be in the future")
+    return resolved
 
 
 class _MigrationProgressDisplay:
@@ -531,13 +565,21 @@ def df_command(db: db_option = None, format: Annotated[str, typer.Option("--form
 @app.command()
 def scan(
     path: Annotated[Path, typer.Argument(help="Directory to scan; it must be on a registered filesystem.")],
+    refresh_before: Annotated[
+        str | None,
+        typer.Option(
+            "--refresh-before",
+            help="Only refresh directories last completely scanned before this ISO 8601 time or duration (for example 7d).",
+        ),
+    ] = None,
     db: db_option = None,
 ) -> None:
     """Scan metadata for a complete namespace or one subtree and update the persistent index."""
     connection = _open_database(_database(db))
     progress = _ScanProgressDisplay(enabled=_stderr_is_tty())
     try:
-        result = scan_directory(connection, path, on_progress=progress.update)
+        cutoff = _parse_refresh_before(refresh_before) if refresh_before is not None else None
+        result = scan_directory(connection, path, refresh_before_ns=cutoff, on_progress=progress.update)
     finally:
         progress.close()
         connection.close()

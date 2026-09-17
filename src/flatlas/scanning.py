@@ -188,10 +188,65 @@ def _mark_missing(connection: sqlite3.Connection, root_id: int, scan_id: int, sc
     )
 
 
+def _mark_missing_direct_children(
+    connection: sqlite3.Connection,
+    root_id: int,
+    scan_id: int,
+    scope_id: int,
+    directory_id: int,
+) -> None:
+    """Confirm missing direct entries and their descendants for one complete directory."""
+
+    connection.execute(
+        """WITH RECURSIVE missing(id) AS (
+             SELECT id FROM path
+             WHERE root_id=? AND parent_path_id=? AND state='present'
+               AND last_seen_scan_id <> ?
+             UNION ALL
+             SELECT p.id FROM path p JOIN missing m ON p.parent_path_id=m.id
+             WHERE p.root_id=? AND p.state='present'
+           )
+           UPDATE path SET state='deleted', deleted_by_scope_id=?, deleted_at_ns=?
+           WHERE id IN missing""",
+        (root_id, directory_id, scan_id, root_id, scope_id, now_ns()),
+    )
+
+
+def _directory_refresh_state(
+    connection: sqlite3.Connection,
+    root_id: int,
+    directory_id: int,
+) -> sqlite3.Row | None:
+    return connection.execute(
+        """SELECT ds.self_completed_at_ns, ds.subtree_complete_through_ns
+           FROM path p JOIN directory_summary ds ON ds.path_id=p.id
+           WHERE p.root_id=? AND p.id=? AND p.state='present'
+             AND p.entry_kind IN ('root', 'directory')""",
+        (root_id, directory_id),
+    ).fetchone()
+
+
+def _indexed_directories(
+    connection: sqlite3.Connection,
+    root_id: int,
+    parent_id: int,
+) -> list[sqlite3.Row]:
+    return connection.execute(
+        """SELECT p.id, p.path_key, p.path_display,
+                  ds.subtree_complete_through_ns
+           FROM path p LEFT JOIN directory_summary ds ON ds.path_id=p.id
+           WHERE p.root_id=? AND p.parent_path_id=? AND p.state='present'
+             AND p.entry_kind='directory'
+           ORDER BY p.path_key""",
+        (root_id, parent_id),
+    ).fetchall()
+
+
 def scan_directory(
     connection: sqlite3.Connection,
     value: Path,
     *,
+    refresh_before_ns: int | None = None,
     on_progress: Callable[[ScanProgress], None] | None = None,
 ) -> dict[str, Any]:
     namespace = discover_namespace(value)
@@ -204,12 +259,15 @@ def scan_directory(
     root_id = int(root["id"])
     kind = "full" if scope == namespace.path else "subtree"
     started = now_ns()
+    if refresh_before_ns is not None and refresh_before_ns > started:
+        raise FlatlasError("refresh time must not be in the future")
+    scope_key = path_key(namespace, scope)
     with connection:
         scan_id = _last_insert_id(connection.execute(
-            "INSERT INTO scan(root_id, kind, status, started_at_ns, scanner_version) VALUES (?, ?, 'running', ?, ?)",
-            (root_id, kind, started, SCANNER_VERSION),
+            """INSERT INTO scan(root_id, kind, status, started_at_ns, scanner_version, refresh_before_ns)
+               VALUES (?, ?, 'running', ?, ?, ?)""",
+            (root_id, kind, started, SCANNER_VERSION, refresh_before_ns),
         ))
-        scope_key = path_key(namespace, scope)
         scope_id = _last_insert_id(connection.execute(
             "INSERT INTO scan_scope(scan_id, root_id, scope_path_key, status, started_at_ns) VALUES (?, ?, ?, 'running', ?)",
             (scan_id, root_id, scope_key, started),
@@ -226,6 +284,7 @@ def scan_directory(
                 "files_seen": 0,
                 "dirs_seen": 0,
                 "logical_bytes_seen": 0,
+                "refresh_before_ns": refresh_before_ns,
                 "errors_seen": 1,
             }
         files_seen = 0
@@ -244,8 +303,55 @@ def scan_directory(
                     ScanProgress(phase, files_seen, dirs_seen, logical_bytes_seen, current_directory)
                 )
 
-        def visit(directory: Path, directory_id: int) -> None:
+        def visit(
+            directory: Path,
+            directory_id: int,
+        ) -> None:
             nonlocal files_seen, dirs_seen, logical_bytes_seen, failed
+            scan_self = refresh_before_ns is None
+            if refresh_before_ns is not None:
+                report("scanning", directory)
+                refresh_state = _directory_refresh_state(connection, root_id, directory_id)
+                scan_self = (
+                    refresh_state is None
+                    or refresh_state["self_completed_at_ns"] is None
+                    or int(refresh_state["self_completed_at_ns"]) < refresh_before_ns
+                )
+                if not scan_self:
+                    assert refresh_state is not None
+                    subtree_time = refresh_state["subtree_complete_through_ns"]
+                    if subtree_time is not None and int(subtree_time) >= refresh_before_ns:
+                        return
+                    indexed_children = _indexed_directories(connection, root_id, directory_id)
+                    observed_children: list[tuple[Path, Observation]] = []
+                    refresh_parent = False
+                    for child in indexed_children:
+                        child_subtree_time = child["subtree_complete_through_ns"]
+                        if child_subtree_time is not None and int(child_subtree_time) >= refresh_before_ns:
+                            continue
+                        child_path = Path(str(child["path_display"]))
+                        try:
+                            child_observed = _observation(namespace, child_path)
+                        except FileNotFoundError:
+                            # The child was known when the parent was last
+                            # enumerated. Re-enumerate the parent before
+                            # confirming that the child was deleted.
+                            refresh_parent = True
+                            break
+                        except OSError as exc:
+                            _record_error(connection, scope_id, bytes(child["path_key"]), "stat", exc)
+                            failed = True
+                            continue
+                        if child_observed.kind != "directory":
+                            refresh_parent = True
+                            break
+                        observed_children.append((child_path, child_observed))
+                    if not refresh_parent:
+                        for child_path, child_observed in observed_children:
+                            child_id = upsert_path(connection, root_id, scan_id, child_observed)
+                            dirs_seen += 1
+                            visit(child_path, child_id)
+                        return
             report("scanning", directory)
             try:
                 entries = list(os.scandir(directory))
@@ -287,7 +393,11 @@ def scan_directory(
             (scope_status, now_ns(), files_seen + dirs_seen, scope_id),
         )
         if scope_status == "completed":
-            _mark_missing(connection, root_id, scan_id, scope_id, scope_path_id)
+            if refresh_before_ns is None:
+                _mark_missing(connection, root_id, scan_id, scope_id, scope_path_id)
+            else:
+                for directory_id in completed_directories:
+                    _mark_missing_direct_children(connection, root_id, scan_id, scope_id, directory_id)
         refresh_directory_summaries(
             connection,
             root_id,
@@ -308,6 +418,7 @@ def scan_directory(
         "files_seen": files_seen,
         "dirs_seen": dirs_seen,
         "logical_bytes_seen": logical_bytes_seen,
+        "refresh_before_ns": refresh_before_ns,
         "errors_seen": int(
             connection.execute("SELECT error_count FROM scan_scope WHERE id=?", (scope_id,)).fetchone()["error_count"]
         ),

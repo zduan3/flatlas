@@ -72,8 +72,14 @@ def scan_directory(
     connection: sqlite3.Connection,
     value: Path,
     *,
+    refresh_before_ns: int | None = None,
     on_progress: Callable[[ScanProgress], None] | None = None,
 ) -> dict[str, Any]:
     """Delegate scanning while preserving the legacy fault-injection seam."""
     _scanning._observation = _observation
-    return _scanning.scan_directory(connection, value, on_progress=on_progress)
+    return _scanning.scan_directory(
+        connection,
+        value,
+        refresh_before_ns=refresh_before_ns,
+        on_progress=on_progress,
+    )

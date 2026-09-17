@@ -1,6 +1,6 @@
 # 0.2 目录汇总缓存与扫描时间
 
-> 状态：基础设施已实现；按 freshness 选择扫描范围和中断续扫工作队列尚未实现。
+> 状态：基础设施和按时间刷新已实现；中断续扫工作队列尚未实现。
 
 ## 目的
 
@@ -36,6 +36,8 @@
 
 migration 2 原地创建该表并回填既有索引。历史完成时间只从覆盖相应目录的 completed `scan_scope` 保守恢复；partial、failed 或 cancelled scope 不用于推断完整时间。migration 不重建或清空现有 root、path、scan、error、hash 或 plan 数据。
 
+migration 3 为 `scan` 增加可空的 `refresh_before_ns`，记录 `--refresh-before` 解析后的固定 UTC Unix 纳秒时间点。既有普通扫描保留为 `NULL`，迁移不修改 scan、scope、path、error、hash 或 plan 的既有数据。
+
 CLI 打开已有数据库并检测到待执行 migration 时，必须先在 stderr 输出 migration 版本与说明。目录回填期间交互式终端原地显示“已完成目录数 / 总目录数”，非交互式调用按进度里程碑输出；提交 migration 版本记录后再显示完成提示。stdout 不得混入 migration 信息，以保持 JSON/CSV 可解析。新建空数据库的 schema 初始化默认静默。migration 中断时不写完成版本，下次打开数据库可幂等重试。
 
 目录大小与 freshness 是两个独立维度。partial scan 可以把已观测的新 metadata 写入缓存，同时保留因 coverage 不完整而不能确认删除的旧路径，因此汇总可能混合新旧观测。机器输出后续应分别暴露数值、freshness 和 coverage/error 状态，而不能把非空时间解释为精确性证明。推荐的可信度概念为：
@@ -49,6 +51,8 @@ CLI 打开已有数据库并检测到待执行 migration 时，必须先在 stde
 
 当前扫描仍使用单个事务，但实现了两段式用户取消：遍历阶段第一次 `KeyboardInterrupt` 停止继续枚举，转入批量汇总收尾，将 scan/scope 记为 `cancelled`，保留已观测 path、metadata 和缓存，同时绝不运行缺失删除；收尾阶段再次中断才回滚本次扫描事务并放弃保存。进程崩溃仍会丢失整个未提交事务。后续短事务 checkpoint 必须在同一事务中提交 path 写入、扫描计数和受影响 summary，崩溃后通过持久化 work queue 恢复，不能仅根据时间戳猜测遍历位置。
 
-未来按时间选择目录时，应使用各目录的 `self_completed_at_ns`，而不是用祖先的 `subtree_complete_through_ns` 直接决定重扫整个子树。扫描开始时还必须冻结 work set；否则扫描过程中更新的时间会改变待处理集合。
+`flatlas scan PATH --refresh-before VALUE` 使用固定 cutoff 在递归过程中按目录选择工作，不在启动时加载完整目录树：`self_completed_at_ns` 为空或早于 cutoff 的目录需要完整枚举；已知子树的 `subtree_complete_through_ns` 不早于 cutoff 时可以整体剪枝；目录自身足够新但子树较旧时，从索引读取直接子目录并继续向下检查。索引中的旧子目录已经不存在时，扫描回退为完整枚举其父目录，只有父目录枚举成功后才确认删除。VALUE 支持带时区或使用本地时区的 ISO 8601 时间，以及 `30s`、`15m`、`12h`、`7d`、`2w` 形式的固定时长。相对时长在命令开始时解析成固定时间点并写入 scan，不随扫描耗时变化。
 
-目录缓存不改变安全不变量：只有 completed `scan_scope` 才能确认缺失路径为 `deleted`。在目录级增量 coverage 与删除模型完成独立设计前，不得把跳过的 fresh 子树视为已被当前 scan 观察。
+刷新扫描只为实际完整枚举的目录推进 `self_completed_at_ns`。当整次 scope 没有错误并成为 completed 时，每个完整枚举目录只确认其直接缺失条目及这些条目的已索引后代；主动跳过的新鲜目录不参与当前 scan 的删除判定。partial、failed 或 cancelled 刷新仍不确认任何删除。
+
+目录缓存不改变安全不变量：只有 completed `scan_scope` 才能确认缺失路径为 `deleted`，跳过的新鲜子树不视为已被当前 scan 观察。当前按时间刷新仍使用单事务和固定 cutoff，但不持久化工作队列，因此不是崩溃后可恢复任务。
