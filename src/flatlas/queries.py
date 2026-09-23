@@ -251,6 +251,7 @@ def list_child_directories(
             raise FlatlasError(f"cannot inspect directory entry {actual_path}: {exc}") from exc
         usage = None if indexed is None else usage_by_id.get(indexed["id"])
         status = _entry_scan_status(
+            connection,
             indexed,
             observed.kind,
             path_key(namespace, actual_path),
@@ -271,6 +272,7 @@ def _normalized_display(path_display: str) -> str:
 
 
 def _entry_scan_status(
+    connection: sqlite3.Connection,
     indexed: sqlite3.Row | None,
     entry_kind: str,
     entry_key: bytes,
@@ -292,12 +294,25 @@ def _entry_scan_status(
         return "scanned"
 
     refresh_before = latest["refresh_before_ns"]
-    cutoff = int(latest["started_at_ns"] if refresh_before is None else refresh_before)
-    if entry_kind == "directory":
-        complete_through = None if usage is None else usage["subtree_complete_through_ns"]
+    if refresh_before is None:
+        if entry_kind == "directory":
+            completed = (
+                usage is not None
+                and usage["last_completed_scan_id"] == latest["scan_id"]
+                and _subtree_completed_in_scan(connection, int(usage["id"]), int(latest["scan_id"]))
+            )
+        else:
+            completed = (
+                parent_summary is not None
+                and parent_summary["last_completed_scan_id"] == latest["scan_id"]
+            )
     else:
-        complete_through = None if parent_summary is None else parent_summary["self_completed_at_ns"]
-    if complete_through is not None and int(complete_through) >= cutoff:
+        if entry_kind == "directory":
+            complete_through = None if usage is None else usage["subtree_complete_through_ns"]
+        else:
+            complete_through = None if parent_summary is None else parent_summary["self_completed_at_ns"]
+        completed = complete_through is not None and int(complete_through) >= int(refresh_before)
+    if completed:
         return "scanned"
     if int(indexed["last_seen_scan_id"]) == int(latest["scan_id"]):
         return "incomplete"
@@ -306,6 +321,21 @@ def _entry_scan_status(
     if previous is None:
         return "unscanned"
     return "scanned" if previous["status"] == "completed" else "incomplete"
+
+
+def _subtree_completed_in_scan(connection: sqlite3.Connection, path_id: int, scan_id: int) -> bool:
+    incomplete = connection.execute(
+        """WITH RECURSIVE directories(id) AS (
+            SELECT id FROM path WHERE id=? AND state='present' AND entry_kind='directory'
+            UNION ALL
+            SELECT child.id FROM path child JOIN directories parent ON child.parent_path_id=parent.id
+            WHERE child.state='present' AND child.entry_kind='directory'
+        )
+        SELECT 1 FROM directories d LEFT JOIN directory_summary ds ON ds.path_id=d.id
+        WHERE ds.last_completed_scan_id IS NOT ? LIMIT 1""",
+        (path_id, scan_id),
+    ).fetchone()
+    return incomplete is None
 
 
 def _directory_status_row(

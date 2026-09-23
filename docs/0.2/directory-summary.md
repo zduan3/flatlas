@@ -22,6 +22,8 @@
 
 失败 attempt 在 freshness 计算中视为没有成功更新：它不推进也不清除 `self_completed_at_ns`，但仍完整保留在 `scan`、`scan_scope` 和 `scan_error` 中。查询可信度时可以据此区分“长期未扫描”和“最近尝试但读取失败”；不能因为失败不参与 freshness 就删除或隐藏审计记录。
 
+`ls` 判断未完成的普通扫描中哪些条目实际完整覆盖时，使用目录及其当前子目录的 `last_completed_scan_id`；普通文件使用父目录的完成 scan ID。两次扫描可能落在相同的文件系统时钟刻度，不能仅用成功时间与本次开始时间比较。显式 `--refresh-before` 扫描仍按固定 cutoff 判断主动跳过的新鲜子树。
+
 ## 更新规则
 
 扫描成功或以 partial 结束时，在同一扫描事务内自底向上刷新请求 scope 及其所有祖先：

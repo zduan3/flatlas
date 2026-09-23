@@ -406,6 +406,43 @@ def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch
         connection.close()
 
 
+def test_ls_does_not_treat_equal_scan_times_as_completed_coverage(tmp_path: Path, monkeypatch) -> None:
+    connection, source = make_connection(tmp_path)
+    parent = source / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    complete = source / "complete"
+    complete.mkdir()
+    (child / "old.bin").write_bytes(b"old")
+    (complete / "done.bin").write_bytes(b"done")
+    monkeypatch.setattr("flatlas.scanning.now_ns", lambda: 1_700_000_000_000_000_000)
+    real_scandir = os.scandir
+
+    def fail_child(path):
+        if Path(path) == child:
+            raise PermissionError("injected child coverage failure")
+        return real_scandir(path)
+
+    try:
+        assert scan_directory(connection, source)["status"] == "completed"
+        with monkeypatch.context() as partial_scan:
+            partial_scan.setattr("flatlas.core.os.scandir", fail_child)
+            assert scan_directory(connection, source)["status"] == "partial"
+
+        scans = connection.execute("SELECT id, started_at_ns FROM scan ORDER BY id").fetchall()
+        assert scans[0]["started_at_ns"] == scans[1]["started_at_ns"]
+        statuses = {row["name"]: row["status"] for row in list_child_directories(connection, scope=source)}
+        assert statuses == {"complete": "scanned", "parent": "incomplete"}
+        child_rows = list_child_directories(connection, scope=parent)
+        assert child_rows[0]["name"] == "child"
+        assert child_rows[0]["status"] == "incomplete"
+        assert connection.execute(
+            "SELECT state FROM path WHERE path_display=?", (str(child / "old.bin"),)
+        ).fetchone()["state"] == "present"
+    finally:
+        connection.close()
+
+
 def test_roots_and_df_report_capacity_and_unavailable_filesystems(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "flatlas.core.shutil.disk_usage",
