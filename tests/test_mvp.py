@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -344,12 +345,16 @@ def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch
         assert list(by_name) == ["complete", "empty", "nested", "new"]
         assert by_name["complete"]["status"] == "scanned"
         assert by_name["complete"]["logical_size"] == 4
+        assert by_name["complete"]["subtree_complete_through_ns"] is not None
         assert by_name["empty"]["status"] == "missing"
         assert by_name["empty"]["logical_size"] == 0
+        assert by_name["empty"]["subtree_complete_through_ns"] is not None
         assert by_name["nested"]["status"] == "incomplete"
         assert by_name["nested"]["files"] == 1
+        assert by_name["nested"]["subtree_complete_through_ns"] is not None
         assert by_name["new"]["status"] == "unscanned"
         assert by_name["new"]["files"] is None
+        assert by_name["new"]["subtree_complete_through_ns"] is None
         empty_state = connection.execute(
             "SELECT state FROM path WHERE path_display=?",
             (str(empty),),
@@ -682,6 +687,66 @@ def test_ls_lists_direct_files_and_preserves_gone_file_metadata(tmp_path: Path) 
     lines = result.stdout.splitlines()
     assert lines[0].split()[:4] == ["T", "S", "LOGICAL(B)", "N"]
     assert {line.split()[1] for line in lines[1:]} == {"ok", "new", "gone"}
+
+
+def test_ls_shows_subtree_scan_time_in_table_json_and_csv(tmp_path: Path) -> None:
+    connection, source = make_connection(tmp_path)
+    indexed = source / "indexed"
+    indexed.mkdir()
+    (indexed / "child.bin").write_bytes(b"child")
+    (source / "file.bin").write_bytes(b"file")
+    scan_directory(connection, source)
+    scanned_through = 1_700_000_000_000_000_000
+    connection.execute(
+        """UPDATE directory_summary SET subtree_complete_through_ns=?
+           WHERE path_id=(SELECT id FROM path WHERE path_display=?)""",
+        (scanned_through, str(indexed)),
+    )
+    connection.commit()
+    (source / "new").mkdir()
+    connection.close()
+
+    runner = CliRunner()
+    arguments = ["ls", str(source), "--db", str(tmp_path / "index.sqlite")]
+    table = runner.invoke(app, arguments)
+    assert table.exit_code == 0
+    assert "SCANNED-THROUGH" in table.stdout.splitlines()[0]
+    table_rows = {line.split()[-1]: line.split() for line in table.stdout.splitlines()[1:]}
+    indexed_line = next(line for line in table.stdout.splitlines()[1:] if line.endswith("indexed"))
+    assert cli._format_ls_timestamp_ns(scanned_through) in indexed_line
+    assert table_rows["file.bin"][-2] == "-"
+    assert table_rows["new"][-2] == "-"
+
+    json_result = runner.invoke(app, [*arguments, "--format", "json"])
+    csv_result = runner.invoke(app, [*arguments, "--format", "csv"])
+    assert json_result.exit_code == csv_result.exit_code == 0
+    json_rows = {row["name"]: row for row in json.loads(json_result.stdout)}
+    csv_rows = {row["name"]: row for row in csv.DictReader(csv_result.stdout.splitlines())}
+    assert json_rows["indexed"]["subtree_complete_through_ns"] == scanned_through
+    assert csv_rows["indexed"]["subtree_complete_through_ns"] == str(scanned_through)
+    for name in ("file.bin", "new"):
+        assert json_rows[name]["subtree_complete_through_ns"] is None
+        assert csv_rows[name]["subtree_complete_through_ns"] == ""
+
+
+def test_ls_scan_time_uses_gnu_recent_and_old_styles() -> None:
+    now_ns = int(datetime(2026, 9, 23, 12, tzinfo=UTC).timestamp() * 1_000_000_000)
+    recent_ns = int(datetime(2026, 9, 3, 7, 5, tzinfo=UTC).timestamp() * 1_000_000_000)
+    old_ns = int(datetime(2025, 9, 3, 7, 5, tzinfo=UTC).timestamp() * 1_000_000_000)
+
+    recent = datetime.fromtimestamp(recent_ns / 1_000_000_000).astimezone()
+    old = datetime.fromtimestamp(old_ns / 1_000_000_000).astimezone()
+    assert cli._format_ls_timestamp_ns(recent_ns, now_ns=now_ns) == (
+        f"{recent.strftime('%b')} {recent.day:2} {recent:%H:%M}"
+    )
+    assert cli._format_ls_timestamp_ns(old_ns, now_ns=now_ns) == (
+        f"{old.strftime('%b')} {old.day:2}  {old.year}"
+    )
+    assert cli._format_ls_timestamp_ns(now_ns + 1, now_ns=now_ns).endswith("  2026")
+    assert cli._format_ls_timestamp_ns(
+        now_ns - (31_556_952 // 2) * 1_000_000_000, now_ns=now_ns
+    ).endswith("  2026")
+    assert cli._format_ls_timestamp_ns(None, now_ns=now_ns) == "-"
 
 
 def test_database_migration_is_idempotent_and_keeps_existing_data(tmp_path: Path) -> None:

@@ -73,7 +73,7 @@ flatlas plan show PLAN_ID
 - `roots` 及其别名 `df` 默认以 GNU `df` 风格表格显示 registered filesystem 的实时容量；不可访问的容量明确显示为未知。
 - `du` 默认输出带表头且按列对齐的汇总，包含逻辑字节数、文件数、可用时的实际分配字节数和相对路径；紧凑表头使用 `SIZE(B)`、`N` 和 `ALLOC(B)`。
 - `du` 可同时接受多个文件或目录路径，因此也能处理 shell 或启动器提前展开后的通配结果。
-- `ls [PATH]` 实时枚举目标目录的一层文件、目录和特殊条目，并合并持久化 scan coverage。表格使用 `LOGICAL(B)`：文件显示自身 logical size 和 `N=1`，目录显示已知递归索引 logical size 和文件数；特殊条目的统计为未知；`ok`、`new`、`part`、`gone` 表示统计的覆盖和现场状态。
+- `ls [PATH]` 实时枚举目标目录的一层文件、目录和特殊条目，并合并持久化 scan coverage。表格使用 `LOGICAL(B)`：文件显示自身 logical size 和 `N=1`，目录显示已知递归索引 logical size 和文件数；特殊条目的统计为未知；`SCANNED-THROUGH` 显示已索引目录子树的扫描新鲜度下界，未知显示 `-`；`ok`、`new`、`part`、`gone` 表示统计的覆盖和现场状态。
 - `largest [PATH]` 只查询指定的已索引文件或目录 scope，PATH 默认为当前目录；按 logical size 降序、路径升序稳定排序，路径默认相对于 PATH。默认返回 10 项；-n 是 --limit 的短别名。
 - 不删除、移动、hardlink、reflink、symlink 或持续监听文件系统。
 - rm PATH 只从 SQLite 递归移除该路径及其已索引后代，等价于对索引执行 rm -r PATH；它不访问、不验证也不改动实际文件。若子树被 dry-run plan 引用，该计划会一并移除，避免保留失效计划。
@@ -85,6 +85,8 @@ flatlas plan show PLAN_ID
 - `largest PATH` 用于排序 PATH 子树中的最大单个普通文件。
 
 目录的 `part` / `gone` 状态可以附带最后已知聚合，但该值可能不完整或过期；未知必须显示为 `-` / `null`，不能伪装为 0。0.2 的查询演进规划见 [查询命令规划](docs/0.2/query-cli.md)。
+
+`SCANNED-THROUGH` 是当前已知目录子树中各目录最近成功完整枚举时间的最小值，并非不可变快照时间。表格按本地时区采用 GNU `ls -l` 风格：近六个月显示月、日和时分，更早或未来的时间显示月、日和年份。JSON/CSV 使用原始 UTC Unix 纳秒字段 `subtree_complete_through_ns`，文件和特殊条目为 `null` / 空值。
 
 ## 外部删除与索引
 

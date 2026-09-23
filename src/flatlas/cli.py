@@ -176,6 +176,7 @@ def _print_usage(
     include_status: bool = False,
     name_column: bool = False,
     logical_header: bool = False,
+    include_scanned_through: bool = False,
 ) -> None:
     if fmt in {"json", "csv"}:
         _print(rows, fmt, output)
@@ -190,6 +191,9 @@ def _print_usage(
     headers.extend(["LOGICAL(B)" if logical_header else "SIZE(B)", "N"])
     if show_allocated:
         headers.append("ALLOC(B)")
+    if include_scanned_through:
+        headers.append("SCANNED-THROUGH")
+    listing_time_ns = time.time_ns() if include_scanned_through else None
     value_column = "name" if name_column else "path"
     headers.append(value_column.upper())
     table_rows: list[list[str]] = []
@@ -201,11 +205,19 @@ def _print_usage(
         if show_allocated:
             allocated = row["allocated_size"]
             fields.append("-" if allocated is None else str(allocated))
+        if include_scanned_through:
+            scanned_through = row["subtree_complete_through_ns"]
+            fields.append(
+                _format_ls_timestamp_ns(
+                    scanned_through if isinstance(scanned_through, int) else None,
+                    now_ns=listing_time_ns,
+                )
+            )
         fields.append(str(row[value_column]))
         table_rows.append(fields)
 
     leading_columns = int(include_kind) + int(include_status)
-    numeric_columns = set(range(leading_columns, len(headers) - 1))
+    numeric_columns = set(range(leading_columns, len(headers) - 1 - int(include_scanned_through)))
     rendered = _render_table(headers, table_rows, numeric_columns)
     if output is None:
         typer.echo(rendered, nl=False)
@@ -318,6 +330,17 @@ def _format_timestamp_ns(value: int | None) -> str:
     if value is None:
         return "-"
     return datetime.fromtimestamp(value / 1_000_000_000).astimezone().isoformat(timespec="seconds")
+
+
+def _format_ls_timestamp_ns(value: int | None, *, now_ns: int | None = None) -> str:
+    if value is None:
+        return "-"
+    now = time.time_ns() if now_ns is None else now_ns
+    local = datetime.fromtimestamp(value / 1_000_000_000).astimezone()
+    month_and_day = f"{local.strftime('%b')} {local.day:2}"
+    if now - (31_556_952 // 2) * 1_000_000_000 < value < now:
+        return f"{month_and_day} {local:%H:%M}"
+    return f"{month_and_day}  {local.year}"
 
 
 def _print_scans(rows: list[dict[str, Any]], fmt: str) -> None:
@@ -733,6 +756,7 @@ def ls_command(
     """List live direct entries. S: ok=scanned, new=unscanned, part=incomplete, gone=missing.
 
     LOGICAL(B)=file bytes or indexed directory bytes; N=file count; ALLOC(B)=allocated bytes.
+    SCANNED-THROUGH=oldest successful directory scan in an indexed subtree, not a snapshot.
     """
     connection = _open_database(_database(db))
     try:
@@ -744,6 +768,7 @@ def ls_command(
             include_status=True,
             logical_header=True,
             name_column=True,
+            include_scanned_through=True,
         )
     finally:
         connection.close()

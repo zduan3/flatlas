@@ -319,6 +319,7 @@ def _directory_status_row(
         "files": None if usage is None else usage["files"],
         "logical_size": None if usage is None else usage["logical_size"],
         "allocated_size": None if usage is None else usage["allocated_size"],
+        "subtree_complete_through_ns": None if usage is None else usage["subtree_complete_through_ns"],
         "name": path.name,
     }
 
@@ -334,11 +335,13 @@ def _live_child_status_row(
         return {
             "entry_kind": "file", "status": status, "files": 1,
             "logical_size": observed.logical_size, "allocated_size": observed.allocated_size,
+            "subtree_complete_through_ns": None,
             "name": observed.path.name,
         }
     return {
         "entry_kind": observed.kind, "status": status, "files": None,
         "logical_size": None, "allocated_size": None, "name": observed.path.name,
+        "subtree_complete_through_ns": None,
     }
 
 
@@ -350,11 +353,13 @@ def _gone_child_status_row(indexed: sqlite3.Row, usage: sqlite3.Row | None) -> d
         return {
             "entry_kind": "file", "status": "missing", "files": 1,
             "logical_size": indexed["logical_size"], "allocated_size": indexed["allocated_size"],
+            "subtree_complete_through_ns": None,
             "name": Path(indexed["path_display"]).name,
         }
     return {
         "entry_kind": kind, "status": "missing", "files": None,
         "logical_size": None, "allocated_size": None, "name": Path(indexed["path_display"]).name,
+        "subtree_complete_through_ns": None,
     }
 
 

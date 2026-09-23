@@ -69,19 +69,19 @@ flatlas ls [PATH]
 2. 只列 PATH 的直接条目，不递归展开。
 3. 文件与目录都列出，包含名称以 `.` 开头的真实条目。
 4. 最后一列只显示条目名称，不附加 PATH 前缀。
-5. 默认长表以 `T`、`S`、`LOGICAL(B)`、`N`、可用时的 `ALLOC(B)` 和 `NAME` 为稳定核心列；更多 metadata 后续按平台能力增加。
+5. 默认长表以 `T`、`S`、`LOGICAL(B)`、`N`、可用时的 `ALLOC(B)`、`SCANNED-THROUGH` 和 `NAME` 为稳定核心列；更多 metadata 后续按平台能力增加。
 6. 目录的统计列表示索引中的递归总量；文件的统计列表示文件自身。
 7. `ok` 显示最近完整扫描的已知值；`part` 和 `gone` 在存在历史索引值时继续显示，但状态明确表示它不完整、可能过期或仅为最后已知值；`new` 目录显示 `-`，`new` 普通文件可以显示实时 stat 得到的自身大小。任何未知值都不能伪装为精确的 0。
 
 推荐的紧凑表格概念如下；实际列应根据跨平台可用性和终端宽度逐步落地：
 
 ```text
-T  S     LOGICAL(B)  N    ALLOC(B)  NAME
-d  ok       13002342  83    16777216  archive
-d  new             -   -           -  incoming
-d  part      7340032  40           -  private
-f  new       2097152   1     2097152  download.tmp
-d  gone      1048576  12           -  removed
+T  S     LOGICAL(B)  N    ALLOC(B)  SCANNED-THROUGH  NAME
+d  ok       13002342  83    16777216  Sep 23 10:00     archive
+d  new             -   -           -  -                incoming
+d  part      7340032  40           -  Sep 20 10:00     private
+f  new       2097152   1     2097152  -                download.tmp
+d  gone      1048576  12           -  Sep 18 10:00     removed
 ```
 
 其中 `S` 是 flatlas 扩展：
@@ -90,6 +90,8 @@ d  gone      1048576  12           -  removed
 - `new`：实时存在，但没有当前有效的完整扫描覆盖。
 - `part`：最近未完成 scan 已观察该条目但尚未完成相应目录 coverage；未被本次访问的条目保留此前状态。
 - `gone`：索引曾观察到该直接条目，但本次完整实时枚举未观察到。它只描述本次视图，不更新 `path.state`；如果索引仍保留最后已知文件大小或目录聚合，可以继续展示，但不得计为新的现场观测。
+
+`SCANNED-THROUGH` 是目录及其当前已知子目录成功完整枚举时间的下界；它不表示该时刻的不可变快照。表格按本地时区使用 GNU `ls -l` 风格：近六个月且早于当前时间显示月、日和时分，更早或未来的时间显示月、日和年份。JSON/CSV 的 `subtree_complete_through_ns` 保留 UTC Unix 纳秒整数；文件和其他非目录条目显示未知。
 
 实时枚举只要发生权限、I/O 或类型检查错误，命令就应非零退出，不得通过缺行暗示目录不存在。离线使用由显式的数据源参数处理。
 
@@ -342,7 +344,7 @@ GNU `find` 默认遍历实时目录树，而 `flatlas find` 应默认查询 SQLi
 |---|---|---|---|
 | `ls` 条目范围 | 仅实时直接子目录，并合并 coverage | 像 `ls -Al` 一样列出全部直接文件与目录、包含真实隐藏条目但不合成 `.` / `..` | 先扩展核心查询与测试，再增加 `--dirs-only` 保留当前视图 |
 | `ls` 名称 | 只显示名称 | 保持只显示名称 | `--absolute` 显式请求完整路径 |
-| `ls` 长格式 | 状态、目录递归大小、文件数 | 稳定核心列为 `T`、`S`、`LOGICAL(B)`、`N`、可用 `ALLOC(B)`、`NAME`；文件用自身值、目录用递归聚合，再逐步增加 mode/nlink/owner/group/mtime | part/gone 保留状态和最后已知值；未知显示 `-`，不得伪造 Unix 权限或目录对象 `st_size` |
+| `ls` 长格式 | 状态、目录递归大小、文件数及子树扫描时间下界 | 稳定核心列为 `T`、`S`、`LOGICAL(B)`、`N`、可用 `ALLOC(B)`、`SCANNED-THROUGH`、`NAME`；文件用自身大小，目录用递归聚合和扫描时间下界，再逐步增加 mode/nlink/owner/group/mtime | part/gone 保留状态和最后已知值；未知显示 `-`，不得伪造 Unix 权限或目录对象 `st_size` |
 | `du` 无参数 | 聚合所有 registered namespace | 汇总当前目录 `.` | 旧行为迁移到 `--all-roots` |
 | `du` 参数 | 每个参数一条汇总 | 保持，等价隐式 `-s` | 接受显式 `-s` |
 | `du` size | logical bytes、文件数、可用 allocated bytes | used block、apparent bytes、文件数并列且语义清晰 | `-b`、`--apparent-size`、`-B`、`-h` 控制表格 |

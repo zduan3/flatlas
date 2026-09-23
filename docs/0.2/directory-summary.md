@@ -16,6 +16,8 @@
 
 `subtree_complete_through_ns` 只有在目录自身以及每个 present 子目录都至少成功完整枚举过一次时才非空，其值为各目录最近成功时间的最小值。它表示“当前已知子树的每个目录都至少在该时间之后成功观测过”，不表示该时刻的不可变快照。
 
+`ls` 对已索引的目录条目以 `SCANNED-THROUGH` 列展示这个时间：本地时区、GNU `ls -l` 风格，近六个月且早于当前时间显示月、日和时分，其他时间显示月、日和年份。JSON/CSV 保留原始 UTC Unix 纳秒整数；无成功时间的目录和非目录条目显示未知。`part` / `gone` 目录可显示历史时间，但其状态仍提示最近覆盖不完整或现场缺失。
+
 普通文件系统扫描无法提供原子快照：不同目录按遍历顺序在不同时间枚举，文件也可能在扫描期间新增、删除、改名或改变大小。因此即使 scan 为 completed，目录汇总仍是不同观测时间组成的当前索引估计值。`self_completed_at_ns`、`subtree_complete_through_ns` 和 `updated_at_ns` 分别描述成功观测时间、子树 freshness 下界和缓存计算时间，均不得表述为快照时间。
 
 失败 attempt 在 freshness 计算中视为没有成功更新：它不推进也不清除 `self_completed_at_ns`，但仍完整保留在 `scan`、`scan_scope` 和 `scan_error` 中。查询可信度时可以据此区分“长期未扫描”和“最近尝试但读取失败”；不能因为失败不参与 freshness 就删除或隐藏审计记录。
