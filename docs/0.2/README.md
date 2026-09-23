@@ -10,6 +10,8 @@ File Atlas 当前开发版本为 0.2.0。0.1 是已完成并冻结的只读 MVP 
 
 当前 Python core 已按职责拆分：`db.py` 管理 schema 与连接，`paths.py` 管理 namespace 和路径身份，`scanning.py` 负责 metadata 扫描，`hashing.py` 负责惰性 hash，`queries.py` 提供只读查询，`planning.py` 保存 dry-run plan，`output.py` 负责稳定导出。`core.py` 仅保留兼容性 re-export 与既有故障注入入口；该拆分不改变 0.1 数据库或 CLI 语义。
 
+`du` 对已登记但尚未扫描的目录显示 `unscanned`，文件数和大小为未知值；多路径查询仍保留其他已索引路径的汇总。JSON/CSV 的 `status` 字段使用 `indexed` 或 `unscanned`，其中 `indexed` 只表示存在索引数据，不代表覆盖完整。
+
 扫描审计可以通过 `flatlas scans [PATH]` 查询历史摘要，并用 `flatlas scan-info ID` 查看单次 scan 的 scope、cutoff、计数与错误明细。两个命令只读取索引；PATH 过滤同时包含覆盖该路径的祖先 scope 和位于该路径下的子树 scope。
 
 ## 计划能力摘要

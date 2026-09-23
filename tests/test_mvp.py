@@ -243,6 +243,48 @@ def test_du_defaults_to_headered_summary_with_relative_path(tmp_path: Path, monk
     assert "ALLOC(B)=allocated bytes" in help_result.stdout
 
 
+def test_du_reports_unscanned_directories_without_inventing_sizes(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "index.sqlite"
+    source = tmp_path / "source"
+    source.mkdir()
+    new_directory = source / "new"
+    new_directory.mkdir()
+    (new_directory / "unknown.bin").write_bytes(b"unknown")
+    connection = open_database(database)
+    try:
+        register_namespace(connection, discover_namespace(source))
+        root_row = disk_usage(connection, scope=source)[0]
+        assert root_row["status"] == "unscanned"
+        assert root_row["files"] is None
+        assert root_row["logical_size"] is None
+        initial = CliRunner().invoke(app, ["du", str(source), "--format", "json", "--db", str(database)])
+        assert initial.exit_code == 0, initial.output
+        assert json.loads(initial.stdout)[0]["status"] == "unscanned"
+        scan_directory(connection, source)
+        later = source / "later"
+        later.mkdir()
+        assert disk_usage(connection, scope=later)[0]["status"] == "unscanned"
+    finally:
+        connection.close()
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(app, ["du", "source", "source/later", "--db", str(database)])
+    assert result.exit_code == 0, result.output
+    lines = result.stdout.splitlines()
+    assert "STATUS" in lines[0]
+    assert "unscanned" in lines[2]
+    assert lines[2].lstrip().startswith("-  -")
+    assert lines[2].endswith(f"unscanned  {Path('source/later')}")
+
+    json_result = runner.invoke(app, ["du", "source/later", "--format", "json", "--db", str(database)])
+    assert json_result.exit_code == 0, json_result.output
+    assert json.loads(json_result.stdout) == [{
+        "files": None, "logical_size": None, "allocated_size": None,
+        "status": "unscanned", "path": str(Path("source/later")),
+    }]
+
+
 def test_largest_is_scoped_to_path_and_defaults_to_cwd(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "index.sqlite"
     source = tmp_path / "source"

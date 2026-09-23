@@ -373,9 +373,10 @@ def disk_usage(
     if scope is None:
         rows = connection.execute(
             """SELECT r.id AS root_id, r.root_path_display,
-                      CASE WHEN p.id IS NULL THEN 0 ELSE ds.subtree_files END AS files,
-                      CASE WHEN p.id IS NULL THEN 0 ELSE ds.subtree_logical_size END AS logical_size,
-                      CASE WHEN p.id IS NULL THEN 0 ELSE ds.subtree_allocated_size END AS allocated_size
+                      ds.subtree_files AS files,
+                      ds.subtree_logical_size AS logical_size,
+                      ds.subtree_allocated_size AS allocated_size,
+                      ds.self_completed_at_ns
                FROM root r
                LEFT JOIN path p ON p.root_id=r.id AND p.path_key=x'' AND p.state='present'
                LEFT JOIN directory_summary ds ON ds.path_id=p.id
@@ -387,29 +388,52 @@ def disk_usage(
                 "files": row["files"],
                 "logical_size": row["logical_size"],
                 "allocated_size": row["allocated_size"],
+                "status": "unscanned" if row["self_completed_at_ns"] is None else "indexed",
                 "path": _relative_display(row["root_path_display"], display_base, row["root_path_display"]),
             }
             for row in rows
         ]
-    selected = _scope_row(connection, scope)
+    try:
+        selected = _scope_row(connection, scope)
+    except FlatlasError:
+        selected_path = scope.expanduser().resolve()
+        if not scope.is_dir() or scope.is_symlink() or os.path.isjunction(scope):
+            raise
+        namespace = discover_namespace(selected_path)
+        root = get_root(connection, namespace)
+        if root is None:
+            raise FlatlasError(f"filesystem is not registered; run 'flatlas init {scope}' first") from None
+        return [{
+            "files": None,
+            "logical_size": None,
+            "allocated_size": None,
+            "status": "unscanned",
+            "path": _relative_display(str(selected_path), display_base, str(namespace.path)),
+        }]
     if selected["entry_kind"] == "file":
         row = {
             "files": 1,
             "logical_size": selected["logical_size"],
             "allocated_size": selected["allocated_size"],
+            "status": "indexed",
         }
     elif selected["entry_kind"] in {"root", "directory"}:
         summary = connection.execute(
             """SELECT subtree_files AS files, subtree_logical_size AS logical_size,
-                      subtree_allocated_size AS allocated_size
+                      subtree_allocated_size AS allocated_size, self_completed_at_ns
                FROM directory_summary WHERE path_id=?""",
             (selected["id"],),
         ).fetchone()
         if summary is None:
             raise FlatlasError(f"directory summary is missing: {selected['path_display']}")
-        row = dict(summary)
+        row = {
+            "files": summary["files"],
+            "logical_size": summary["logical_size"],
+            "allocated_size": summary["allocated_size"],
+            "status": "unscanned" if summary["self_completed_at_ns"] is None else "indexed",
+        }
     else:
-        row = {"files": 0, "logical_size": 0, "allocated_size": 0}
+        row = {"files": 0, "logical_size": 0, "allocated_size": 0, "status": "indexed"}
     return [
         {
             **dict(row),
