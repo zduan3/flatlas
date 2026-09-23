@@ -219,15 +219,23 @@ def test_du_defaults_to_headered_summary_with_relative_path(tmp_path: Path, monk
     assert result.exit_code == 0
     lines = result.stdout.splitlines()
     assert "\t" not in result.stdout
-    assert lines[0].lstrip().startswith("SIZE(B)  N")
+    assert lines[0].split()[:3] == ["S", "SIZE(B)", "N"]
     assert lines[0].endswith("PATH")
-    assert lines[1].lstrip().startswith("3  2")
+    assert lines[1].split()[:3] == ["ok", "3", "2"]
     assert lines[1].endswith("  source")
     assert lines[0].index("PATH") == lines[1].index("source")
 
     json_result = runner.invoke(app, ["du", str(source), "--format", "json", "--db", str(database)])
     assert json_result.exit_code == 0
     assert json.loads(json_result.stdout)[0]["path"] == "source"
+    assert json.loads(json_result.stdout)[0]["status"] == "scanned"
+
+    monkeypatch.chdir(source)
+    default_result = runner.invoke(app, ["du", "--format", "json", "--db", str(database)])
+    assert default_result.exit_code == 0, default_result.output
+    assert json.loads(default_result.stdout)[0]["path"] == "."
+    assert json.loads(default_result.stdout)[0]["logical_size"] == 3
+    monkeypatch.chdir(tmp_path)
 
     multiple_result = runner.invoke(
         app,
@@ -241,6 +249,7 @@ def test_du_defaults_to_headered_summary_with_relative_path(tmp_path: Path, monk
     assert "SIZE(B)=logical bytes" in help_result.stdout
     assert "N=file count" in help_result.stdout
     assert "ALLOC(B)=allocated bytes" in help_result.stdout
+    assert "ok=scanned" in help_result.stdout
 
 
 def test_du_reports_unscanned_directories_without_inventing_sizes(tmp_path: Path, monkeypatch) -> None:
@@ -272,10 +281,10 @@ def test_du_reports_unscanned_directories_without_inventing_sizes(tmp_path: Path
     result = runner.invoke(app, ["du", "source", "source/later", "--db", str(database)])
     assert result.exit_code == 0, result.output
     lines = result.stdout.splitlines()
-    assert "STATUS" in lines[0]
-    assert "unscanned" in lines[2]
-    assert lines[2].lstrip().startswith("-  -")
-    assert lines[2].endswith(f"unscanned  {Path('source/later')}")
+    assert lines[0].split()[:3] == ["S", "SIZE(B)", "N"]
+    assert lines[1].split()[0] == "ok"
+    assert lines[2].split()[:3] == ["new", "-", "-"]
+    assert lines[2].endswith(str(Path("source/later")))
 
     json_result = runner.invoke(app, ["du", "source/later", "--format", "json", "--db", str(database)])
     assert json_result.exit_code == 0, json_result.output
@@ -283,6 +292,37 @@ def test_du_reports_unscanned_directories_without_inventing_sizes(tmp_path: Path
         "files": None, "logical_size": None, "allocated_size": None,
         "status": "unscanned", "path": str(Path("source/later")),
     }]
+
+    default_result = runner.invoke(app, ["du", "--format", "json", "--db", str(database)])
+    assert default_result.exit_code == 0, default_result.output
+    assert json.loads(default_result.stdout)[0]["path"] == "."
+    assert json.loads(default_result.stdout)[0]["status"] == "unscanned"
+
+
+def test_du_uses_ls_coverage_status_for_partial_directory(tmp_path: Path, monkeypatch) -> None:
+    connection, source = make_connection(tmp_path)
+    nested = source / "nested"
+    nested.mkdir()
+    (nested / "file.bin").write_bytes(b"known")
+    try:
+        scan_directory(connection, source)
+        real_scandir = os.scandir
+
+        def fail_nested(path):
+            if Path(path) == nested:
+                raise PermissionError("injected coverage failure")
+            return real_scandir(path)
+
+        with monkeypatch.context() as failed_scan:
+            failed_scan.setattr("flatlas.core.os.scandir", fail_nested)
+            assert scan_directory(connection, source)["status"] == "partial"
+
+        ls_status = next(row["status"] for row in list_child_directories(connection, scope=source) if row["name"] == "nested")
+        du_row = disk_usage(connection, scope=nested)[0]
+        assert ls_status == du_row["status"] == "incomplete"
+        assert du_row["logical_size"] == 5
+    finally:
+        connection.close()
 
 
 def test_largest_is_scoped_to_path_and_defaults_to_cwd(tmp_path: Path, monkeypatch) -> None:

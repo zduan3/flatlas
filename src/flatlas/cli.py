@@ -177,7 +177,6 @@ def _print_usage(
     name_column: bool = False,
     logical_header: bool = False,
     include_scanned_through: bool = False,
-    du_status: bool = False,
 ) -> None:
     if fmt in {"json", "csv"}:
         _print(rows, fmt, output)
@@ -194,8 +193,6 @@ def _print_usage(
         headers.append("ALLOC(B)")
     if include_scanned_through:
         headers.append("SCANNED-THROUGH")
-    if du_status:
-        headers.append("STATUS")
     listing_time_ns = time.time_ns() if include_scanned_through else None
     value_column = "name" if name_column else "path"
     headers.append(value_column.upper())
@@ -216,13 +213,11 @@ def _print_usage(
                     now_ns=listing_time_ns,
                 )
             )
-        if du_status:
-            fields.append(str(row["status"]))
         fields.append(str(row[value_column]))
         table_rows.append(fields)
 
     leading_columns = int(include_kind) + int(include_status)
-    numeric_columns = set(range(leading_columns, len(headers) - 1 - int(include_scanned_through) - int(du_status)))
+    numeric_columns = set(range(leading_columns, len(headers) - 1 - int(include_scanned_through)))
     rendered = _render_table(headers, table_rows, numeric_columns)
     if output is None:
         typer.echo(rendered, nl=False)
@@ -736,17 +731,20 @@ def rm(
 def du(
     paths: Annotated[
         list[Path] | None,
-        typer.Argument(help="Optional indexed file or directory scopes."),
+        typer.Argument(help="Optional file or directory scopes; defaults to the current directory."),
     ] = None,
     format: Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")] = "table",
     output: Annotated[Path | None, typer.Option("--output")] = None,
     db: db_option = None,
 ) -> None:
-    """Summarize indexed usage. SIZE(B)=logical bytes; N=file count; ALLOC(B)=allocated bytes."""
+    """Summarize indexed usage. S: ok=scanned, new=unscanned, part=incomplete.
+
+    SIZE(B)=logical bytes; N=file count; ALLOC(B)=allocated bytes.
+    """
     connection = _open_database(_database(db))
     try:
-        rows = disk_usage(connection) if not paths else [row for path in paths for row in disk_usage(connection, scope=path)]
-        _print_usage(rows, format, output, du_status=any(row["status"] == "unscanned" for row in rows))
+        rows = [row for path in (paths or [Path(".")]) for row in disk_usage(connection, scope=path)]
+        _print_usage(rows, format, output, include_status=True)
     finally:
         connection.close()
 

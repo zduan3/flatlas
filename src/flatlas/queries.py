@@ -295,7 +295,7 @@ def _entry_scan_status(
 
     refresh_before = latest["refresh_before_ns"]
     if refresh_before is None:
-        if entry_kind == "directory":
+        if entry_kind in {"root", "directory"}:
             completed = (
                 usage is not None
                 and usage["last_completed_scan_id"] == latest["scan_id"]
@@ -307,7 +307,7 @@ def _entry_scan_status(
                 and parent_summary["last_completed_scan_id"] == latest["scan_id"]
             )
     else:
-        if entry_kind == "directory":
+        if entry_kind in {"root", "directory"}:
             complete_through = None if usage is None else usage["subtree_complete_through_ns"]
         else:
             complete_through = None if parent_summary is None else parent_summary["self_completed_at_ns"]
@@ -326,7 +326,7 @@ def _entry_scan_status(
 def _subtree_completed_in_scan(connection: sqlite3.Connection, path_id: int, scan_id: int) -> bool:
     incomplete = connection.execute(
         """WITH RECURSIVE directories(id) AS (
-            SELECT id FROM path WHERE id=? AND state='present' AND entry_kind='directory'
+            SELECT id FROM path WHERE id=? AND state='present' AND entry_kind IN ('root', 'directory')
             UNION ALL
             SELECT child.id FROM path child JOIN directories parent ON child.parent_path_id=parent.id
             WHERE child.state='present' AND child.entry_kind='directory'
@@ -400,29 +400,7 @@ def disk_usage(
     relative_to: Path | None = None,
 ) -> list[dict[str, Any]]:
     display_base = Path.cwd() if relative_to is None else relative_to
-    if scope is None:
-        rows = connection.execute(
-            """SELECT r.id AS root_id, r.root_path_display,
-                      ds.subtree_files AS files,
-                      ds.subtree_logical_size AS logical_size,
-                      ds.subtree_allocated_size AS allocated_size,
-                      ds.self_completed_at_ns
-               FROM root r
-               LEFT JOIN path p ON p.root_id=r.id AND p.path_key=x'' AND p.state='present'
-               LEFT JOIN directory_summary ds ON ds.path_id=p.id
-               ORDER BY r.root_path_display"""
-        )
-        return [
-            {
-                "root_id": row["root_id"],
-                "files": row["files"],
-                "logical_size": row["logical_size"],
-                "allocated_size": row["allocated_size"],
-                "status": "unscanned" if row["self_completed_at_ns"] is None else "indexed",
-                "path": _relative_display(row["root_path_display"], display_base, row["root_path_display"]),
-            }
-            for row in rows
-        ]
+    scope = Path(".") if scope is None else scope
     try:
         selected = _scope_row(connection, scope)
     except FlatlasError:
@@ -445,28 +423,46 @@ def disk_usage(
             "files": 1,
             "logical_size": selected["logical_size"],
             "allocated_size": selected["allocated_size"],
-            "status": "indexed",
         }
+        usage = None
     elif selected["entry_kind"] in {"root", "directory"}:
-        summary = connection.execute(
+        usage = connection.execute(
             """SELECT subtree_files AS files, subtree_logical_size AS logical_size,
-                      subtree_allocated_size AS allocated_size, self_completed_at_ns
+                      subtree_allocated_size AS allocated_size, self_completed_at_ns,
+                      subtree_complete_through_ns, last_completed_scan_id, path_id AS id
                FROM directory_summary WHERE path_id=?""",
             (selected["id"],),
         ).fetchone()
-        if summary is None:
+        if usage is None:
             raise FlatlasError(f"directory summary is missing: {selected['path_display']}")
         row = {
-            "files": summary["files"],
-            "logical_size": summary["logical_size"],
-            "allocated_size": summary["allocated_size"],
-            "status": "unscanned" if summary["self_completed_at_ns"] is None else "indexed",
+            "files": usage["files"],
+            "logical_size": usage["logical_size"],
+            "allocated_size": usage["allocated_size"],
         }
     else:
-        row = {"files": 0, "logical_size": 0, "allocated_size": 0, "status": "indexed"}
+        row = {"files": 0, "logical_size": 0, "allocated_size": 0}
+        usage = None
+    parent_summary = connection.execute(
+        """SELECT self_completed_at_ns, last_completed_scan_id
+           FROM directory_summary WHERE path_id=?""",
+        (selected["parent_path_id"],),
+    ).fetchone() if selected["parent_path_id"] is not None else None
+    scopes = connection.execute(
+        """SELECT ss.scope_path_key, ss.status, ss.scan_id,
+                  s.started_at_ns, s.refresh_before_ns
+           FROM scan_scope ss JOIN scan s ON s.id=ss.scan_id
+           WHERE ss.root_id=? ORDER BY s.id DESC, ss.id DESC""",
+        (selected["root_id"],),
+    ).fetchall()
+    status = _entry_scan_status(
+        connection, selected, str(selected["entry_kind"]),
+        bytes(selected["path_key"]), scopes, usage, parent_summary,
+    )
     return [
         {
             **dict(row),
+            "status": status,
             "path": _relative_display(selected["path_display"], display_base, selected["root_path_display"]),
         }
     ]

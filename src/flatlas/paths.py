@@ -83,7 +83,9 @@ def _sqlite_integer(value: int | None) -> int | None:
 def _scope_row(connection: sqlite3.Connection, value: Path) -> sqlite3.Row:
     display = str(value.expanduser().resolve())
     row = connection.execute(
-        """SELECT p.id, p.path_display, p.entry_kind, p.logical_size, p.allocated_size,
+        """SELECT p.id, p.root_id, p.path_key, p.parent_path_id, p.state,
+                  p.last_seen_scan_id, p.path_display, p.entry_kind,
+                  p.logical_size, p.allocated_size,
                   r.root_path_display
         FROM path p JOIN root r ON r.id=p.root_id
         WHERE p.path_display=? AND p.state='present'""",
