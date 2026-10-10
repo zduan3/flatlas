@@ -101,7 +101,7 @@ d  gone      1048576  12           -  Sep 18 10:00     removed
 |---|---|---|
 | P1 | `-a`, `--all` | 按 GNU 语义包含全部条目，并额外合成 `.` 与 `..`；与默认的隐式 `-A` 有意不同。 |
 | P0 | `-l` | 显式请求长格式；目标默认已启用。与 `--format table` 配合，不改变 JSON/CSV schema。 |
-| P0 | `-h`, `--human-readable` | 以 1024 进制缩写显示 size；只影响表格，不改变机器输出中的整数值。 |
+| 已实现 | `-h`, `--human-readable` | 以 1024 进制的 K/M/G/T 显示 logical/allocated size，四舍五入至多一位小数；小于 1024 显示字节整数，超过 T 继续以 T 表示。仅影响表格，大小表头省略 `(B)`，机器输出保持原始整数值。 |
 | P0 | `-A`, `--almost-all` | 包含真实隐藏条目但不显示 `.` / `..`；目标默认已启用，保留该参数作为显式兼容写法。 |
 | P1 | `-d`, `--directory` | 将参数目录当作一个条目，而不是列其内容。 |
 | P1 | `-R`, `--recursive` | 递归列出子目录；必须携带每个目录的 coverage 状态且有深度/数量保护。 |
@@ -197,7 +197,7 @@ hardlink 的默认计数应尽量对齐 GNU `du`：同一可靠对象身份在�
 | 优先级 | 参数 | 规划语义 |
 |---|---|---|
 | P0 | `-s`, `--summarize` | 每个参数只输出一个总量；目标默认已启用，保留参数作为显式兼容写法。 |
-| P0 | `-h`, `--human-readable` | 1024 进制的人类可读单位。 |
+| 已实现 | `-h`, `--human-readable` | 与 ls 共用 1024 进制的 K/M/G/T 缩放与舍入；仅影响表格中的 logical/allocated 大小，文件数、未知值和 JSON/CSV 不变。 |
 | P0 | `--si` | 1000 进制单位。 |
 | P0 | `-b`, `--bytes` | 等价于 apparent size 且 block size 为 1；表格可只显示 apparent 列。 |
 | P0 | `--apparent-size` | 以 logical/apparent size 作为筛选、排序和主显示指标。 |

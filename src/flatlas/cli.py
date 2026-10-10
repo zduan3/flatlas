@@ -167,6 +167,21 @@ def _print(rows: object, fmt: str = "json", output: Path | None = None) -> None:
         typer.echo(rendered, nl=False)
 
 
+def _format_size(value: object, *, human_readable: bool = False) -> str:
+    if value is None:
+        return "-"
+    if not human_readable or not isinstance(value, int) or value < 1024:
+        return str(value)
+    divisor = 1
+    for unit in "KMGT":
+        divisor *= 1024
+        tenths = (value * 10 + divisor // 2) // divisor
+        if tenths < 10240 or unit == "T":
+            whole, fraction = divmod(tenths, 10)
+            return f"{whole}.{fraction}{unit}" if fraction else f"{whole}{unit}"
+    raise AssertionError("size unit must be selected")
+
+
 def _print_usage(
     rows: list[dict[str, object]],
     fmt: str,
@@ -177,6 +192,7 @@ def _print_usage(
     name_column: bool = False,
     logical_header: bool = False,
     include_scanned_through: bool = False,
+    human_readable: bool = False,
 ) -> None:
     if fmt in {"json", "csv"}:
         _print(rows, fmt, output)
@@ -188,9 +204,10 @@ def _print_usage(
     headers = ["T"] if include_kind else []
     if include_status:
         headers.append("S")
-    headers.extend(["LOGICAL(B)" if logical_header else "SIZE(B)", "N"])
+    size_header = "LOGICAL" if logical_header else "SIZE"
+    headers.extend([size_header if human_readable else f"{size_header}(B)", "N"])
     if show_allocated:
-        headers.append("ALLOC(B)")
+        headers.append("ALLOC" if human_readable else "ALLOC(B)")
     if include_scanned_through:
         headers.append("SCANNED-THROUGH")
     listing_time_ns = time.time_ns() if include_scanned_through else None
@@ -201,10 +218,12 @@ def _print_usage(
         fields = [str(row["entry_kind"])[0]] if include_kind else []
         if include_status:
             fields.append({"scanned": "ok", "unscanned": "new", "incomplete": "part", "missing": "gone"}[str(row["status"])])
-        fields.extend(["-" if row[key] is None else str(row[key]) for key in ("logical_size", "files")])
+        fields.extend([
+            _format_size(row["logical_size"], human_readable=human_readable),
+            "-" if row["files"] is None else str(row["files"]),
+        ])
         if show_allocated:
-            allocated = row["allocated_size"]
-            fields.append("-" if allocated is None else str(allocated))
+            fields.append(_format_size(row["allocated_size"], human_readable=human_readable))
         if include_scanned_through:
             scanned_through = row["subtree_complete_through_ns"]
             fields.append(
@@ -733,6 +752,9 @@ def du(
         list[Path] | None,
         typer.Argument(help="Optional file or directory scopes; defaults to the current directory."),
     ] = None,
+    human_readable: Annotated[
+        bool, typer.Option("-h", "--human-readable", help="Show table sizes in 1024-based K, M, G, T units.")
+    ] = False,
     format: Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")] = "table",
     output: Annotated[Path | None, typer.Option("--output")] = None,
     db: db_option = None,
@@ -744,7 +766,7 @@ def du(
     connection = _open_database(_database(db))
     try:
         rows = [row for path in (paths or [Path(".")]) for row in disk_usage(connection, scope=path)]
-        _print_usage(rows, format, output, include_status=True)
+        _print_usage(rows, format, output, include_status=True, human_readable=human_readable)
     finally:
         connection.close()
 
@@ -752,6 +774,9 @@ def du(
 @app.command("ls")
 def ls_command(
     path: Annotated[Path, typer.Argument(help="Directory whose live direct children are listed.")] = Path("."),
+    human_readable: Annotated[
+        bool, typer.Option("-h", "--human-readable", help="Show table sizes in 1024-based K, M, G, T units.")
+    ] = False,
     format: Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")] = "table",
     output: Annotated[Path | None, typer.Option("--output")] = None,
     db: db_option = None,
@@ -772,6 +797,7 @@ def ls_command(
             logical_header=True,
             name_column=True,
             include_scanned_through=True,
+            human_readable=human_readable,
         )
     finally:
         connection.close()
