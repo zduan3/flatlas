@@ -44,6 +44,10 @@ migration 3 为 `scan` 增加可空的 `refresh_before_ns`，记录 `--refresh-b
 
 CLI 打开已有数据库并检测到待执行 migration 时，必须先在 stderr 输出 migration 版本与说明。目录回填期间交互式终端原地显示“已完成目录数 / 总目录数”，非交互式调用按进度里程碑输出；提交 migration 版本记录后再显示完成提示。stdout 不得混入 migration 信息，以保持 JSON/CSV 可解析。新建空数据库的 schema 初始化默认静默。migration 中断时不写完成版本，下次打开数据库可幂等重试。
 
+连接先只读检查 `schema_migration` 是否包含当前所需的全部版本；满足要求时跳过全部 migration 写操作，包括 application ID 设置和 DDL。已有 WAL 数据库也不重复设置 journal mode，因此扫描持有写事务时，`ls` 等查询可以读取已提交的索引。只有缺少迁移版本时才以 `BEGIN IMMEDIATE` 获取写锁，并在锁内重新检查版本，避免并发打开重复升级。待执行的 schema、回填数据与版本记录在同一事务中提交，失败则一起回滚；migration 完成提示只在提交后输出。此调整不增加 schema 版本，不改变 migration 1–3 的目标结构和数据保留规则。两个扫描仍会竞争同一数据库的写锁。
+
+回归测试覆盖扫描 A 时查询 B、当前 schema 的只读检查、待迁移时的写锁竞争、并发打开后的版本复查，以及迁移故障回滚和重试。这些测试可在 Windows/Linux CI 运行；Windows 本地结果不能替代 Linux 验证。
+
 目录大小与 freshness 是两个独立维度。partial scan 可以把已观测的新 metadata 写入缓存，同时保留因 coverage 不完整而不能确认删除的旧路径，因此汇总可能混合新旧观测。机器输出后续应分别暴露数值、freshness 和 coverage/error 状态，而不能把非空时间解释为精确性证明。推荐的可信度概念为：
 
 - `fresh`：所有目录都成功过，子树最旧成功时间在策略阈值内，且没有需要单独提示的近期错误。

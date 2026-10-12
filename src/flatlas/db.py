@@ -164,10 +164,11 @@ def open_database(
     location.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(location)
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA journal_mode = WAL")
-    connection.execute("PRAGMA busy_timeout = 5000")
     try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 5000")
+        if connection.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
+            connection.execute("PRAGMA journal_mode = WAL")
         migrate(connection, on_migration=on_migration)
     except BaseException:
         connection.close()
@@ -180,8 +181,44 @@ def migrate(
     *,
     on_migration: Callable[[MigrationProgress], None] | None = None,
 ) -> None:
+    required_versions = set(range(1, SCHEMA_VERSION + 1))
+    if required_versions <= _migration_versions(connection):
+        return
+    completed: list[MigrationProgress] = []
+    with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        # Another opener may have migrated while we waited for the write lock.
+        if required_versions <= _migration_versions(connection):
+            return
+        _apply_migrations(connection, on_migration=on_migration, completed=completed)
+    if on_migration is not None:
+        for event in completed:
+            on_migration(event)
+
+
+def _migration_versions(connection: sqlite3.Connection) -> set[int]:
+    if connection.execute(
+        "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='schema_migration'"
+    ).fetchone() is None:
+        return set()
+    return {int(row[0]) for row in connection.execute("SELECT version FROM schema_migration")}
+
+
+def _execute_ddl(connection: sqlite3.Connection, script: str) -> None:
+    # executescript implicitly commits, which would release the migration lock.
+    for statement in script.split(";"):
+        if statement.strip():
+            connection.execute(statement)
+
+
+def _apply_migrations(
+    connection: sqlite3.Connection,
+    *,
+    on_migration: Callable[[MigrationProgress], None] | None,
+    completed: list[MigrationProgress],
+) -> None:
     connection.execute("PRAGMA application_id = 1179402580")
-    connection.executescript(DDL)
+    _execute_ddl(connection, DDL)
     initial = connection.execute("SELECT 1 FROM schema_migration WHERE version = 1").fetchone()
     existing_database = initial is not None
     if initial is None:
@@ -194,7 +231,7 @@ def migrate(
     if directory_summary is None:
         if existing_database and on_migration is not None:
             on_migration(MigrationProgress(2, description, "started"))
-        connection.executescript(DIRECTORY_SUMMARY_MIGRATION)
+        _execute_ddl(connection, DIRECTORY_SUMMARY_MIGRATION)
         from flatlas.summaries import backfill_directory_summaries
 
         progress_callback = None
@@ -208,9 +245,8 @@ def migrate(
             "INSERT INTO schema_migration(version, applied_at_ns, description) VALUES (?, ?, ?)",
             (2, now_ns(), description),
         )
-        connection.commit()
         if existing_database and on_migration is not None:
-            on_migration(MigrationProgress(2, description, "completed"))
+            completed.append(MigrationProgress(2, description, "completed"))
     refresh_scan = connection.execute("SELECT 1 FROM schema_migration WHERE version = 3").fetchone()
     if refresh_scan is None:
         if existing_database and on_migration is not None:
@@ -222,6 +258,5 @@ def migrate(
             "INSERT INTO schema_migration(version, applied_at_ns, description) VALUES (?, ?, ?)",
             (3, now_ns(), REFRESH_SCAN_MIGRATION_DESCRIPTION),
         )
-    connection.commit()
     if existing_database and refresh_scan is None and on_migration is not None:
-        on_migration(MigrationProgress(3, REFRESH_SCAN_MIGRATION_DESCRIPTION, "completed"))
+        completed.append(MigrationProgress(3, REFRESH_SCAN_MIGRATION_DESCRIPTION, "completed"))
