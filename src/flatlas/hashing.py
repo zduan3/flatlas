@@ -169,6 +169,7 @@ def _duplicate_hash_candidates(connection: sqlite3.Connection, scope: Path) -> l
         ), duplicate_sizes(logical_size) AS (
             SELECT p.logical_size FROM path p JOIN descendants d ON d.id=p.id
             WHERE p.state='present' AND p.entry_kind='file' AND p.logical_size > 0
+              AND (p.allocated_size IS NULL OR p.allocated_size > 0)
             GROUP BY p.logical_size HAVING count(*) > 1
         )
         SELECT p.id, p.path_display, p.logical_size, p.device, p.inode, p.mtime_ns,
@@ -183,6 +184,7 @@ def _duplicate_hash_candidates(connection: sqlite3.Connection, scope: Path) -> l
         JOIN duplicate_sizes s ON s.logical_size=p.logical_size
         LEFT JOIN file_hash h ON h.path_id=p.id
         WHERE p.state='present' AND p.entry_kind='file' AND p.logical_size > 0
+          AND (p.allocated_size IS NULL OR p.allocated_size > 0)
         ORDER BY p.logical_size, p.path_display""",
         (selected["id"],),
     ).fetchall()

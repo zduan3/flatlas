@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from typer.testing import CliRunner
 
 from flatlas import cli, core
@@ -30,6 +31,12 @@ from flatlas.core import (
 )
 from flatlas.summaries import refresh_directory_summaries
 from flatlas.version import VersionInfo
+
+
+@pytest.fixture
+def external_file_allocation(monkeypatch) -> None:
+    """Keep hash/plan fixtures eligible regardless of NTFS resident storage."""
+    monkeypatch.setattr("flatlas.scanning.allocated_size", lambda _path, metadata: 4096 if metadata.st_size else 0)
 
 
 def make_connection(tmp_path: Path):
@@ -61,7 +68,7 @@ def test_init_registration_does_not_scan_and_roots_has_df_alias(tmp_path: Path, 
         connection.close()
 
 
-def test_full_scan_detects_duplicates_and_builds_immutable_plan(tmp_path: Path) -> None:
+def test_full_scan_detects_duplicates_and_builds_immutable_plan(tmp_path: Path, external_file_allocation) -> None:
     connection, source = make_connection(tmp_path)
     try:
         (source / "left.bin").write_bytes(b"same payload")
@@ -81,7 +88,7 @@ def test_full_scan_detects_duplicates_and_builds_immutable_plan(tmp_path: Path) 
         connection.close()
 
 
-def test_plan_show_without_id_lists_summaries_without_operations(tmp_path: Path) -> None:
+def test_plan_show_without_id_lists_summaries_without_operations(tmp_path: Path, external_file_allocation) -> None:
     database = tmp_path / "index.sqlite"
     source = tmp_path / "source"
     source.mkdir()
@@ -111,7 +118,7 @@ def test_plan_show_without_id_lists_summaries_without_operations(tmp_path: Path)
     assert "canonical_path" not in payload[0]
     assert "replacement_path" not in payload[0]
 
-def test_subtree_scan_can_match_existing_index_and_complete_scope_marks_deletion(tmp_path: Path) -> None:
+def test_subtree_scan_can_match_existing_index_and_complete_scope_marks_deletion(tmp_path: Path, external_file_allocation) -> None:
     connection, source = make_connection(tmp_path)
     try:
         (source / "old.bin").write_bytes(b"shared")
@@ -178,7 +185,7 @@ def test_rm_recursively_removes_only_indexed_paths_without_touching_files(tmp_pa
         connection.close()
 
 
-def test_rm_discards_dry_run_plans_that_reference_removed_paths(tmp_path: Path) -> None:
+def test_rm_discards_dry_run_plans_that_reference_removed_paths(tmp_path: Path, external_file_allocation) -> None:
     connection, source = make_connection(tmp_path)
     target = source / "target"
     target.mkdir()
@@ -629,7 +636,7 @@ def test_scan_progress_uses_current_directory_on_timed_refresh(monkeypatch) -> N
     assert output[1].endswith(" · second")
 
 
-def test_dupes_scopes_grouped_output_to_path_and_defaults_to_cwd(tmp_path: Path, monkeypatch) -> None:
+def test_dupes_scopes_grouped_output_to_path_and_defaults_to_cwd(tmp_path: Path, monkeypatch, external_file_allocation) -> None:
     database = tmp_path / "index.sqlite"
     source = tmp_path / "source"
     source.mkdir()
@@ -708,7 +715,7 @@ def test_scan_is_metadata_only_and_has_no_hash_option(tmp_path: Path) -> None:
     assert "--hash" not in help_result.stdout
 
 
-def test_lazy_hashing_is_scoped_reads_small_files_once_and_reuses_cache(tmp_path: Path, monkeypatch) -> None:
+def test_lazy_hashing_is_scoped_reads_small_files_once_and_reuses_cache(tmp_path: Path, monkeypatch, external_file_allocation) -> None:
     connection, source = make_connection(tmp_path)
     inside = source / "inside"
     outside = source / "outside"
@@ -751,7 +758,7 @@ def test_lazy_hashing_is_scoped_reads_small_files_once_and_reuses_cache(tmp_path
         connection.close()
 
 
-def test_quick_hash_avoids_full_reads_for_different_large_files(tmp_path: Path, monkeypatch) -> None:
+def test_quick_hash_avoids_full_reads_for_different_large_files(tmp_path: Path, monkeypatch, external_file_allocation) -> None:
     connection, source = make_connection(tmp_path)
     try:
         size = core.QUICK_SAMPLE_BYTES * 2 + 1
@@ -778,7 +785,7 @@ def test_quick_hash_avoids_full_reads_for_different_large_files(tmp_path: Path, 
         connection.close()
 
 
-def test_lazy_hash_reports_file_changed_after_scan_as_incomplete(tmp_path: Path) -> None:
+def test_lazy_hash_reports_file_changed_after_scan_as_incomplete(tmp_path: Path, external_file_allocation) -> None:
     connection, source = make_connection(tmp_path)
     changed = source / "changed.bin"
     try:
@@ -1360,7 +1367,7 @@ def test_scan_records_unicode_entries_and_does_not_follow_symlinks(tmp_path: Pat
         connection.close()
 
 
-def test_completed_scan_confirms_directory_deletion_and_reappearance_stales_hash(tmp_path: Path) -> None:
+def test_completed_scan_confirms_directory_deletion_and_reappearance_stales_hash(tmp_path: Path, external_file_allocation) -> None:
     connection, source = make_connection(tmp_path)
     removed = source / "removed"
     removed.mkdir()
@@ -1769,7 +1776,7 @@ def test_directory_summary_refresh_reads_directory_data_in_batches(tmp_path: Pat
         connection.close()
 
 
-def test_index_queries_and_cached_duplicates_work_after_source_goes_offline(tmp_path: Path) -> None:
+def test_index_queries_and_cached_duplicates_work_after_source_goes_offline(tmp_path: Path, external_file_allocation) -> None:
     connection, source = make_connection(tmp_path)
     try:
         (source / "a.bin").write_bytes(b"same")
@@ -1791,7 +1798,7 @@ def test_index_queries_and_cached_duplicates_work_after_source_goes_offline(tmp_
         connection.close()
 
 
-def test_json_csv_output_and_read_only_commands_preserve_user_files(tmp_path: Path) -> None:
+def test_json_csv_output_and_read_only_commands_preserve_user_files(tmp_path: Path, external_file_allocation) -> None:
     database = tmp_path / "index.sqlite"
     source = tmp_path / "source"
     source.mkdir()

@@ -526,6 +526,7 @@ def duplicate_groups(
             FROM file_hash h JOIN path p ON p.id=h.path_id
             WHERE h.state='full_ready' AND p.state='present' AND p.entry_kind='file'
               AND p.logical_size > 0
+              AND (p.allocated_size IS NULL OR p.allocated_size > 0)
               AND p.id IN descendants
             ORDER BY h.full_algorithm, h.full_digest, p.path_display""",
             (selected["id"],),
@@ -537,6 +538,7 @@ def duplicate_groups(
             FROM file_hash h JOIN path p ON p.id=h.path_id
             WHERE h.state='full_ready' AND p.state='present' AND p.entry_kind='file'
               AND p.logical_size > 0 {where}
+              AND (p.allocated_size IS NULL OR p.allocated_size > 0)
             ORDER BY h.full_algorithm, h.full_digest, p.path_display""",
             (() if root_id is None else (root_id,)),
         ).fetchall()

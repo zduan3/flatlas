@@ -6,6 +6,8 @@
 
 本文记录 0.2 的惰性 Hash 规划。0.1 当前基线是：`scan` 只采集 metadata；`dupes PATH` 只为 PATH 子树内的同大小普通文件计算 hash，使用 size → quick → full 流水线、前后 `fstat` 校验和保守缓存复用。已完成的 hash 分批提交，因此中断 `dupes` 不会丢失此前已提交的缓存；这不等同于完整的 hash 运行审计或可恢复任务。0.1 的结果只用于清理指导，实际去重由 jdupes 重新扫描和验证。
 
+当前 0.2 的 `dupes` 与 `export dupes` 在同大小分组前排除索引中 `allocated_size=0` 的普通文件（例如 Windows MFT 驻留数据）；这些文件不读取内容、不计入 hash 候选，也不进入重复组，即使已有 `full_ready` 缓存。过滤后不足两个文件的大小组不计算 hash，重复组数量和 theoretical logical savings 只使用剩余成员。占用未知（`NULL`）仍参与候选，不能当作 0；过滤不修改路径状态、scan coverage 或已有 hash，也不将 allocated size 当作真实可回收空间。已有索引以普通重扫更新占用值，无需 migration。
+
 ## 后续能力
 
 ### 调度与性能
