@@ -284,6 +284,10 @@ C:\         997482492  391581348  605901144   40%  C:\
 - 同一 namespace 的 `roots` 与 `df` 表格、JSON 和错误行为必须逐项一致。
 - Windows/Linux 测试应 mock 固定容量验证单位和舍入，并各自增加真实文件系统 smoke test。
 
+## largest 已实现显示选项
+
+`flatlas largest [PATH] -h` / `--human-readable` 与 `ls`、`du` 共用 1024 进制 K/M/G/T 格式和舍入规则，仅缩放表格中的 logical 大小。表格只显示 `SIZE(B)`（使用 `-h` 时为 `SIZE`）和 `PATH`，不显示 allocated 列，未知值为 `-`；JSON/CSV（含 `--output`）仍保留 logical/allocated 原始字节值。PATH scope、默认 10 项、`-n` / `--limit`、相对路径、当前普通文件过滤与稳定大小排序保持不变。
+
 ## 后续查询子命令规划
 
 后续子命令不应只是重新包装操作系统工具，而应利用持久化索引，把路径状态、scan coverage、错误、hash 状态和实时差异叠加到熟悉的查询模型上。普通索引查询不得隐式遍历或更新文件系统；内容分析命令必须像当前 `dupes` 一样明确说明会在查询范围内读取候选文件，且不得改变 scan coverage。
