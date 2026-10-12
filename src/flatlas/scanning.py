@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from flatlas.allocation import allocated_size
 from flatlas.db import _last_insert_id, now_ns
 from flatlas.errors import FlatlasError
 from flatlas.paths import (
@@ -44,6 +45,7 @@ class Observation:
     change_time_ns: int | None
     birth_time_ns: int | None
     symlink_target: bytes | None
+    allocation_error: OSError | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +86,13 @@ def _observation(namespace: Namespace, value: Path, *, root: bool = False) -> Ob
             target = os.fsencode(os.readlink(value))
         except OSError:
             target = None
+    allocation = None
+    allocation_error = None
+    if kind == "file":
+        try:
+            allocation = allocated_size(value, stat)
+        except OSError as exc:
+            allocation_error = exc
     return Observation(
         path=value, key=path_key(namespace, value),
         name=b"" if root else os.fsencode(value.name), kind=kind,
@@ -91,12 +100,13 @@ def _observation(namespace: Namespace, value: Path, *, root: bool = False) -> Ob
         mode=mode, uid=getattr(stat, "st_uid", None), gid=getattr(stat, "st_gid", None),
         nlink=getattr(stat, "st_nlink", None),
         logical_size=stat.st_size if kind == "file" else None,
-        allocated_size=(getattr(stat, "st_blocks", 0) * 512) if hasattr(stat, "st_blocks") else None,
+        allocated_size=allocation,
         mtime_ns=getattr(stat, "st_mtime_ns", None),
         # Python's Windows st_ctime is not a stable POSIX change time (and is
         # deprecated as a creation-time alias), so it is not a reliable hash basis.
         change_time_ns=None if sys.platform == "win32" else getattr(stat, "st_ctime_ns", None),
         birth_time_ns=getattr(stat, "st_birthtime_ns", None), symlink_target=target,
+        allocation_error=allocation_error,
     )
 
 
@@ -439,6 +449,10 @@ def scan_directory(
                     directory_complete = False
                     continue
                 path_id = upsert_path(connection, root_id, scan_id, observed)
+                if observed.allocation_error is not None:
+                    _record_error(connection, scope_id, observed.key, "stat", observed.allocation_error)
+                    failed = True
+                    directory_complete = False
                 if observed.kind == "directory":
                     dirs_seen += 1
                     visit(entry_path, path_id)

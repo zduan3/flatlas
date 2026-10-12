@@ -58,6 +58,7 @@ File Atlas 当前开发版本为 0.2.0。0.1 是已完成并冻结的只读 MVP 
 
 ### 跨平台与数据真实性
 
+- Windows 普通文件的占用空间已采集：通过外部 extent 查询识别 MFT 驻留数据并计为 0，其他普通文件按所在卷簇大小取整，压缩/稀疏文件读取系统占用值；失败保留未知并令扫描 partial，不确认删除。已有索引需普通重扫回填，目录继续读取缓存。口径、限制与验证见 [Windows 占用空间](windows-allocation.md)。
 - 补齐 Linux 非 UTF-8 路径、Windows 长路径与 reparse tag、跨 mount/volume 策略和 allocated size 平台校准。
 - hardlink、稀疏文件、压缩文件、reflink/shared extent 与索引范围外 alias 必须保守表达，不能夸大物理节省量。
 - 新 schema 只允许向前 migration，必须保留现有 root、path、scan、coverage、error、hash 与 plan 数据。
