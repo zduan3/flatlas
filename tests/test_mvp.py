@@ -472,13 +472,41 @@ def test_ls_does_not_treat_equal_scan_times_as_completed_coverage(tmp_path: Path
         scans = connection.execute("SELECT id, started_at_ns FROM scan ORDER BY id").fetchall()
         assert scans[0]["started_at_ns"] == scans[1]["started_at_ns"]
         statuses = {row["name"]: row["status"] for row in list_child_directories(connection, scope=source)}
-        assert statuses == {"complete": "scanned", "parent": "incomplete"}
+        assert statuses == {"complete": "scanned", "parent": "scanned"}
+        assert disk_usage(connection, scope=parent)[0]["status"] == "incomplete"
         child_rows = list_child_directories(connection, scope=parent)
         assert child_rows[0]["name"] == "child"
         assert child_rows[0]["status"] == "incomplete"
         assert connection.execute(
             "SELECT state FROM path WHERE path_display=?", (str(child / "old.bin"),)
         ).fetchone()["state"] == "present"
+    finally:
+        connection.close()
+
+
+def test_ls_refresh_status_uses_directory_itself_without_descendant_checks(tmp_path: Path, monkeypatch) -> None:
+    connection, source = make_connection(tmp_path)
+    parent = source / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    previous_time = 1_700_000_000_000_000_000
+    real_scandir = os.scandir
+
+    def fail_child(path):
+        if Path(path) == child:
+            raise PermissionError("injected refresh coverage failure")
+        return real_scandir(path)
+
+    try:
+        monkeypatch.setattr("flatlas.scanning.now_ns", lambda: previous_time)
+        scan_directory(connection, source)
+        monkeypatch.setattr("flatlas.scanning.now_ns", lambda: previous_time + 10)
+        with monkeypatch.context() as partial_scan:
+            partial_scan.setattr("flatlas.core.os.scandir", fail_child)
+            assert scan_directory(connection, source, refresh_before_ns=previous_time + 5)["status"] == "partial"
+        assert list_child_directories(connection, scope=source)[0]["status"] == "scanned"
+        assert list_child_directories(connection, scope=parent)[0]["status"] == "incomplete"
+        assert disk_usage(connection, scope=parent)[0]["status"] == "incomplete"
     finally:
         connection.close()
 
@@ -915,7 +943,7 @@ def test_database_migration_is_idempotent_and_keeps_existing_data(tmp_path: Path
         connection.close()
 
 
-def test_ls_shows_completed_active_and_unvisited_branches_after_cancellation(
+def test_ls_skips_recursive_checks_after_cancellation_and_keeps_cached_usage(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -950,15 +978,38 @@ def test_ls_shows_completed_active_and_unvisited_branches_after_cancellation(
             raise AssertionError("scan should be cancelled in the active branch")
 
         monkeypatch.setattr("flatlas.core.os.scandir", real_scandir)
+        assert disk_usage(connection, scope=completed)[0]["status"] == "scanned"
+        cached_usage = connection.execute(
+            """SELECT subtree_files, subtree_logical_size, subtree_complete_through_ns
+               FROM directory_summary ds JOIN path p ON p.id=ds.path_id
+               WHERE p.path_display=?""",
+            (str(completed),),
+        ).fetchone()
+
+        def fail_recursive_check(*args):
+            raise AssertionError("ls must not inspect indexed descendants")
+
+        monkeypatch.setattr("flatlas.queries._subtree_completed_in_scan", fail_recursive_check)
+        statements = []
+        connection.set_trace_callback(statements.append)
+        connection.execute("PRAGMA query_only = ON")
+        rows = list_child_directories(connection, scope=source)
+        connection.set_trace_callback(None)
+        assert not any("WITH RECURSIVE" in statement.upper() for statement in statements)
         statuses = {
             row["name"]: row["status"]
-            for row in list_child_directories(connection, scope=source)
+            for row in rows
         }
         assert statuses == {
             completed.name: "scanned",
             active.name: "incomplete",
             untouched.name: "scanned",
         }
+        completed_row = next(row for row in rows if row["name"] == completed.name)
+        assert completed_row["files"] == cached_usage["subtree_files"]
+        assert completed_row["logical_size"] == cached_usage["subtree_logical_size"]
+        assert completed_row["subtree_complete_through_ns"] == cached_usage["subtree_complete_through_ns"]
+        assert list_child_directories(connection, scope=completed)[0]["status"] == "scanned"
     finally:
         connection.close()
 

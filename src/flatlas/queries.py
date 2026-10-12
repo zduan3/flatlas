@@ -258,6 +258,7 @@ def list_child_directories(
             scopes,
             usage,
             parent_summary,
+            check_subtree=False,
         )
         result.append(_live_child_status_row(observed, status, usage))
 
@@ -279,6 +280,8 @@ def _entry_scan_status(
     scopes: list[sqlite3.Row],
     usage: sqlite3.Row | None,
     parent_summary: sqlite3.Row | None,
+    *,
+    check_subtree: bool = True,
 ) -> str:
     if (
         indexed is None
@@ -299,7 +302,10 @@ def _entry_scan_status(
             completed = (
                 usage is not None
                 and usage["last_completed_scan_id"] == latest["scan_id"]
-                and _subtree_completed_in_scan(connection, int(usage["id"]), int(latest["scan_id"]))
+                and (
+                    not check_subtree
+                    or _subtree_completed_in_scan(connection, int(usage["id"]), int(latest["scan_id"]))
+                )
             )
         else:
             completed = (
@@ -308,7 +314,9 @@ def _entry_scan_status(
             )
     else:
         if entry_kind in {"root", "directory"}:
-            complete_through = None if usage is None else usage["subtree_complete_through_ns"]
+            complete_through = None if usage is None else usage[
+                "subtree_complete_through_ns" if check_subtree else "self_completed_at_ns"
+            ]
         else:
             complete_through = None if parent_summary is None else parent_summary["self_completed_at_ns"]
         completed = complete_through is not None and int(complete_through) >= int(refresh_before)
