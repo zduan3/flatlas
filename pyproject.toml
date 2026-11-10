@@ -29,6 +29,19 @@ target-version = "py312"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--strict-markers"
+markers = [
+    "db: database connections, migrations and concurrent access",
+    "scan: metadata scanning, coverage, summaries, cancellation and resume",
+    "hash: lazy hashing, duplicate groups and duplicate filters",
+    "query: indexed and live queries, scope, ordering and status",
+    "plan: immutable dry-run plans and index maintenance interactions",
+    "cli: command entry points, arguments and error rendering",
+    "output: table formatting, JSON/CSV and export contracts",
+    "allocation: platform allocation metadata and zero/unknown semantics",
+    "version: package and Git version detection",
+    "safety: cross-boundary read-only, deletion and hash validity invariants",
+]
 
 [tool.pyright]
 pythonVersion = "3.12"

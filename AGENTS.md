@@ -39,15 +39,19 @@ File Atlas (flatlas) 是跨平台、持久化且只读的文件系统索引工�
 
 - 使用 uv：通过 `uv add` / `uv add --dev` 更新依赖，维护 `pyproject.toml` 与 `uv.lock` 一致；不要对项目 `.venv` 使用裸 `pip install`。
 - 每次影响扫描、删除判定、hash 或 schema 的改动，都要添加/更新回归测试。优先覆盖局部 scan 与既有索引交互、错误注入和不产生假删除。
-- 交付前运行：
+- 按改动范围选择测试，不再要求每次小改动都执行全量 pytest。范围表见 `docs/development.md` 的“按改动选择测试”；开发迭代可先运行单个 node 或测试文件，交付前运行受影响的全部 marker 范围。跨边界改动用 `or` 合并范围，不能只运行新增测试。
+- Python 代码或测试改动交付前运行静态检查、类型检查和所选回归范围，例如 hash/dupes 改动：
 
   ```powershell
   uv run ruff check .
-  uv run pytest -q
+  uv run pytest -q -m "hash or safety"
   uv run pyright
   git diff --check
   ```
 
+- 纯文档改动仅运行 `git diff --check`。新增测试必须具有相应功能 marker（可继承文件级 `pytestmark`），跨职责的回归可标多个；保持 marker 注册与严格检查，不根据函数名猜测测试归属。
+- 以下情况运行 `uv run pytest -q` 全量：schema/migration、路径身份与 namespace、全局配置/数据库定位、公共 core facade 或跨模块重构、依赖/构建、pytest 配置/共享 fixture/测试分组调整、发布/里程碑验收，以及无法可靠确定影响范围时。
+- 部分测试范围通过后，若没有新改动、失败或未解决疑点，不再追加全量或重复已通过检查。平台相关及跨平台 I/O 改动在 Windows/WSL 上运行相同受影响范围；普通平台无关改动无需每次两端全量。交付说明实际运行的范围、平台和跳过原因，不将局部通过描述为全量验收。
 - 若平台特性无法在当前 Windows 环境验证，应说明限制并增加可在 Linux/Windows CI 上运行的专项测试计划；不要将 Windows 测试视为 Linux 安全行为的替代。
 
 ## 提交信息规范

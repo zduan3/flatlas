@@ -21,6 +21,8 @@ from flatlas.core import (
     scan_info,
 )
 
+pytestmark = pytest.mark.allocation
+
 
 @pytest.mark.parametrize("size,expected", [(0, 0), (1, 4096), (4096, 4096), (5000, 8192), (2**32 + 1, 2**32 + 4096)])
 def test_windows_regular_file_rounds_to_volume_cluster(monkeypatch, size, expected) -> None:
@@ -153,6 +155,8 @@ def test_cluster_uses_actual_volume_and_propagates_failures(monkeypatch, failure
             allocation._cluster_size(Path("file"))
 
 
+@pytest.mark.scan
+@pytest.mark.safety
 def test_allocation_failure_preserves_metadata_and_prevents_false_deletion(tmp_path, monkeypatch) -> None:
     source = tmp_path / "source"
     nested = source / "nested"
@@ -207,6 +211,7 @@ def test_allocation_failure_preserves_metadata_and_prevents_false_deletion(tmp_p
         assert disk_usage(connection, scope=source)[0]["allocated_size"] == 8192
 
 
+@pytest.mark.safety
 def test_allocation_is_never_queried_for_directories_or_symlinks(tmp_path, monkeypatch) -> None:
     def forbidden(*_args):
         pytest.fail("special entries must not query allocation")
@@ -222,6 +227,7 @@ def test_allocation_is_never_queried_for_directories_or_symlinks(tmp_path, monke
     assert scanning._observation(namespace, link).allocated_size is None
 
 
+@pytest.mark.safety
 def test_reparse_file_is_not_queried(tmp_path, monkeypatch) -> None:
     namespace = discover_namespace(tmp_path)
     monkeypatch.setattr(Path, "lstat", lambda _path: SimpleNamespace(st_mode=0o100644, st_file_attributes=0x400))

@@ -1,4 +1,8 @@
+import pytest
+
 from flatlas import version
+
+pytestmark = pytest.mark.version
 
 
 def test_detect_version_falls_back_without_git(monkeypatch) -> None:

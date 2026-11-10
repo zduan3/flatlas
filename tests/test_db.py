@@ -10,7 +10,11 @@ from flatlas import db
 from flatlas.cli import app
 from flatlas.core import discover_namespace, register_namespace, scan_directory
 
+pytestmark = pytest.mark.db
 
+
+@pytest.mark.scan
+@pytest.mark.query
 def test_ls_other_directory_during_scan(tmp_path: Path) -> None:
     database = tmp_path / "index.sqlite"
     first = tmp_path / "a"

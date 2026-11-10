@@ -19,6 +19,8 @@ from flatlas.core import (
 )
 from flatlas.hashing import ensure_duplicate_hashes
 
+pytestmark = [pytest.mark.hash, pytest.mark.allocation]
+
 
 @pytest.mark.parametrize("cached", [False, True])
 def test_dupes_filters_zero_allocation_before_grouping_and_hashing(tmp_path: Path, monkeypatch, cached: bool) -> None:

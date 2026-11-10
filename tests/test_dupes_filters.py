@@ -12,6 +12,8 @@ from flatlas.cli import app, main
 from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError
 
+pytestmark = [pytest.mark.hash, pytest.mark.query]
+
 
 @pytest.fixture
 def indexed(tmp_path: Path, monkeypatch):
@@ -129,6 +131,8 @@ def test_equal_savings_and_size_use_digest_tie_breaker(indexed) -> None:
         assert core.duplicate_groups(connection, scope=scope, filters=DuplicateFilters(8, 8, 3, limit=1)) == groups[:1]
 
 
+@pytest.mark.scan
+@pytest.mark.safety
 def test_local_rescan_combines_new_and_existing_hashes_under_filters(indexed) -> None:
     scope, database, _ = indexed
     filters = DuplicateFilters(min_size=8, max_size=8, min_count=3)
@@ -147,6 +151,7 @@ def test_local_rescan_combines_new_and_existing_hashes_under_filters(indexed) ->
         assert connection.execute("SELECT state FROM path WHERE path_display=?", (str(scope / "small-0"),)).fetchone()[0] == "present"
 
 
+@pytest.mark.safety
 def test_group_filter_does_not_hide_hash_errors_or_change_coverage(indexed, monkeypatch) -> None:
     scope, database, _ = indexed
     digest = core._validated_digest
@@ -175,6 +180,8 @@ def test_group_filter_does_not_hide_hash_errors_or_change_coverage(indexed, monk
 
 
 @pytest.mark.parametrize("fmt", ["table", "json", "csv"])
+@pytest.mark.cli
+@pytest.mark.output
 def test_cli_and_export_share_filters_and_paths(indexed, tmp_path: Path, fmt) -> None:
     scope, database, _ = indexed
     runner = CliRunner()
@@ -208,6 +215,8 @@ def test_cli_and_export_share_filters_and_paths(indexed, tmp_path: Path, fmt) ->
 
 
 @pytest.mark.parametrize("fmt", ["table", "json", "csv"])
+@pytest.mark.cli
+@pytest.mark.output
 def test_empty_filtered_export_preserves_existing_format(indexed, tmp_path: Path, fmt) -> None:
     scope, database, _ = indexed
     output = tmp_path / "empty-output"
@@ -233,6 +242,7 @@ def test_empty_filtered_export_preserves_existing_format(indexed, tmp_path: Path
     ["--min-size", str(2**63)], ["--max-size", str(2**63)],
 ])
 @pytest.mark.parametrize("export", [False, True])
+@pytest.mark.cli
 def test_invalid_filters_fail_before_opening_database(options, export, tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setattr("flatlas.cli._open_database", lambda *_args: pytest.fail("must validate before opening database"))
     command = ["export", "dupes", "--output", str(tmp_path / "unused")] if export else ["dupes"]

@@ -47,6 +47,8 @@ def make_connection(tmp_path: Path):
     return connection, source
 
 
+@pytest.mark.version
+@pytest.mark.cli
 def test_version_reports_commit_and_date_without_database(monkeypatch) -> None:
     monkeypatch.setattr(
         cli,
@@ -59,6 +61,10 @@ def test_version_reports_commit_and_date_without_database(monkeypatch) -> None:
     assert result.stdout == "flatlas 0.2.0 (b1f9a4ff8e34, 2026-09-16, dirty)\n"
 
 
+@pytest.mark.db
+@pytest.mark.query
+@pytest.mark.cli
+@pytest.mark.safety
 def test_init_registration_does_not_scan_and_roots_has_df_alias(tmp_path: Path, monkeypatch) -> None:
     connection, _ = make_connection(tmp_path)
     try:
@@ -68,6 +74,10 @@ def test_init_registration_does_not_scan_and_roots_has_df_alias(tmp_path: Path, 
         connection.close()
 
 
+@pytest.mark.scan
+@pytest.mark.hash
+@pytest.mark.plan
+@pytest.mark.safety
 def test_full_scan_detects_duplicates_and_builds_immutable_plan(tmp_path: Path, external_file_allocation) -> None:
     connection, source = make_connection(tmp_path)
     try:
@@ -88,6 +98,8 @@ def test_full_scan_detects_duplicates_and_builds_immutable_plan(tmp_path: Path, 
         connection.close()
 
 
+@pytest.mark.plan
+@pytest.mark.cli
 def test_plan_show_without_id_lists_summaries_without_operations(tmp_path: Path, external_file_allocation) -> None:
     database = tmp_path / "index.sqlite"
     source = tmp_path / "source"
@@ -118,6 +130,9 @@ def test_plan_show_without_id_lists_summaries_without_operations(tmp_path: Path,
     assert "canonical_path" not in payload[0]
     assert "replacement_path" not in payload[0]
 
+@pytest.mark.scan
+@pytest.mark.hash
+@pytest.mark.safety
 def test_subtree_scan_can_match_existing_index_and_complete_scope_marks_deletion(tmp_path: Path, external_file_allocation) -> None:
     connection, source = make_connection(tmp_path)
     try:
@@ -140,6 +155,9 @@ def test_subtree_scan_can_match_existing_index_and_complete_scope_marks_deletion
         connection.close()
 
 
+@pytest.mark.db
+@pytest.mark.plan
+@pytest.mark.safety
 def test_rm_recursively_removes_only_indexed_paths_without_touching_files(tmp_path: Path) -> None:
     database = tmp_path / "index.sqlite"
     source = tmp_path / "source"
@@ -185,6 +203,9 @@ def test_rm_recursively_removes_only_indexed_paths_without_touching_files(tmp_pa
         connection.close()
 
 
+@pytest.mark.db
+@pytest.mark.plan
+@pytest.mark.safety
 def test_rm_discards_dry_run_plans_that_reference_removed_paths(tmp_path: Path, external_file_allocation) -> None:
     connection, source = make_connection(tmp_path)
     target = source / "target"
@@ -203,6 +224,9 @@ def test_rm_discards_dry_run_plans_that_reference_removed_paths(tmp_path: Path, 
     finally:
         connection.close()
 
+@pytest.mark.query
+@pytest.mark.cli
+@pytest.mark.output
 def test_du_defaults_to_headered_summary_with_relative_path(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "index.sqlite"
     source = tmp_path / "source"
@@ -259,6 +283,8 @@ def test_du_defaults_to_headered_summary_with_relative_path(tmp_path: Path, monk
     assert "ok=scanned" in help_result.stdout
 
 
+@pytest.mark.query
+@pytest.mark.cli
 def test_du_reports_unscanned_directories_without_inventing_sizes(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "index.sqlite"
     source = tmp_path / "source"
@@ -306,6 +332,8 @@ def test_du_reports_unscanned_directories_without_inventing_sizes(tmp_path: Path
     assert json.loads(default_result.stdout)[0]["status"] == "unscanned"
 
 
+@pytest.mark.scan
+@pytest.mark.query
 def test_du_uses_ls_coverage_status_for_partial_directory(tmp_path: Path, monkeypatch) -> None:
     connection, source = make_connection(tmp_path)
     nested = source / "nested"
@@ -332,6 +360,8 @@ def test_du_uses_ls_coverage_status_for_partial_directory(tmp_path: Path, monkey
         connection.close()
 
 
+@pytest.mark.query
+@pytest.mark.cli
 def test_largest_is_scoped_to_path_and_defaults_to_cwd(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "index.sqlite"
     source = tmp_path / "source"
@@ -374,6 +404,8 @@ def test_largest_is_scoped_to_path_and_defaults_to_cwd(tmp_path: Path, monkeypat
     assert [row["path"] for row in json.loads(defaulted.stdout)] == [str(Path("nested") / "large.bin")]
 
 
+@pytest.mark.query
+@pytest.mark.cli
 def test_largest_defaults_to_ten_and_accepts_short_limit_alias(tmp_path: Path) -> None:
     database = tmp_path / "index.sqlite"
     source = tmp_path / "source"
@@ -403,6 +435,8 @@ def test_largest_defaults_to_ten_and_accepts_short_limit_alias(tmp_path: Path) -
     assert "-n" in help_result.stdout
     assert "--limit" in help_result.stdout
 
+@pytest.mark.scan
+@pytest.mark.query
 def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch) -> None:
     connection, source = make_connection(tmp_path)
     try:
@@ -453,6 +487,8 @@ def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch
         connection.close()
 
 
+@pytest.mark.scan
+@pytest.mark.query
 def test_ls_does_not_treat_equal_scan_times_as_completed_coverage(tmp_path: Path, monkeypatch) -> None:
     connection, source = make_connection(tmp_path)
     parent = source / "parent"
@@ -491,6 +527,8 @@ def test_ls_does_not_treat_equal_scan_times_as_completed_coverage(tmp_path: Path
         connection.close()
 
 
+@pytest.mark.scan
+@pytest.mark.query
 def test_ls_refresh_status_uses_directory_itself_without_descendant_checks(tmp_path: Path, monkeypatch) -> None:
     connection, source = make_connection(tmp_path)
     parent = source / "parent"
@@ -518,6 +556,9 @@ def test_ls_refresh_status_uses_directory_itself_without_descendant_checks(tmp_p
         connection.close()
 
 
+@pytest.mark.query
+@pytest.mark.cli
+@pytest.mark.output
 def test_roots_and_df_report_capacity_and_unavailable_filesystems(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "flatlas.core.shutil.disk_usage",
@@ -570,6 +611,9 @@ def test_roots_and_df_report_capacity_and_unavailable_filesystems(tmp_path: Path
     assert unavailable_row["status"] == "unavailable"
 
 
+@pytest.mark.scan
+@pytest.mark.cli
+@pytest.mark.output
 def test_scan_reports_file_count_and_logical_size_progress(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "index.sqlite"
     source = tmp_path / "source"
@@ -597,6 +641,8 @@ def test_scan_reports_file_count_and_logical_size_progress(tmp_path: Path, monke
     assert "Completed: 3 files · 3 dirs · 6 B" in result.stderr
 
 
+@pytest.mark.scan
+@pytest.mark.cli
 def test_refresh_before_parser_accepts_absolute_time_and_duration() -> None:
     current = 2_000_000_000_000_000_000
 
@@ -604,6 +650,9 @@ def test_refresh_before_parser_accepts_absolute_time_and_duration() -> None:
     assert cli._parse_refresh_before("1970-01-01T00:00:01Z", current_ns=current) == 1_000_000_000
 
 
+@pytest.mark.scan
+@pytest.mark.cli
+@pytest.mark.output
 def test_scan_progress_truncates_long_directory_prefix_by_display_width(monkeypatch) -> None:
     output: list[str] = []
     monkeypatch.setattr(cli.shutil, "get_terminal_size", lambda fallback: os.terminal_size((40, 24)))
@@ -619,6 +668,9 @@ def test_scan_progress_truncates_long_directory_prefix_by_display_width(monkeypa
     assert cli._display_width(line) <= 39
 
 
+@pytest.mark.scan
+@pytest.mark.cli
+@pytest.mark.output
 def test_scan_progress_uses_current_directory_on_timed_refresh(monkeypatch) -> None:
     output: list[str] = []
     times = iter((1.0, 1.01, 1.11))
@@ -636,6 +688,10 @@ def test_scan_progress_uses_current_directory_on_timed_refresh(monkeypatch) -> N
     assert output[1].endswith(" · second")
 
 
+@pytest.mark.hash
+@pytest.mark.query
+@pytest.mark.cli
+@pytest.mark.output
 def test_dupes_scopes_grouped_output_to_path_and_defaults_to_cwd(tmp_path: Path, monkeypatch, external_file_allocation) -> None:
     database = tmp_path / "index.sqlite"
     source = tmp_path / "source"
@@ -700,6 +756,9 @@ def test_dupes_scopes_grouped_output_to_path_and_defaults_to_cwd(tmp_path: Path,
     assert old_command.exit_code != 0
 
 
+@pytest.mark.scan
+@pytest.mark.hash
+@pytest.mark.safety
 def test_scan_is_metadata_only_and_has_no_hash_option(tmp_path: Path) -> None:
     connection, source = make_connection(tmp_path)
     try:
@@ -715,6 +774,8 @@ def test_scan_is_metadata_only_and_has_no_hash_option(tmp_path: Path) -> None:
     assert "--hash" not in help_result.stdout
 
 
+@pytest.mark.hash
+@pytest.mark.safety
 def test_lazy_hashing_is_scoped_reads_small_files_once_and_reuses_cache(tmp_path: Path, monkeypatch, external_file_allocation) -> None:
     connection, source = make_connection(tmp_path)
     inside = source / "inside"
@@ -758,6 +819,7 @@ def test_lazy_hashing_is_scoped_reads_small_files_once_and_reuses_cache(tmp_path
         connection.close()
 
 
+@pytest.mark.hash
 def test_quick_hash_avoids_full_reads_for_different_large_files(tmp_path: Path, monkeypatch, external_file_allocation) -> None:
     connection, source = make_connection(tmp_path)
     try:
@@ -785,6 +847,8 @@ def test_quick_hash_avoids_full_reads_for_different_large_files(tmp_path: Path, 
         connection.close()
 
 
+@pytest.mark.hash
+@pytest.mark.safety
 def test_lazy_hash_reports_file_changed_after_scan_as_incomplete(tmp_path: Path, external_file_allocation) -> None:
     connection, source = make_connection(tmp_path)
     changed = source / "changed.bin"
@@ -808,6 +872,8 @@ def test_lazy_hash_reports_file_changed_after_scan_as_incomplete(tmp_path: Path,
     finally:
         connection.close()
 
+@pytest.mark.query
+@pytest.mark.safety
 def test_ls_lists_direct_files_and_preserves_gone_file_metadata(tmp_path: Path) -> None:
     connection, source = make_connection(tmp_path)
     try:
@@ -843,6 +909,9 @@ def test_ls_lists_direct_files_and_preserves_gone_file_metadata(tmp_path: Path) 
     assert {line.split()[1] for line in lines[1:]} == {"ok", "new", "gone"}
 
 
+@pytest.mark.scan
+@pytest.mark.query
+@pytest.mark.output
 def test_ls_shows_subtree_scan_time_in_table_json_and_csv(tmp_path: Path) -> None:
     connection, source = make_connection(tmp_path)
     indexed = source / "indexed"
@@ -883,6 +952,8 @@ def test_ls_shows_subtree_scan_time_in_table_json_and_csv(tmp_path: Path) -> Non
         assert csv_rows[name]["subtree_complete_through_ns"] == ""
 
 
+@pytest.mark.query
+@pytest.mark.output
 def test_ls_scan_time_uses_gnu_recent_and_old_styles() -> None:
     now_ns = int(datetime(2026, 9, 23, 12, tzinfo=UTC).timestamp() * 1_000_000_000)
     recent_ns = int(datetime(2026, 9, 3, 7, 5, tzinfo=UTC).timestamp() * 1_000_000_000)
@@ -903,6 +974,8 @@ def test_ls_scan_time_uses_gnu_recent_and_old_styles() -> None:
     assert cli._format_ls_timestamp_ns(None, now_ns=now_ns) == "-"
 
 
+@pytest.mark.db
+@pytest.mark.safety
 def test_database_migration_is_idempotent_and_keeps_existing_data(tmp_path: Path) -> None:
     database = tmp_path / "index.sqlite"
     connection, source = make_connection(tmp_path)
@@ -950,6 +1023,8 @@ def test_database_migration_is_idempotent_and_keeps_existing_data(tmp_path: Path
         connection.close()
 
 
+@pytest.mark.scan
+@pytest.mark.query
 def test_ls_skips_recursive_checks_after_cancellation_and_keeps_cached_usage(
     tmp_path: Path,
     monkeypatch,
@@ -1021,6 +1096,9 @@ def test_ls_skips_recursive_checks_after_cancellation_and_keeps_cached_usage(
         connection.close()
 
 
+@pytest.mark.db
+@pytest.mark.cli
+@pytest.mark.output
 def test_cli_reports_pending_migration_progress_to_stderr(tmp_path: Path) -> None:
     database = tmp_path / "index.sqlite"
     connection, source = make_connection(tmp_path)
@@ -1040,6 +1118,9 @@ def test_cli_reports_pending_migration_progress_to_stderr(tmp_path: Path) -> Non
     assert "database migration 2 completed" in result.stderr
 
 
+@pytest.mark.db
+@pytest.mark.scan
+@pytest.mark.safety
 def test_refresh_cutoff_migration_keeps_existing_scans(tmp_path: Path) -> None:
     database = tmp_path / "index.sqlite"
     connection, source = make_connection(tmp_path)
@@ -1062,6 +1143,8 @@ def test_refresh_cutoff_migration_keeps_existing_scans(tmp_path: Path) -> None:
         connection.close()
 
 
+@pytest.mark.scan
+@pytest.mark.query
 def test_directory_summary_records_partial_and_complete_scan_freshness(tmp_path: Path, monkeypatch) -> None:
     connection, source = make_connection(tmp_path)
     nested = source / "nested"
@@ -1128,6 +1211,7 @@ def test_directory_summary_records_partial_and_complete_scan_freshness(tmp_path:
         connection.close()
 
 
+@pytest.mark.scan
 def test_refresh_before_scans_old_directories_and_preserves_fresh_subtrees(tmp_path: Path) -> None:
     connection, source = make_connection(tmp_path)
     fresh = source / "fresh"
@@ -1191,6 +1275,8 @@ def test_refresh_before_scans_old_directories_and_preserves_fresh_subtrees(tmp_p
         connection.close()
 
 
+@pytest.mark.scan
+@pytest.mark.safety
 def test_partial_refresh_never_confirms_missing_entries(tmp_path: Path, monkeypatch) -> None:
     connection, source = make_connection(tmp_path)
     first = source / "first"
@@ -1226,6 +1312,8 @@ def test_partial_refresh_never_confirms_missing_entries(tmp_path: Path, monkeypa
         connection.close()
 
 
+@pytest.mark.scan
+@pytest.mark.safety
 def test_refresh_falls_back_to_parent_when_indexed_child_disappears(tmp_path: Path) -> None:
     connection, source = make_connection(tmp_path)
     removed = source / "removed"
@@ -1266,6 +1354,7 @@ def test_refresh_falls_back_to_parent_when_indexed_child_disappears(tmp_path: Pa
         connection.close()
 
 
+@pytest.mark.scan
 def test_reappeared_directory_does_not_reuse_previous_success_time(tmp_path: Path, monkeypatch) -> None:
     connection, source = make_connection(tmp_path)
     nested = source / "nested"
@@ -1296,6 +1385,8 @@ def test_reappeared_directory_does_not_reuse_previous_success_time(tmp_path: Pat
         connection.close()
 
 
+@pytest.mark.scan
+@pytest.mark.query
 def test_subtree_scan_refreshes_cached_ancestor_totals_without_rescanning_ancestor(tmp_path: Path) -> None:
     connection, source = make_connection(tmp_path)
     nested = source / "nested"
@@ -1326,6 +1417,7 @@ def test_subtree_scan_refreshes_cached_ancestor_totals_without_rescanning_ancest
         connection.close()
 
 
+@pytest.mark.cli
 def test_cli_main_renders_domain_errors_without_traceback(monkeypatch, capsys) -> None:
     def fail() -> None:
         raise core.FlatlasError("path is not currently indexed")
@@ -1337,6 +1429,8 @@ def test_cli_main_renders_domain_errors_without_traceback(monkeypatch, capsys) -
     assert "Traceback" not in captured.err
 
 
+@pytest.mark.scan
+@pytest.mark.safety
 def test_scan_records_unicode_entries_and_does_not_follow_symlinks(tmp_path: Path) -> None:
     connection, source = make_connection(tmp_path)
     try:
@@ -1367,6 +1461,9 @@ def test_scan_records_unicode_entries_and_does_not_follow_symlinks(tmp_path: Pat
         connection.close()
 
 
+@pytest.mark.scan
+@pytest.mark.hash
+@pytest.mark.safety
 def test_completed_scan_confirms_directory_deletion_and_reappearance_stales_hash(tmp_path: Path, external_file_allocation) -> None:
     connection, source = make_connection(tmp_path)
     removed = source / "removed"
@@ -1414,6 +1511,8 @@ def test_completed_scan_confirms_directory_deletion_and_reappearance_stales_hash
     assert "path does not exist" in str(result.exception)
 
 
+@pytest.mark.scan
+@pytest.mark.safety
 def test_partial_or_cancelled_scan_never_confirms_missing_paths(tmp_path: Path, monkeypatch) -> None:
     connection, source = make_connection(tmp_path)
     survivor = source / "survivor.bin"
@@ -1445,6 +1544,8 @@ def test_partial_or_cancelled_scan_never_confirms_missing_paths(tmp_path: Path, 
         connection.close()
 
 
+@pytest.mark.scan
+@pytest.mark.safety
 def test_first_scan_interrupt_saves_observed_paths_and_cached_totals(tmp_path: Path) -> None:
     connection, source = make_connection(tmp_path)
     payload = source / "payload.bin"
@@ -1487,6 +1588,7 @@ def test_first_scan_interrupt_saves_observed_paths_and_cached_totals(tmp_path: P
         connection.close()
 
 
+@pytest.mark.scan
 def test_resume_uses_original_start_and_skips_completed_directories(tmp_path: Path, monkeypatch) -> None:
     connection, source = make_connection(tmp_path)
     first = source / "a"
@@ -1551,6 +1653,7 @@ def test_resume_uses_original_start_and_skips_completed_directories(tmp_path: Pa
         connection.close()
 
 
+@pytest.mark.scan
 def test_resume_preserves_existing_refresh_cutoff(tmp_path: Path) -> None:
     connection, source = make_connection(tmp_path)
     (source / "payload.bin").write_bytes(b"payload")
@@ -1581,6 +1684,8 @@ def test_resume_preserves_existing_refresh_cutoff(tmp_path: Path) -> None:
         connection.close()
 
 
+@pytest.mark.scan
+@pytest.mark.cli
 def test_cli_rejects_resume_with_refresh_before(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         app,
@@ -1592,6 +1697,8 @@ def test_cli_rejects_resume_with_refresh_before(tmp_path: Path) -> None:
     assert "mutually" in result.output
 
 
+@pytest.mark.scan
+@pytest.mark.cli
 def test_cli_resumes_from_explicit_scan_id(tmp_path: Path) -> None:
     database = tmp_path / "index.sqlite"
     connection, source = make_connection(tmp_path)
@@ -1628,6 +1735,8 @@ def test_cli_resumes_from_explicit_scan_id(tmp_path: Path) -> None:
     assert summary["refresh_before_ns"] == cancelled["started_at_ns"]
 
 
+@pytest.mark.scan
+@pytest.mark.cli
 def test_cli_rejects_path_with_resume_from(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         app,
@@ -1638,6 +1747,8 @@ def test_cli_rejects_path_with_resume_from(tmp_path: Path) -> None:
     assert "PATH must be omitted with --resume-from" in result.output
 
 
+@pytest.mark.scan
+@pytest.mark.query
 def test_scan_audit_queries_filter_scopes_and_include_errors(tmp_path: Path, monkeypatch) -> None:
     connection, source = make_connection(tmp_path)
     first = source / "first"
@@ -1684,6 +1795,10 @@ def test_scan_audit_queries_filter_scopes_and_include_errors(tmp_path: Path, mon
         connection.close()
 
 
+@pytest.mark.scan
+@pytest.mark.query
+@pytest.mark.cli
+@pytest.mark.output
 def test_scan_audit_cli_outputs_table_and_json(tmp_path: Path) -> None:
     database = tmp_path / "index.sqlite"
     connection, source = make_connection(tmp_path)
@@ -1719,6 +1834,8 @@ def test_scan_audit_cli_outputs_table_and_json(tmp_path: Path) -> None:
     assert details["errors"] == []
 
 
+@pytest.mark.scan
+@pytest.mark.safety
 def test_second_interrupt_during_cancel_save_rolls_back_scan(tmp_path: Path) -> None:
     connection, source = make_connection(tmp_path)
     payload = source / "payload.bin"
@@ -1750,6 +1867,7 @@ def test_second_interrupt_during_cancel_save_rolls_back_scan(tmp_path: Path) -> 
         connection.close()
 
 
+@pytest.mark.scan
 def test_directory_summary_refresh_reads_directory_data_in_batches(tmp_path: Path) -> None:
     connection, source = make_connection(tmp_path)
     for index in range(25):
@@ -1776,6 +1894,9 @@ def test_directory_summary_refresh_reads_directory_data_in_batches(tmp_path: Pat
         connection.close()
 
 
+@pytest.mark.query
+@pytest.mark.hash
+@pytest.mark.safety
 def test_index_queries_and_cached_duplicates_work_after_source_goes_offline(tmp_path: Path, external_file_allocation) -> None:
     connection, source = make_connection(tmp_path)
     try:
@@ -1798,6 +1919,11 @@ def test_index_queries_and_cached_duplicates_work_after_source_goes_offline(tmp_
         connection.close()
 
 
+@pytest.mark.query
+@pytest.mark.hash
+@pytest.mark.plan
+@pytest.mark.output
+@pytest.mark.safety
 def test_json_csv_output_and_read_only_commands_preserve_user_files(tmp_path: Path, external_file_allocation) -> None:
     database = tmp_path / "index.sqlite"
     source = tmp_path / "source"

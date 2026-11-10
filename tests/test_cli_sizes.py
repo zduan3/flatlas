@@ -14,6 +14,8 @@ from flatlas.core import (
     scan_directory,
 )
 
+pytestmark = [pytest.mark.output, pytest.mark.query]
+
 
 @pytest.fixture
 def usage_rows(monkeypatch):
