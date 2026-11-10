@@ -23,6 +23,7 @@ from flatlas.db import (
     now_ns,
     open_database,
 )
+from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError
 from flatlas.hashing import QUICK_SAMPLE_BYTES, HashProgress, HashSummary
 from flatlas.output import export_rows
@@ -67,6 +68,7 @@ def ensure_duplicate_hashes(
     *,
     on_progress: Callable[[HashProgress], None] | None = None,
     commit_batch: int = 100,
+    filters: DuplicateFilters | None = None,
 ) -> HashSummary:
     """Delegate hashing while preserving the legacy fault-injection seam."""
     _hashing._validated_digest = _validated_digest
@@ -75,6 +77,7 @@ def ensure_duplicate_hashes(
         scope,
         on_progress=on_progress,
         commit_batch=commit_batch,
+        filters=filters,
     )
 
 

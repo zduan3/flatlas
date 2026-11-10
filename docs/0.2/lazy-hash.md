@@ -26,7 +26,11 @@
 
 ### 查询范围与过滤
 
-- 最小/最大文件大小、最小组文件数、最小理论节省量和明确的 include/exclude 过滤。
+- 已实现第 1 批筛选：`dupes` 与 `export dupes` 共用 `--min-size`、`--max-size`、`--min-count`、`--min-savings`、`--limit` / `-n`。大小和节省量均为字节整数；文件大小闭区间默认不额外限制，最小路径数默认 2，最小节省量默认 0，组数默认不限。大小参数必须在 SQLite 非负 signed-64 范围内且 min 不大于 max；路径数至少 2、节省量非负、组数至少 1，非法输入以退出码 2 结束且不打开数据库。
+- 大小筛选在同大小候选分组前应用，也约束已有 full hash 的最终查询；区间外文件不读取、不参与候选或输出。不改变原有 0 B、allocated=0 排除和未知占用可参与的语义。
+- 路径数与 `size * (count - 1)` 理论 logical savings 阈值均包含边界，在 full hash 分组后筛选；`limit` 在原有稳定排序后截取完整组。路径数仍不是独立文件对象数，hardlink alias 识别后置。各组互不拆分，hash 统计覆盖大小区间内全部候选，不能将 top N 误解为只读取 N 组。
+- 表格汇总对应最终显示组；JSON/CSV 保持字段和类型，空 CSV 仍无独立 hash 摘要。`hash.complete` 只描述该候选范围内的 hash 处理，不保证 scan coverage，也不表示筛选外无重复。筛选不会删除 hash、修改 path/coverage 或改变 dry-run plan 默认行为，无需 migration。
+- include/exclude 过滤仍待设计。
 - 多个 PATH 的 union 与交叉目录比较；必须定义路径显示基准、namespace 边界和候选组语义。
 - 算法升级和 quick 采样策略版本化；采样大小或布局变化必须使旧 quick cache 不可复用。
 

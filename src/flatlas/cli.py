@@ -43,11 +43,17 @@ from flatlas.core import (
     scan_directory,
     scan_info,
 )
+from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError
 from flatlas.version import current_version
 
 app = typer.Typer(help="Persistent, read-only filesystem indexing and duplicate analysis.", no_args_is_help=True)
 db_option = Annotated[Path | None, typer.Option("--db", help="Override the global index database for this command.")]
+min_size_option = Annotated[int, typer.Option("--min-size", min=0, help="Minimum logical file size in bytes (inclusive); applied before hashing.")]
+max_size_option = Annotated[int | None, typer.Option("--max-size", min=0, help="Maximum logical file size in bytes (inclusive); applied before hashing.")]
+min_count_option = Annotated[int, typer.Option("--min-count", min=2, help="Minimum number of paths in a full-hash group.")]
+min_savings_option = Annotated[int, typer.Option("--min-savings", min=0, help="Minimum theoretical logical savings per group in bytes (inclusive).")]
+group_limit_option = Annotated[int | None, typer.Option("--limit", "-n", min=1, help="Maximum groups after filtering and sorting by theoretical savings.")]
 
 _REFRESH_DURATION = re.compile(r"^(?P<amount>[1-9]\d*)(?P<unit>[smhdw])$")
 _DURATION_NS = {
@@ -825,13 +831,19 @@ def dupes(
     format: Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")] = "table",
     output: Annotated[Path | None, typer.Option("--output")] = None,
     db: db_option = None,
+    min_size: min_size_option = 0,
+    max_size: max_size_option = None,
+    min_count: min_count_option = 2,
+    min_savings: min_savings_option = 0,
+    limit: group_limit_option = None,
 ) -> None:
     """List full-hash duplicate groups within an indexed directory."""
+    filters = DuplicateFilters(min_size, max_size, min_count, min_savings, limit)
     connection = _open_database(_database(db))
     hash_progress = _HashProgressDisplay(enabled=_stderr_is_tty())
     try:
-        hash_summary = ensure_duplicate_hashes(connection, path, on_progress=hash_progress.update)
-        groups = _duplicate_display_paths(duplicate_groups(connection, scope=path), path, absolute=absolute)
+        hash_summary = ensure_duplicate_hashes(connection, path, on_progress=hash_progress.update, filters=filters)
+        groups = _duplicate_display_paths(duplicate_groups(connection, scope=path, filters=filters), path, absolute=absolute)
     finally:
         hash_progress.close()
         connection.close()
@@ -850,17 +862,17 @@ def export_dupes(
     absolute: Annotated[bool, typer.Option("--absolute", help="Show absolute paths instead of paths relative to PATH.")] = False,
     format: Annotated[str, typer.Option("--format")] = "json",
     db: db_option = None,
+    min_size: min_size_option = 0,
+    max_size: max_size_option = None,
+    min_count: min_count_option = 2,
+    min_savings: min_savings_option = 0,
+    limit: group_limit_option = None,
 ) -> None:
-    connection = _open_database(_database(db))
-    hash_progress = _HashProgressDisplay(enabled=_stderr_is_tty())
-    try:
-        hash_summary = ensure_duplicate_hashes(connection, path, on_progress=hash_progress.update)
-        groups = _duplicate_display_paths(duplicate_groups(connection, scope=path), path, absolute=absolute)
-    finally:
-        hash_progress.close()
-        connection.close()
-    _warn_incomplete_hashes(hash_summary)
-    _print_duplicate_groups(groups, format, output, hash_summary)
+    dupes(
+        path=path, absolute=absolute, format=format, output=output, db=db,
+        min_size=min_size, max_size=max_size, min_count=min_count,
+        min_savings=min_savings, limit=limit,
+    )
     typer.echo(output)
 
 

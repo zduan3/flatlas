@@ -22,7 +22,7 @@ File Atlas 当前开发版本为 0.2.0。0.1 是已完成并冻结的只读 MVP 
 
 - 为 `du` 增加直接子项和深度展开，并完善 logical/allocated metric、top N、排序、阈值、总计与多路径行为。
 - 为 `largest` 增加 metric、排序、阈值和结果数量控制。
-- 为 `dupes` 增加理论节省量排序与汇总、大小/组数/节省量阈值、多 PATH 范围、include/exclude 过滤、hardlink alias 识别和 completeness。
+- `dupes` 已有理论节省量排序与汇总；第 1 批大小、组成员数、理论节省量阈值和组数限制已实现，`export dupes` 共用参数。大小在 hash 前筛选，组级条件在 full hash 分组后应用，详见 [惰性 Hash 规划](lazy-hash.md)。多 PATH、include/exclude、hardlink alias 与 coverage completeness 仍待实现。
 - 明确 logical size、allocated size、路径冗余、理论节省量与实际物理可回收空间的区别；未知值不得伪装为 0。
 
 ### GNU 风格查询体验

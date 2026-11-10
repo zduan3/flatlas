@@ -9,6 +9,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError
 from flatlas.paths import _scope_row, discover_namespace, get_root, path_key
 from flatlas.scanning import Observation, _observation
@@ -511,7 +512,9 @@ def duplicate_groups(
     *,
     root_id: int | None = None,
     scope: Path | None = None,
+    filters: DuplicateFilters | None = None,
 ) -> list[dict[str, Any]]:
+    filters = filters or DuplicateFilters()
     if root_id is not None and scope is not None:
         raise ValueError("root_id and scope cannot be combined")
     if scope is not None:
@@ -528,8 +531,9 @@ def duplicate_groups(
               AND p.logical_size > 0
               AND (p.allocated_size IS NULL OR p.allocated_size > 0)
               AND p.id IN descendants
+              AND p.logical_size BETWEEN ? AND ?
             ORDER BY h.full_algorithm, h.full_digest, p.path_display""",
-            (selected["id"],),
+            (selected["id"], *filters.size_bounds),
         ).fetchall()
     else:
         where = "AND p.root_id=?" if root_id is not None else ""
@@ -539,15 +543,16 @@ def duplicate_groups(
             WHERE h.state='full_ready' AND p.state='present' AND p.entry_kind='file'
               AND p.logical_size > 0 {where}
               AND (p.allocated_size IS NULL OR p.allocated_size > 0)
+              AND p.logical_size BETWEEN ? AND ?
             ORDER BY h.full_algorithm, h.full_digest, p.path_display""",
-            (() if root_id is None else (root_id,)),
+            (*(() if root_id is None else (root_id,)), *filters.size_bounds),
         ).fetchall()
     grouped: dict[tuple[str, bytes, int], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         grouped[(row["full_algorithm"], row["full_digest"], row["logical_size"])].append({"id": row["id"], "root_id": row["root_id"], "path_display": row["path_display"]})
     result = []
     for (algorithm, digest, size), paths in grouped.items():
-        if len(paths) > 1:
+        if len(paths) >= filters.min_count and size * (len(paths) - 1) >= filters.min_savings:
             result.append({
                 "algorithm": algorithm,
                 "digest": digest.hex(),
@@ -564,4 +569,4 @@ def duplicate_groups(
             group["algorithm"],
             group["digest"],
         ),
-    )
+    )[:filters.limit]

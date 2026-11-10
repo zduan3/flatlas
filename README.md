@@ -102,6 +102,20 @@ scan 仍存在的父目录    → completed 后才将缺失路径标记 deleted
 
 ## 实际清理
 
+`dupes` 与 `export dupes` 支持相同的筛选参数，大小与节省量使用字节整数：
+
+```powershell
+flatlas dupes D:\Archive --min-size 1048576 --max-size 1073741824 --min-count 3 --min-savings 2097152 -n 20
+flatlas export dupes D:\Archive --min-size 1048576 --limit 20 --format json --output duplicates.json
+```
+
+- `--min-size` / `--max-size`：文件 logical size 的闭区间，默认不额外限制大小；在同大小候选选择和 hash 前生效，区间外文件不读取内容，也不显示已有缓存结果。0 B 和已知占用为 0 的文件仍排除。
+- `--min-count`：完整内容重复组至少包含的路径数，默认 2；当前仍按路径计数，尚未识别 hardlink alias。
+- `--min-savings`：每组最小 theoretical logical savings，包含边界，默认 0；按 `logical_size × (count - 1)` 计算，不是实际物理可回收空间。
+- `--limit` / `-n`：筛选并排序后最多显示的组数，默认不限；按理论节省量降序、文件大小降序、算法与 digest 升序稳定排序，不截断组内成员。
+
+组成员数、节省量与组数限制在 full hash 分组后应用，不减少候选 hash 读取。表格汇总仅统计筛选后显示的组；JSON/CSV 仍使用现有字段，`hash` 统计描述大小筛选后的全部候选，不因组数限制截断。`hash.complete` 仅描述该候选范围的 hash 处理状态，不保证 scan coverage 完整。过滤不修改路径状态或 scan coverage。空结果保持原有输出约定：JSON 的 `groups` 为 `[]`；CSV 零组时为空文件，没有独立摘要。
+
 `flatlas dupes` 输出的是基于完整 BLAKE3 的重复内容候选和理论 logical savings，不是删除授权。需要实际去重时，应选择值得处理的较小目录，再让 jdupes 重新扫描、独立验证并由用户显式执行：
 
 ```powershell

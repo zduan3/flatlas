@@ -14,6 +14,7 @@ from typing import Any
 
 from blake3 import blake3
 
+from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError
 from flatlas.paths import _scope_row, _sqlite_integer
 
@@ -158,7 +159,9 @@ def _save_hash_problem(connection: sqlite3.Connection, candidate: dict[str, Any]
     )
 
 
-def _duplicate_hash_candidates(connection: sqlite3.Connection, scope: Path) -> list[dict[str, Any]]:
+def _duplicate_hash_candidates(
+    connection: sqlite3.Connection, scope: Path, filters: DuplicateFilters,
+) -> list[dict[str, Any]]:
     selected = _scope_row(connection, scope)
     if selected["entry_kind"] not in {"root", "directory"}:
         raise FlatlasError(f"duplicate scope is not a directory: {selected['path_display']}")
@@ -170,6 +173,7 @@ def _duplicate_hash_candidates(connection: sqlite3.Connection, scope: Path) -> l
             SELECT p.logical_size FROM path p JOIN descendants d ON d.id=p.id
             WHERE p.state='present' AND p.entry_kind='file' AND p.logical_size > 0
               AND (p.allocated_size IS NULL OR p.allocated_size > 0)
+              AND p.logical_size BETWEEN ? AND ?
             GROUP BY p.logical_size HAVING count(*) > 1
         )
         SELECT p.id, p.path_display, p.logical_size, p.device, p.inode, p.mtime_ns,
@@ -186,7 +190,7 @@ def _duplicate_hash_candidates(connection: sqlite3.Connection, scope: Path) -> l
         WHERE p.state='present' AND p.entry_kind='file' AND p.logical_size > 0
           AND (p.allocated_size IS NULL OR p.allocated_size > 0)
         ORDER BY p.logical_size, p.path_display""",
-        (selected["id"],),
+        (selected["id"], *filters.size_bounds),
     ).fetchall()
     return [dict(row) for row in rows]
 
@@ -197,10 +201,11 @@ def ensure_duplicate_hashes(
     *,
     on_progress: Callable[[HashProgress], None] | None = None,
     commit_batch: int = 100,
+    filters: DuplicateFilters | None = None,
 ) -> HashSummary:
     if commit_batch < 1:
         raise ValueError("commit_batch must be at least 1")
-    candidates = _duplicate_hash_candidates(connection, scope)
+    candidates = _duplicate_hash_candidates(connection, scope, filters or DuplicateFilters())
     candidate_bytes = sum(int(candidate["logical_size"]) for candidate in candidates)
     if on_progress is not None:
         on_progress(HashProgress("candidates", 0, len(candidates), 0, candidate_bytes))

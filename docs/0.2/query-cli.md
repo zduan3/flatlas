@@ -361,6 +361,8 @@ GNU `find` 默认遍历实时目录树，而 `flatlas find` 应默认查询 SQLi
 
 ## 实现顺序与验收
 
+`dupes` 第 1 批筛选已实现：`--min-size` / `--max-size` 在 hash 前限定 logical bytes；`--min-count`、`--min-savings` 在完整内容分组后筛选；`--limit` / `-n` 在原有稳定排序后限制完整组数。`export dupes` 使用同一实现，默认行为与 JSON/CSV schema 保持不变。具体边界、hash 摘要口径和后续过滤见 [惰性 Hash 规划](lazy-hash.md)。多 PATH、hardlink alias、include/exclude 和 coverage completeness 仍未实现。
+
 ### 空间回收主线
 
 1. `dupes` 先提供可节省量、排序、范围/阈值筛选和 completeness，使结果可以直接指导清理决策。
