@@ -101,7 +101,12 @@ def test_human_readable_preserves_machine_output(command, fmt, option, usage_row
     output = tmp_path / f"usage.{fmt}"
     exported = runner.invoke(cli.app, [*arguments, option, "--output", str(output)])
     assert exported.exit_code == 0, exported.output
-    assert output.read_bytes().decode("utf-8") == raw.stdout
+    # Normalize terminal/file newline translation on both Linux and Windows.
+    assert output.read_text(encoding="utf-8") == raw.stdout.replace("\r\n", "\n")
+    raw_output = tmp_path / f"raw-usage.{fmt}"
+    raw_exported = runner.invoke(cli.app, [*arguments, "--output", str(raw_output)])
+    assert raw_exported.exit_code == 0, raw_exported.output
+    assert output.read_bytes() == raw_output.read_bytes()
 
 
 @pytest.mark.parametrize("command", ["ls", "du", "largest"])

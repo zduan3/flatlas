@@ -7,12 +7,24 @@ import os
 import sys
 from functools import cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
+
+
+class _WindowsCtypes(Protocol):
+    """Windows-only ctypes entry points, also replaced by POSIX test doubles."""
+
+    def WinDLL(self, name: str, *, use_last_error: bool) -> Any: ...
+    def set_last_error(self, value: int) -> int: ...
+    def get_last_error(self) -> int: ...
+    def WinError(self, code: int) -> OSError: ...
+
+
+_windows_ctypes = cast(_WindowsCtypes, ctypes)
 
 
 @cache
 def _windows_api() -> Any:
-    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api = _windows_ctypes.WinDLL("kernel32", use_last_error=True)
     dword_pointer = ctypes.POINTER(ctypes.c_uint32)
     api.GetCompressedFileSizeW.argtypes = [ctypes.c_wchar_p, dword_pointer]
     api.GetCompressedFileSizeW.restype = ctypes.c_uint32
@@ -41,11 +53,11 @@ def _compressed_size(path: Path) -> int:
     api = _windows_api()
     high = ctypes.c_uint32()
     # 0xffffffff is also a valid low DWORD; only a nonzero last error means failure.
-    ctypes.set_last_error(0)
+    _windows_ctypes.set_last_error(0)
     low = api.GetCompressedFileSizeW(str(path.absolute()), ctypes.byref(high))
-    error = ctypes.get_last_error()
+    error = _windows_ctypes.get_last_error()
     if low == 0xFFFFFFFF and error:
-        raise ctypes.WinError(error)
+        raise _windows_ctypes.WinError(error)
     return (high.value << 32) | low
 
 
@@ -53,13 +65,13 @@ def _cluster_size(path: Path) -> int:
     api = _windows_api()
     volume = ctypes.create_unicode_buffer(32768)
     if not api.GetVolumePathNameW(str(path.absolute()), volume, len(volume)):
-        raise ctypes.WinError(ctypes.get_last_error())
+        raise _windows_ctypes.WinError(_windows_ctypes.get_last_error())
     sectors, bytes_per_sector, free, total = (ctypes.c_uint32() for _ in range(4))
     if not api.GetDiskFreeSpaceW(
         volume.value, ctypes.byref(sectors), ctypes.byref(bytes_per_sector),
         ctypes.byref(free), ctypes.byref(total),
     ):
-        raise ctypes.WinError(ctypes.get_last_error())
+        raise _windows_ctypes.WinError(_windows_ctypes.get_last_error())
     size = sectors.value * bytes_per_sector.value
     if size <= 0:
         raise OSError("Windows reported an invalid allocation unit size")
@@ -73,11 +85,11 @@ def _has_no_extents(path: Path) -> bool:
     # FILE_FLAG_OPEN_REPARSE_POINT: never open a replacement reparse target.
     handle = api.CreateFileW(str(path.absolute()), 0x80, 7, None, 3, 0x200000, None)
     if handle == ctypes.c_void_p(-1).value:
-        raise ctypes.WinError(ctypes.get_last_error())
+        raise _windows_ctypes.WinError(_windows_ctypes.get_last_error())
     try:
         attributes = (ctypes.c_uint32 * 2)()  # FILE_ATTRIBUTE_TAG_INFO
         if not api.GetFileInformationByHandleEx(handle, 9, attributes, ctypes.sizeof(attributes)):
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise _windows_ctypes.WinError(_windows_ctypes.get_last_error())
         if attributes[0] & (0x400 | 0x10 | 0x800 | 0x200):
             raise OSError("File type changed during allocation query")
         starting_vcn = ctypes.c_int64(0)
@@ -89,12 +101,12 @@ def _has_no_extents(path: Path) -> bool:
         )
         if success:
             return False
-        error = ctypes.get_last_error()
+        error = _windows_ctypes.get_last_error()
         if error == 38:  # ERROR_HANDLE_EOF: no extents starting at VCN 0
             return True
         if error == 234:  # ERROR_MORE_DATA: additional extents, residency excluded
             return False
-        raise ctypes.WinError(error)
+        raise _windows_ctypes.WinError(error)
     finally:
         api.CloseHandle(handle)
 

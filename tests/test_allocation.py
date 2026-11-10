@@ -260,6 +260,8 @@ def test_native_windows_scan_and_ls_du_outputs(tmp_path: Path) -> None:
 @pytest.mark.skipif(sys.platform != "win32", reason="native Windows sparse/compression controls")
 @pytest.mark.parametrize("sparse", [True, False])
 def test_native_windows_sparse_and_compressed_files(tmp_path: Path, sparse: bool) -> None:
+    if sys.platform != "win32":
+        pytest.skip("native Windows sparse/compression controls")
     import msvcrt
 
     source = tmp_path / "source"
