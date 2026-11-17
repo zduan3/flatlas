@@ -6,7 +6,7 @@
 
 - Python：固定 Python 3.12，由 `uv` 依据 `.python-version` 创建项目 `.venv`。
 - 依赖：`pyproject.toml` 是唯一声明来源，`uv.lock` 是可复现锁文件。
-- 当前运行时依赖：`blake3`（quick/full hash）、`platformdirs`（用户级配置位置）、`typer`（CLI）。
+- 当前运行时依赖：`blake3`（quick/full hash）、`platformdirs`（用户级配置位置）、`tomlkit`（保留已有字段与注释的 TOML 配置编辑）、`typer`（CLI）。
 - 当前开发依赖：`pytest`、`ruff`、`pyright`。
 
 首次准备环境及需要全量验收时使用：

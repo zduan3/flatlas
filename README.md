@@ -48,9 +48,14 @@ flatlas plan create --root D:\Archive
 ```text
 flatlas --version
 flatlas init [PATH]
+flatlas config set scan.refresh-before VALUE
+flatlas config get scan.refresh-before
+flatlas config unset scan.refresh-before
+flatlas config list [-a|--all]
 flatlas roots
 flatlas df
-flatlas scan PATH
+flatlas scan PATH [--refresh-before VALUE | --full | --resume]
+flatlas scan --resume-from ID
 flatlas paths [PATH]
 flatlas rm PATH
 flatlas du [PATH ...] [--format table|json|csv]
@@ -63,6 +68,27 @@ flatlas plan show PLAN_ID
 ```
 
 在源码仓库或 editable 安装中，`flatlas --version` 同时显示当前 Git 提交、提交日期以及工作区是否为 `dirty`；无法访问 Git 元数据的安装包回退为只显示包版本。
+
+## 命令默认参数
+
+用 `config` 将默认参数保存到用户级 `config.toml`，当前支持 `scan.refresh-before`：
+
+```powershell
+flatlas config set scan.refresh-before 7d
+flatlas config get scan.refresh-before
+flatlas config list
+flatlas config list -a
+flatlas scan D:\Archive
+flatlas scan D:\Archive --refresh-before 12h
+flatlas scan D:\Archive --full
+flatlas config unset scan.refresh-before
+```
+
+上述配置让普通 `scan` 只刷新从未完整扫描或最近完整扫描早于七天前的目录；相对时长在每次扫描启动时重新计算为固定 cutoff。也可保存 ISO 8601 时间，例如 `2026-01-01T00:00:00+08:00`。显式 `--refresh-before` 优先于配置，`--full` 临时执行完整扫描；移除配置后恢复默认完整扫描。`--resume` / `--resume-from` 继承历史扫描的固定 cutoff。`--full`、`--refresh-before`、`--resume`、`--resume-from` 互斥。
+
+`config` 可以在 `init` 前使用；读取或移除未设置的参数时无输出，读取返回退出码 0。配置命令不打开索引数据库，修改配置时保留已有数据库路径、其他字段和注释。配置默认值同样适用于显式指定 `--db` 的扫描。
+
+`config list` 按键名排序，以 `key = value` 列出已设置的命令默认参数；`config list -a`（`--all`）列出所有支持的参数，未设置的值显示为 `<unset>`。没有已设置的参数时，普通 `list` 无输出并返回退出码 0。
 
 ## 当前已实现的 MVP（0.1）安全边界
 

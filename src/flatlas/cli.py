@@ -4,18 +4,17 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import sys
 import time
 import unicodedata
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
 import typer
 
-from flatlas.config import resolve_database
+from flatlas.config import get_default, list_defaults, resolve_database, set_default
 from flatlas.core import (
     HashProgress,
     HashSummary,
@@ -45,6 +44,7 @@ from flatlas.core import (
 )
 from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError
+from flatlas.refresh import parse_refresh_before
 from flatlas.version import current_version
 
 app = typer.Typer(help="Persistent, read-only filesystem indexing and duplicate analysis.", no_args_is_help=True)
@@ -54,16 +54,6 @@ max_size_option = Annotated[int | None, typer.Option("--max-size", min=0, help="
 min_count_option = Annotated[int, typer.Option("--min-count", min=2, help="Minimum number of paths in a full-hash group.")]
 min_savings_option = Annotated[int, typer.Option("--min-savings", min=0, help="Minimum theoretical logical savings per group in bytes (inclusive).")]
 group_limit_option = Annotated[int | None, typer.Option("--limit", "-n", min=1, help="Maximum groups after filtering and sorting by theoretical savings.")]
-
-_REFRESH_DURATION = re.compile(r"^(?P<amount>[1-9]\d*)(?P<unit>[smhdw])$")
-_DURATION_NS = {
-    "s": 1_000_000_000,
-    "m": 60 * 1_000_000_000,
-    "h": 60 * 60 * 1_000_000_000,
-    "d": 24 * 60 * 60 * 1_000_000_000,
-    "w": 7 * 24 * 60 * 60 * 1_000_000_000,
-}
-
 
 def _version_callback(value: bool) -> None:
     if value:
@@ -86,26 +76,45 @@ def _database(explicit: Path | None, *, create: bool = False) -> Path:
 
 
 def _parse_refresh_before(value: str, *, current_ns: int | None = None) -> int:
-    text = value.strip()
-    now = time.time_ns() if current_ns is None else current_ns
-    duration = _REFRESH_DURATION.fullmatch(text)
-    if duration is not None:
-        return now - int(duration["amount"]) * _DURATION_NS[duration["unit"]]
     try:
-        parsed = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text)
-    except ValueError as exc:
-        raise typer.BadParameter(
-            "expected an ISO 8601 datetime or a duration such as 7d, 12h, or 30m"
-        ) from exc
-    if parsed.tzinfo is None:
-        parsed = parsed.astimezone()
-    utc = parsed.astimezone(UTC)
-    epoch = datetime(1970, 1, 1, tzinfo=UTC)
-    delta = utc - epoch
-    resolved = (delta.days * 86_400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1_000
-    if resolved > now:
-        raise typer.BadParameter("refresh time must not be in the future")
-    return resolved
+        return parse_refresh_before(value, current_ns=current_ns)
+    except FlatlasError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+config_app = typer.Typer(help="Manage persistent defaults for commands.", no_args_is_help=True)
+app.add_typer(config_app, name="config")
+
+
+@config_app.command("set")
+def config_set(key: str, value: str) -> None:
+    """Save a default, for example: scan.refresh-before 7d."""
+    set_default(key, value)
+
+
+@config_app.command("get")
+def config_get(key: str) -> None:
+    """Print a saved default; print nothing when it is unset."""
+    value = get_default(key)
+    if value is not None:
+        typer.echo(value)
+
+
+@config_app.command("unset")
+def config_unset(key: str) -> None:
+    """Remove a saved default and restore the built-in behavior."""
+    set_default(key, None)
+
+
+@config_app.command("list")
+def config_list(
+    all_options: Annotated[
+        bool, typer.Option("--all", "-a", help="Include all supported keys, showing <unset> for unset defaults."),
+    ] = False,
+) -> None:
+    """List saved command defaults as key = value."""
+    for key, value in list_defaults(include_unset=all_options).items():
+        typer.echo(f"{key} = {value if value is not None else '<unset>'}")
 
 
 class _MigrationProgressDisplay:
@@ -645,7 +654,7 @@ def scan(
         str | None,
         typer.Option(
             "--refresh-before",
-            help="Only refresh directories last completely scanned before this ISO 8601 time or duration (for example 7d).",
+            help="Only refresh directories last completely scanned before this ISO 8601 time or duration (for example 7d); defaults to scan.refresh-before in config.",
         ),
     ] = None,
     resume: Annotated[
@@ -656,15 +665,24 @@ def scan(
         int | None,
         typer.Option("--resume-from", min=1, help="Continue an incomplete scan ID using its recorded scope."),
     ] = None,
+    full: Annotated[
+        bool, typer.Option("--full", help="Fully scan the scope, overriding the configured refresh default."),
+    ] = False,
     db: db_option = None,
 ) -> None:
     """Scan metadata for a complete namespace or one subtree and update the persistent index."""
     if sum((resume, resume_from is not None, refresh_before is not None)) > 1:
         raise typer.BadParameter("--resume, --resume-from, and --refresh-before are mutually exclusive")
+    if full and (resume or resume_from is not None or refresh_before is not None):
+        raise typer.BadParameter("--full is mutually exclusive with --resume, --resume-from, and --refresh-before")
     if resume_from is not None and path is not None:
         raise typer.BadParameter("PATH must be omitted with --resume-from; the scan scope is read from the record")
     if resume_from is None and path is None:
         raise typer.BadParameter("PATH is required unless --resume-from is used")
+    cutoff = None
+    if not (resume or resume_from is not None or full):
+        value = refresh_before if refresh_before is not None else get_default("scan.refresh-before")
+        cutoff = _parse_refresh_before(value) if value is not None else None
     connection = _open_database(_database(db))
     progress = _ScanProgressDisplay(enabled=_stderr_is_tty())
     try:
@@ -676,8 +694,6 @@ def scan(
         elif resume:
             assert path is not None
             cutoff = resume_selection(connection, path).refresh_before_ns
-        else:
-            cutoff = _parse_refresh_before(refresh_before) if refresh_before is not None else None
         assert scan_path is not None
         result = scan_directory(connection, scan_path, refresh_before_ns=cutoff, on_progress=progress.update)
     finally:

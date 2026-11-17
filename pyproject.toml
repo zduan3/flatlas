@@ -7,6 +7,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "blake3>=1.0.0",
     "platformdirs>=4.0.0",
+    "tomlkit>=0.15.2",
     "typer>=0.12.0",
 ]
 
