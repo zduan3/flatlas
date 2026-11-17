@@ -42,7 +42,7 @@ GNU `ls` 和 `du` 主要读取当前文件系统；flatlas 同时使用实时目
 - `du PATH ...` 回答“每个显式目标及其后代的索引聚合是多少”。它不枚举现场直接子项，默认每个参数一行，源目录离线时仍可查询。
 - `largest PATH` 回答“PATH 子树中最大的单个当前普通文件是什么”，避免让 `ls` 或 `du` 承担全树文件排序。
 
-GNU `ls -l` 对目录显示的是目录对象自身的 `st_size`，在常见 Linux 文件系统上经常是 4096，但这不是目录内容总量，也不保证恒为 4 KiB。flatlas 为清理指导有意不复制该数值：统一使用 `LOGICAL(B)`，普通文件表示自身 logical size，目录表示索引中以它为根的普通文件递归 logical size。`N` 对文件为 1，对目录为递归普通文件数；symlink、reparse 和其他特殊条目显示 `-`。
+GNU `ls -l` 对目录显示的是目录对象自身的 `st_size`，在常见 Linux 文件系统上经常是 4096，但这不是目录内容总量，也不保证恒为 4 KiB。flatlas 为清理指导有意不复制该数值：统一使用 `LOGICAL(B)`，普通文件表示自身 logical size，目录表示索引中以它为根的普通文件递归 logical size。表格的 `N` 对文件显示 `-`，对目录为递归普通文件数；symlink、reparse 和其他特殊条目显示 `-`。JSON/CSV 中普通文件的 `files` 仍为 1。
 
 因此目标心智模型是：
 

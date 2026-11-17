@@ -58,12 +58,13 @@ def test_human_readable_usage_table(command, option, usage_rows, tmp_path: Path)
         assert "ALLOC" in header
     assert "(B)" not in lines[0]
     expected = ["-", "0", "1023", "1K", "1.5K", "1M", "1G", "1T", "1024T", "1M"]
-    for line, size in zip(lines[1:], expected, strict=True):
+    for line, size, row in zip(lines[1:], expected, usage_rows, strict=True):
         fields = line.split()
         assert fields[header.index(size_header)] == size
         if command != "largest":
             assert fields[header.index("ALLOC")] == size
-            assert fields[header.index("N")] == ("-" if size == "-" else "1536")
+            hide_count = row["files"] is None or (command == "ls" and row["entry_kind"] == "file")
+            assert fields[header.index("N")] == ("-" if hide_count else "1536")
 
     output = tmp_path / "usage.txt"
     exported = runner.invoke(cli.app, [*arguments, "--output", str(output)])
@@ -81,6 +82,9 @@ def test_human_readable_usage_table(command, option, usage_rows, tmp_path: Path)
         assert "ALLOC(B)" in raw_header
     for line, row in zip(raw.stdout.splitlines()[1:], usage_rows, strict=True):
         assert line.split()[raw_header.index(f"{size_header}(B)")] == cli._format_size(row["logical_size"])
+        if command != "largest":
+            hide_count = row["files"] is None or (command == "ls" and row["entry_kind"] == "file")
+            assert line.split()[raw_header.index("N")] == ("-" if hide_count else "1536")
 
 
 @pytest.mark.parametrize("command", ["ls", "du", "largest"])

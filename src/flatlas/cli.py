@@ -226,7 +226,7 @@ def _print_usage(
             fields.append({"scanned": "ok", "unscanned": "new", "incomplete": "part", "missing": "gone"}[str(row["status"])])
         fields.extend([
             _format_size(row["logical_size"], human_readable=human_readable),
-            "-" if row["files"] is None else str(row["files"]),
+            "-" if row["files"] is None or (include_kind and row["entry_kind"] == "file") else str(row["files"]),
         ])
         if show_allocated:
             fields.append(_format_size(row["allocated_size"], human_readable=human_readable))
