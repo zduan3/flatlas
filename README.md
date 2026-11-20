@@ -96,7 +96,7 @@ flatlas config unset scan.refresh-before
 
 ## 当前安全边界与能力
 
-- 已验收的测试基线是一个不跨文件系统、使用当前平台常规 Unicode 文件名的普通目录；非 UTF-8、完整长路径/reparse tag、复杂 mount 和物理共享空间语义尚未支持。
+- 已验收的测试基线是一个不跨文件系统、使用当前平台常规 Unicode 文件名的普通目录；Linux 非 UTF-8 文件名可以扫描（显示为 `\xNN` 转义），但对它们的 hash 与按路径查询、完整长路径/reparse tag、复杂 mount 和物理共享空间语义尚未支持。
 - 完整扫描与指定子树更新；仅在 scope 完整覆盖后将缺失路径标记为 `deleted`。
 - size → quick BLAKE3 → full BLAKE3 的重复候选检测；默认不跟随 symlink 或 Windows reparse point。
 - 支持路径、目录大小、最大文件、重复候选查询、JSON/CSV 导出和 dry-run plan。

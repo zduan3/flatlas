@@ -13,7 +13,13 @@ from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError
 from flatlas.lazystat import uses_lazy_metadata
 from flatlas.mounts import mount_entry
-from flatlas.paths import _scope_row, discover_namespace, get_root, path_key
+from flatlas.paths import (
+    _scope_row,
+    discover_namespace,
+    display_path,
+    get_root,
+    path_key,
+)
 from flatlas.scanning import Observation, _observation
 
 
@@ -149,7 +155,7 @@ def list_scans(
         indexed = connection.execute(
             """SELECT root_id, path_key FROM path
                WHERE path_display=? ORDER BY state='present' DESC LIMIT 1""",
-            (str(selected_path),),
+            (display_path(selected_path),),
         ).fetchone()
         if indexed is None:
             namespace = discover_namespace(selected_path)
@@ -300,7 +306,7 @@ def list_child_directories(
     result: list[dict[str, Any]] = []
     actual_keys: set[str] = set()
     for actual_path in actual_paths:
-        normalized = _normalized_display(str(actual_path))
+        normalized = _normalized_display(display_path(actual_path))
         actual_keys.add(normalized)
         indexed = indexed_by_path.get(normalized)
         try:
