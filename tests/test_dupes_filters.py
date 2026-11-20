@@ -244,7 +244,7 @@ def test_empty_filtered_export_preserves_existing_format(indexed, tmp_path: Path
 @pytest.mark.parametrize("export", [False, True])
 @pytest.mark.cli
 def test_invalid_filters_fail_before_opening_database(options, export, tmp_path: Path, monkeypatch, capsys) -> None:
-    monkeypatch.setattr("flatlas.cli._open_database", lambda *_args: pytest.fail("must validate before opening database"))
+    monkeypatch.setattr("flatlas.cli._open_database", lambda *_args, **_kwargs: pytest.fail("must validate before opening database"))
     command = ["export", "dupes", "--output", str(tmp_path / "unused")] if export else ["dupes"]
     monkeypatch.setattr("sys.argv", ["flatlas", *command, *options])
     try:

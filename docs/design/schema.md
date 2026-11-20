@@ -316,6 +316,8 @@ migration 3 记录 `--refresh-before` 解析后的固定 UTC Unix 纳秒时间�
 
 连接先只读检查 `schema_migration` 是否包含当前所需的全部版本；满足要求时跳过全部 migration 写操作，包括 application ID 设置和 DDL。已有 WAL 数据库也不重复设置 journal mode，因此扫描持有写事务时，`ls` 等查询可以读取已提交的索引。只有缺少迁移版本时才以 `BEGIN IMMEDIATE` 获取写锁，并在锁内重新检查版本，避免并发打开重复升级。待执行的 schema、回填数据与版本记录在同一事务中提交，失败则一起回滚；DDL 逐条执行而不用 `executescript`，以免隐式提交释放写锁。两个扫描仍会竞争同一数据库的写锁。
 
+调用者对索引没有写权限时（agent 沙箱、只读挂载、他人的索引），WAL 模式无法创建 `-shm` 或取得写锁，普通打开会失败。查询命令（`roots`、`df`、`scans`、`scan-info`、`paths`、`du`、`ls`、`largest`、`plan show`）此时改用 `db.open_database_readonly`：先以 `mode=ro` 打开，若有写入者正在运行（`-wal` 存在）即读取其已提交的快照；没有 `-wal` 且无法创建时以 `immutable=1` 打开，此时假定没有并发写入者。只读连接不执行 migration，schema 版本落后时报告领域错误，提示在可写处运行一次任意命令。会写入的命令（`init`、`scan`、`rm`、`dupes`、`plan create`）不回退，直接报告无法以写方式打开。
+
 CLI 打开已有数据库并检测到待执行 migration 时，先在 stderr 输出 migration 版本与说明。目录回填期间交互式终端原地显示“已完成目录数 / 总目录数”，非交互式调用按进度里程碑输出；提交 migration 版本记录后再显示完成提示。stdout 不混入 migration 信息，以保持 JSON/CSV 可解析。新建空数据库的 schema 初始化默认静默。migration 中断时不写完成版本，下次打开数据库可幂等重试。
 
 回归测试覆盖扫描 A 时查询 B、当前 schema 的只读检查、待迁移时的写锁竞争、并发打开后的版本复查，以及迁移故障回滚和重试。这些测试可在 Windows/Linux CI 运行；Windows 本地结果不能替代 Linux 验证。

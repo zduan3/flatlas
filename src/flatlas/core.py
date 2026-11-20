@@ -22,6 +22,7 @@ from flatlas.db import (
     migrate,
     now_ns,
     open_database,
+    open_database_readonly,
 )
 from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError

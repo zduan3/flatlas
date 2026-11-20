@@ -34,7 +34,7 @@ def usage_rows(monkeypatch):
         for index, size in enumerate(sizes)
     ]
     monkeypatch.setattr(cli, "_database", lambda *args, **kwargs: Path("unused.sqlite"))
-    monkeypatch.setattr(cli, "_open_database", lambda *args: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(cli, "_open_database", lambda *args, **kwargs: SimpleNamespace(close=lambda: None))
     monkeypatch.setattr(cli, "disk_usage", lambda *args, **kwargs: rows)
     monkeypatch.setattr(cli, "list_child_directories", lambda *args, **kwargs: rows)
     monkeypatch.setattr(cli, "largest_files", lambda *args, **kwargs: rows)

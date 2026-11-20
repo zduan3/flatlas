@@ -8,6 +8,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from flatlas.errors import FlatlasError
+
 SCHEMA_VERSION = 3
 CACHE_SIZE_KIB = 256 * 1024
 
@@ -176,6 +178,52 @@ def open_database(
         if connection.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
             connection.execute("PRAGMA journal_mode = WAL")
         migrate(connection, on_migration=on_migration)
+    except BaseException:
+        connection.close()
+        raise
+    return connection
+
+
+def open_database_readonly(location: Path) -> sqlite3.Connection:
+    """Open an existing index without writing anything, for query commands.
+
+    Used when the database or its directory is not writable (an agent sandbox,
+    another user's index). WAL mode needs ``-shm``/``-wal`` files: while a
+    writer is active they exist and ``mode=ro`` reads its committed snapshot;
+    when no writer has left them behind and they cannot be created, fall back
+    to ``immutable=1``, which assumes no concurrent writer. Migrations need a
+    write lock, so an outdated schema is reported instead of upgraded.
+    """
+    if not location.is_file():
+        raise FlatlasError(f"index database does not exist: {location}")
+    uri = location.resolve().as_uri()
+    try:
+        connection = _connect_readonly(f"{uri}?mode=ro")
+    except sqlite3.OperationalError:
+        if Path(f"{location}-wal").exists():
+            raise
+        connection = _connect_readonly(f"{uri}?mode=ro&immutable=1")
+    try:
+        missing = set(range(1, SCHEMA_VERSION + 1)) - _migration_versions(connection)
+    except BaseException:
+        connection.close()
+        raise
+    if missing:
+        connection.close()
+        raise FlatlasError(
+            f"index schema needs migration to v{SCHEMA_VERSION} but {location} is read-only; "
+            "run any flatlas command once where the index is writable"
+        )
+    return connection
+
+
+def _connect_readonly(uri: str) -> sqlite3.Connection:
+    connection = sqlite3.connect(uri, uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute(f"PRAGMA cache_size = -{CACHE_SIZE_KIB}")
+        connection.execute("SELECT count(*) FROM sqlite_schema").fetchone()
     except BaseException:
         connection.close()
         raise
