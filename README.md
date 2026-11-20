@@ -4,7 +4,7 @@
 
 本文是面向日常使用的说明；架构、实现状态、验收与后续规划请从 [开发文档导航](docs/README.md) 进入。
 
-0.2 的范围摘要和专项设计见 [0.2 开发阶段总览](docs/0.2/README.md)。
+0.2 的范围摘要和专项设计见 [0.2 开发阶段总览](docs/plan/backlog.md)。
 
 ## 安装
 
@@ -111,7 +111,7 @@ flatlas config unset scan.refresh-before
 - `du PATH ...` 用于查询每个显式文件或目录 scope 的递归索引汇总；默认每个参数一行，即使源目录暂时离线仍可使用。
 - `largest PATH` 用于排序 PATH 子树中的最大单个普通文件。
 
-目录的 `part` / `gone` 状态可以附带最后已知聚合，但该值可能不完整或过期；未知必须显示为 `-` / `null`，不能伪装为 0。0.2 的查询演进规划见 [查询命令规划](docs/0.2/query-cli.md)。
+目录的 `part` / `gone` 状态可以附带最后已知聚合，但该值可能不完整或过期；未知必须显示为 `-` / `null`，不能伪装为 0。0.2 的查询演进规划见 [查询命令规划](docs/plan/proposals/query-cli.md)。
 
 `SCANNED-THROUGH` 是当前已知目录子树中各目录最近成功完整枚举时间的最小值，并非不可变快照时间。表格按本地时区采用 GNU `ls -l` 风格：近六个月显示月、日和时分，更早或未来的时间显示月、日和年份。JSON/CSV 使用原始 UTC Unix 纳秒字段 `subtree_complete_through_ns`，文件和特殊条目为 `null` / 空值。
 

@@ -6,7 +6,7 @@ File Atlas (flatlas) 是跨平台、持久化且只读的文件系统索引工�
 
 当前开发阶段是纯 Python 3.12 的 0.2；MVP（0.1）已完成并冻结，0.2 在其只读基线上完善索引、查询、扫描中断恢复与惰性 hash。除非用户明确要求并且相关设计已更新，不实现删除、移动、hardlink/reflink/symlink 替换、监听、TUI、Rust/PyO3 或 plan apply 等后续规划内容。
 
-开始功能修改前，先阅读与任务相关的 `docs/0.1/architecture.md`、`docs/0.1/database-schema.md`、`docs/0.1/acceptance.md` 和 `docs/0.1/implementation.md`，再阅读 `docs/0.2/README.md` 及其链接的专项规划。0.1 文档是不可破坏的冻结基线；0.2 文档承载当前阶段的新设计与验收标准。
+开始功能修改前，先阅读与任务相关的 `docs/design/architecture.md`、`docs/design/schema.md`、`docs/history/0.1-acceptance.md` 和 `docs/history/0.1-implementation.md`，再阅读 `docs/plan/backlog.md` 及其链接的专项规划。0.1 文档是不可破坏的冻结基线；0.2 文档承载当前阶段的新设计与验收标准。
 
 ## 绝不可破坏的语义
 

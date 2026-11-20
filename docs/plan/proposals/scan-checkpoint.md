@@ -6,7 +6,7 @@
 
 本文记录 0.2 的扫描中断规划。0.1 只展示扫描进度并在 `KeyboardInterrupt` 时回滚整次扫描事务；当前 0.2 已实现单事务内的两段式用户取消，以及基于目录成功时间的显式 `--resume`，但尚未实现短事务 checkpoint、崩溃恢复或持久化工作队列。内容 hash 不属于 scan，另见 [0.2 惰性 Hash 规划](lazy-hash.md)。
 
-目录汇总缓存与每目录完整枚举时间已经由 migration 2 落地。遍历阶段第一次中断会停止扫描并进入批量缓存收尾，成功后保存已观测数据并持久化 `cancelled`；收尾阶段再次中断则回滚本次扫描。它仍不构成 checkpoint 或可恢复工作队列。CLI 在 POSIX 上把 `SIGTERM`（批处理调度器终止作业前发送）和 `SIGHUP`（终端关闭或远程会话断开）转为同一 `KeyboardInterrupt` 路径，因此它们与 Ctrl-C 一样保存已观测数据；父进程已忽略的信号（如 `nohup` 下的 `SIGHUP`）保持忽略。调度器在 `SIGTERM` 后的宽限期内若收尾未完成即 `SIGKILL`，本次扫描仍整体回滚。相关字段和后续 freshness 选择边界见 [目录汇总缓存与扫描时间](directory-summary.md)。
+目录汇总缓存与每目录完整枚举时间已经由 migration 2 落地。遍历阶段第一次中断会停止扫描并进入批量缓存收尾，成功后保存已观测数据并持久化 `cancelled`；收尾阶段再次中断则回滚本次扫描。它仍不构成 checkpoint 或可恢复工作队列。CLI 在 POSIX 上把 `SIGTERM`（批处理调度器终止作业前发送）和 `SIGHUP`（终端关闭或远程会话断开）转为同一 `KeyboardInterrupt` 路径，因此它们与 Ctrl-C 一样保存已观测数据；父进程已忽略的信号（如 `nohup` 下的 `SIGHUP`）保持忽略。调度器在 `SIGTERM` 后的宽限期内若收尾未完成即 `SIGKILL`，本次扫描仍整体回滚。相关字段和后续 freshness 选择边界见 [目录汇总缓存与扫描时间](../../design/scanning.md)。
 
 `flatlas scan PATH --resume` 只匹配 root 与规范化 scope 完全相同的最近 scan。最近状态必须是 `cancelled`、`partial` 或 `failed`；`completed` 不可恢复，`running` 不会被自动接管。恢复调用创建新的独立 scan，不保存 `resumed_from_scan_id`：若上次 scan 已有 `refresh_before_ns` 则原值继承，否则使用上次 scan 的 `started_at_ns`。因此多次用户中断始终使用最初的固定 cutoff，目录仍记录各自实际完成时间，失败目录的成功时间不推进并会在下次恢复时重试。
 

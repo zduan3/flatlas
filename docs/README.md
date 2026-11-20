@@ -6,32 +6,32 @@
 
 这些文档约束实现和评审；实现变更必须先满足其语义，再更新对应测试。
 
-- [架构与边界](0.1/architecture.md)：0.1 的产品边界、核心模型与不可破坏的语义。
-- [SQLite 数据库结构](0.1/database-schema.md)：0.1 持久化模型、迁移与查询约束。
-- [功能范围与验收基线](0.1/acceptance.md)：0.1 已冻结的功能范围与验收矩阵。
-- [实现状态](0.1/implementation.md)：0.1 已交付能力、CLI 与测试概览。
+- [架构与边界](design/architecture.md)：0.1 的产品边界、核心模型与不可破坏的语义。
+- [SQLite 数据库结构](design/schema.md)：0.1 持久化模型、迁移与查询约束。
+- [功能范围与验收基线](history/0.1-acceptance.md)：0.1 已冻结的功能范围与验收矩阵。
+- [实现状态](history/0.1-implementation.md)：0.1 已交付能力、CLI 与测试概览。
 
 ## 通用开发资料
 
 这些文档描述当前仓库的实现和本地开发方式；它们不替代开发契约。
 
 - [开发环境与依赖策略](development.md)：Python、uv、依赖和检查命令。
-- [待决策清单](decisions.md)：尚未定案的产品与技术选择。
+- [待决策清单](plan/decisions.md)：尚未定案的产品与技术选择。
 
 ## 0.2 当前开发阶段
 
 0.2 是当前开发阶段。以下内容定义计划范围与实现顺序；除明确标记为已实现的项目外，不应被当作当前 CLI 已支持的功能。
 
-- [0.2 开发阶段总览](0.2/README.md)：当前阶段状态、计划能力摘要与不变边界。
-- [阶段路线图](roadmap.md)：版本级目标与优先级。
-- [查询命令规划](0.2/query-cli.md)：查询体验与兼容性演进。
-- [扫描中断规划](0.2/scan-interruption.md)：中断恢复与 checkpoint。
-- [目录汇总缓存与扫描时间](0.2/directory-summary.md)：缓存聚合、目录 freshness 与增量扫描边界。
-- [惰性 Hash 规划](0.2/lazy-hash.md)：hash 调度与可观测性。
+- [0.2 开发阶段总览](plan/backlog.md)：当前阶段状态、计划能力摘要与不变边界。
+- [阶段路线图](plan/roadmap.md)：版本级目标与优先级。
+- [查询命令规划](plan/proposals/query-cli.md)：查询体验与兼容性演进。
+- [扫描中断规划](plan/proposals/scan-checkpoint.md)：中断恢复与 checkpoint。
+- [目录汇总缓存与扫描时间](design/scanning.md)：缓存聚合、目录 freshness 与增量扫描边界。
+- [惰性 Hash 规划](plan/proposals/lazy-hash.md)：hash 调度与可观测性。
 
 ## 调研资料
 
-- [同类工具与 MVP（0.1）功能对照](tool-comparison.md)：产品范围与外部工具对照记录。
+- [同类工具与 MVP（0.1）功能对照](research/tool-comparison.md)：产品范围与外部工具对照记录。
 
 ## 文档维护规则
 

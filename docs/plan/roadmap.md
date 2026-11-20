@@ -19,7 +19,7 @@ File Atlas 首先服务于寻找大文件、大目录和重复内容，以减少
 - 实际去重由用户使用 jdupes 对选定目录重新扫描、逐字节验证并显式执行。
 - 0.1 发布验收覆盖 Windows/Linux 的常规 Unicode 路径；非 UTF-8、完整长路径/reparse tag、跨文件系统和高级物理空间语义后置。
 
-0.1 的功能范围、验收基线与实现概览已经冻结，分别见 [0.1 功能范围与验收基线](0.1/acceptance.md) 和 [0.1 实现状态](0.1/implementation.md)。
+0.1 的功能范围、验收基线与实现概览已经冻结，分别见 [0.1 功能范围与验收基线](../history/0.1-acceptance.md) 和 [0.1 实现状态](../history/0.1-implementation.md)。
 
 ## 版本 0.2：Python 索引与查询完善（当前开发阶段）
 
@@ -27,10 +27,10 @@ File Atlas 首先服务于寻找大文件、大目录和重复内容，以减少
 - 强化 `du` 的直接子项/深度展开，以及 `du` / `largest` 的 metric、top N、排序和阈值能力，服务大目录与大文件定位。
 - 完善局部子树更新、当前状态校验和 stale hash 重算，并以最小的 `coverage`、`errors`、scan 摘要解释结果可信度。
 - 配置化 include/exclude、大小与时间过滤。
-- 按 [查询命令规划](0.2/query-cli.md) 逐步增加 GNU 风格常用参数；`stat`、`find`、`locate` 等通用查找便利功能后置。
+- 按 [查询命令规划](proposals/query-cli.md) 逐步增加 GNU 风格常用参数；`stat`、`find`、`locate` 等通用查找便利功能后置。
 - dirty state 与历史结果保留策略。
 - 基准测试与故障注入测试。
-- hash 并发、强制重算/只用缓存模式、独立运行审计、更多范围与阈值过滤，详见 [惰性 Hash 规划](0.2/lazy-hash.md)。
+- hash 并发、强制重算/只用缓存模式、独立运行审计、更多范围与阈值过滤，详见 [惰性 Hash 规划](proposals/lazy-hash.md)。
 - 补齐 Linux 非 UTF-8、Windows 长路径/reparse tag、跨 mount/volume 策略和 allocated size 平台校准。
 
 ## 版本 0.3：安全执行器设计与验证
