@@ -94,6 +94,10 @@ flatlas config unset scan.refresh-before
 
 `config list` 按键名排序，以 `key = value` 列出已设置的命令默认参数；`config list -a`（`--all`）列出所有支持的参数，未设置的值显示为 `<unset>`。没有已设置的参数时，普通 `list` 无输出并返回退出码 0。
 
+## 只读访问
+
+索引所在目录不可写时（例如在 agent 沙箱中查看他人或沙箱外维护的索引），`roots`、`du`、`ls`、`largest`、`scans` 等查询命令自动以只读方式打开，结果与正常打开相同；`scan`、`dupes` 等需要写入的命令报错退出。只读打开不会升级 schema，版本落后时先在可写处运行一次任意命令。
+
 ## 当前安全边界与能力
 
 - 已验收的测试基线是一个不跨文件系统、使用当前平台常规 Unicode 文件名的普通目录；Linux 非 UTF-8 文件名可以扫描（显示为 `\xNN` 转义），但对它们的 hash 与按路径查询、完整长路径/reparse tag、复杂 mount 和物理共享空间语义尚未支持。

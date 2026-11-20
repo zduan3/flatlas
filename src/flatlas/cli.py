@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import signal
+import sqlite3
 import sys
 import time
 import unicodedata
@@ -37,6 +38,7 @@ from flatlas.core import (
     list_roots,
     list_scans,
     open_database,
+    open_database_readonly,
     plan_operations,
     query_paths,
     register_namespace,
@@ -175,17 +177,23 @@ class _MigrationProgressDisplay:
         self.width = 0
 
 
-def _open_database(location: Path) -> Any:
+def _open_database(location: Path, *, write: bool = True) -> Any:
     progress = _MigrationProgressDisplay(enabled=_stderr_is_tty())
     try:
         return open_database(location, on_migration=progress.update)
+    except sqlite3.OperationalError as exc:
+        if write or not location.is_file():
+            raise FlatlasError(f"cannot open index database for writing: {location}: {exc}") from exc
     finally:
         progress.close()
+    # Query commands still work where the index is readable but not writable.
+    return open_database_readonly(location)
 
 
 @contextmanager
-def _connection(db: Path | None, *, create: bool = False) -> Iterator[Any]:
-    connection = _open_database(_database(db, create=create))
+def _connection(db: Path | None, *, create: bool = False, write: bool = True) -> Iterator[Any]:
+    """Open the index; ``write=False`` marks query commands, which may fall back to read-only."""
+    connection = _open_database(_database(db, create=create), write=write)
     try:
         yield connection
     finally:
@@ -675,7 +683,7 @@ def roots(
     human_readable: human_readable_option = False,
 ) -> None:
     """Show registered namespaces as recorded in the index, without touching the filesystem."""
-    with _connection(db) as connection:
+    with _connection(db, write=False) as connection:
         rows = list_roots(connection)
     _print_roots(rows, format, human_readable=human_readable)
 
@@ -695,7 +703,7 @@ def df_command(
     if files:
         rows = filesystem_usage(files=files)
     else:
-        with _connection(db) as connection:
+        with _connection(db, write=False) as connection:
             rows = filesystem_usage(connection)
     _print_df(rows, format, human_readable=human_readable, print_type=print_type)
 
@@ -761,7 +769,7 @@ def scans_command(
     db: db_option = None,
 ) -> None:
     """List scan and scope audit records without accessing file contents."""
-    with _connection(db) as connection:
+    with _connection(db, write=False) as connection:
         rows = list_scans(connection, scope=path, limit=limit)
     _print_scans(rows, format)
 
@@ -772,7 +780,7 @@ def scan_info_command(
     db: db_option = None,
 ) -> None:
     """Show one scan with its scopes and recorded errors as JSON."""
-    with _connection(db) as connection:
+    with _connection(db, write=False) as connection:
         result = scan_info(connection, scan_id)
     _print(result)
 
@@ -786,7 +794,7 @@ def paths_command(
     db: db_option = None,
 ) -> None:
     """Browse current indexed paths; it remains available while sources are offline."""
-    with _connection(db) as connection:
+    with _connection(db, write=False) as connection:
         _print(query_paths(connection, scope=path, limit=limit), format, output)
 
 
@@ -814,7 +822,7 @@ def du(
 
     SIZE(B)=logical bytes; N=file count; ALLOC(B)=allocated bytes.
     """
-    with _connection(db) as connection:
+    with _connection(db, write=False) as connection:
         rows = [row for path in (paths or [Path(".")]) for row in disk_usage(connection, scope=path)]
         _print_usage(rows, format, output, include_status=True, human_readable=human_readable)
 
@@ -832,7 +840,7 @@ def ls_command(
     LOGICAL(B)=file bytes or indexed directory bytes; N=file count; ALLOC(B)=allocated bytes.
     SCANNED-THROUGH=oldest successful directory scan in an indexed subtree, not a snapshot.
     """
-    with _connection(db) as connection:
+    with _connection(db, write=False) as connection:
         _print_usage(
             list_child_directories(connection, scope=path),
             format,
@@ -856,7 +864,7 @@ def largest(
     db: db_option = None,
 ) -> None:
     """List the largest currently indexed files."""
-    with _connection(db) as connection:
+    with _connection(db, write=False) as connection:
         _print_largest_files(
             largest_files(connection, scope=path, limit=limit), format, output, human_readable=human_readable
         )
@@ -934,7 +942,7 @@ def plan_show(
     output: output_option = None,
     db: db_option = None,
 ) -> None:
-    with _connection(db) as connection:
+    with _connection(db, write=False) as connection:
         rows = plan_operations(connection, plan_id) if plan_id is not None else list_plans(connection)
         _print(rows, format, output)
 
