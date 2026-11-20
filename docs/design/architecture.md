@@ -49,7 +49,7 @@ Python 3.12 实现按职责拆分：
 - `hash`：quick/full hash、计算依据的 metadata 与有效性。
 - `plan` / `plan_operation`：不可变的去重候选建议快照，只创建和查询，不执行。
 
-用户默认使用 platformdirs 的全局配置与索引；`--db` 只是显式覆盖，不是日常必填参数。持久化层以 BLOB 保存路径身份，见 [数据库结构](schema.md)。
+用户默认使用 platformdirs 的全局配置与索引，索引位置可用配置 `index.dir` 改到别处；`--db` 只是单次显式覆盖，不是日常必填参数。持久化层以 BLOB 保存路径身份，见 [数据库结构](schema.md)。
 
 ## 跨平台边界
 

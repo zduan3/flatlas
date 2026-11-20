@@ -15,7 +15,7 @@ from tomlkit.exceptions import ParseError
 from flatlas.errors import FlatlasError
 from flatlas.refresh import parse_refresh_before
 
-_SUPPORTED_KEYS = ("scan.refresh-before",)
+DATABASE_NAME = "index.sqlite"
 
 
 @dataclass(frozen=True)
@@ -29,7 +29,7 @@ class UserPaths:
 
     @property
     def default_database(self) -> Path:
-        return self.data_dir / "index.sqlite"
+        return self.data_dir / DATABASE_NAME
 
 
 def user_paths() -> UserPaths:
@@ -65,66 +65,121 @@ def _write_config(locations: UserPaths, config: TOMLDocument) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def _check_key(key: str) -> None:
-    if key not in _SUPPORTED_KEYS:
-        raise FlatlasError(f"unknown configuration key: {key}; supported key: scan.refresh-before")
+def _validate_index_dir(value: str) -> None:
+    if not value.strip():
+        raise FlatlasError("index.dir must not be empty")
+    if not Path(value.strip()).expanduser().is_absolute():
+        raise FlatlasError(f"index.dir must be an absolute path: {value}")
 
 
-def get_default(key: str) -> str | None:
-    """Read a command default without creating configuration or a database."""
-    _check_key(key)
-    config = _read_config(user_paths()).unwrap()
-    section = config.get("scan", {})
+def _validate_refresh_before(value: str) -> None:
+    parse_refresh_before(value)
+
+
+# Supported keys as "table.name" -> validator. index.dir chooses where the
+# default index lives; the others are command defaults.
+_VALIDATORS = {
+    "index.dir": _validate_index_dir,
+    "scan.refresh-before": _validate_refresh_before,
+}
+
+
+def _split_key(key: str) -> tuple[str, str]:
+    if key not in _VALIDATORS:
+        supported = ", ".join(sorted(_VALIDATORS))
+        raise FlatlasError(f"unknown configuration key: {key}; supported keys: {supported}")
+    table, name = key.split(".", 1)
+    return table, name
+
+
+def _configured(config: dict, key: str) -> str | None:
+    table, name = _split_key(key)
+    section = config.get(table, {})
     if not isinstance(section, dict):
-        raise FlatlasError("invalid Flatlas configuration: scan must be a table")
-    value = section.get("refresh-before")
+        raise FlatlasError(f"invalid Flatlas configuration: {table} must be a table")
+    value = section.get(name)
     if value is not None:
         if not isinstance(value, str):
-            raise FlatlasError("invalid Flatlas configuration: scan.refresh-before must be a string")
-        parse_refresh_before(value)
+            raise FlatlasError(f"invalid Flatlas configuration: {key} must be a string")
+        _VALIDATORS[key](value)
     return value
 
 
+def get_default(key: str) -> str | None:
+    """Read a saved setting without creating configuration or a database."""
+    _split_key(key)
+    return _configured(_read_config(user_paths()).unwrap(), key)
+
+
 def list_defaults(*, include_unset: bool = False) -> dict[str, str | None]:
-    """List saved command defaults, optionally including supported unset keys."""
-    defaults = {key: get_default(key) for key in sorted(_SUPPORTED_KEYS)}
+    """List saved settings, optionally including supported unset keys."""
+    defaults = {key: get_default(key) for key in sorted(_VALIDATORS)}
     return {key: value for key, value in defaults.items() if include_unset or value is not None}
 
 
 def set_default(key: str, value: str | None) -> None:
-    """Set or unset a supported default, preserving other settings and comments."""
-    _check_key(key)
+    """Set or unset a supported setting, preserving other settings and comments."""
+    table, name = _split_key(key)
     if value is not None:
-        parse_refresh_before(value)
+        _VALIDATORS[key](value)
     locations = user_paths()
     config = _read_config(locations)
-    if "scan" not in config:
+    if table not in config:
         if value is None:
             return
-        config["scan"] = tomlkit.table()
-    section = config["scan"]
+        config[table] = tomlkit.table()
+    section = config[table]
     if not isinstance(section, dict):
-        raise FlatlasError("invalid Flatlas configuration: scan must be a table")
+        raise FlatlasError(f"invalid Flatlas configuration: {table} must be a table")
     if value is None:
-        section.pop("refresh-before", None)
+        section.pop(name, None)
     else:
-        section["refresh-before"] = value.strip()
+        section[name] = value.strip()
     if "format_version" not in config:
         config["format_version"] = 1
     _write_config(locations, config)
 
 
-def resolve_database(explicit: Path | None = None, *, create: bool = False) -> Path:
+def configured_database() -> Path | None:
+    """Where the configuration points the default index, without checking it exists."""
+    try:
+        return resolve_database(create=False, require_existing=False)
+    except FlatlasError:
+        return None
+
+
+def resolve_database(
+    explicit: Path | None = None, *, create: bool = False, require_existing: bool = True,
+) -> Path:
+    """Locate the index: ``--db``, then ``index.dir``, then the path pinned by ``init``.
+
+    ``index.dir`` is an explicit choice, so a missing file there means
+    "not initialized" rather than silently starting an empty index.
+    """
     if explicit is not None:
         return explicit.expanduser().resolve()
     locations = user_paths()
     config = _read_config(locations)
+    index_dir = _configured(config.unwrap(), "index.dir")
+    if index_dir is not None:
+        directory = Path(index_dir.strip()).expanduser()
+        database = directory / DATABASE_NAME
+        if create:
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise FlatlasError(f"cannot create Flatlas index directory: {directory}: {exc}") from exc
+        elif require_existing and not database.exists():
+            raise FlatlasError(f"Flatlas is not initialized at {database} (index.dir); run 'flatlas init [PATH]' first.")
+        return database
     if "database" in config:
         database_value = config["database"]
         if not isinstance(database_value, str) or not database_value:
             raise FlatlasError(f"invalid Flatlas configuration: {locations.config_file}")
         return Path(database_value).expanduser()
     if not create:
+        if not require_existing:
+            return locations.default_database
         raise FlatlasError("Flatlas is not initialized; run 'flatlas init [PATH]' first.")
     database = locations.default_database.resolve()
     try:
