@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SCHEMA_VERSION = 3
+CACHE_SIZE_KIB = 256 * 1024
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_migration (
@@ -167,6 +168,11 @@ def open_database(
     try:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
+        # The default 2 MiB page cache makes per-entry path_key lookups re-read
+        # B-tree pages once an index outgrows it; on a network filesystem every
+        # miss is a remote read. The cache is allocated lazily, so small indexes
+        # do not pay for the ceiling.
+        connection.execute(f"PRAGMA cache_size = -{CACHE_SIZE_KIB}")
         if connection.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
             connection.execute("PRAGMA journal_mode = WAL")
         migrate(connection, on_migration=on_migration)

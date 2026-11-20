@@ -65,18 +65,23 @@ class ResumeSelection:
 
 
 def _observation(namespace: Namespace, value: Path, *, root: bool = False) -> Observation:
+    # Classify from this single lstat. Extra islink/is_dir/is_file probes would
+    # repeat the metadata request per entry, which is the dominant scan cost on
+    # network filesystems such as Lustre. lstat never follows the final link, so
+    # S_ISDIR/S_ISREG here match the former is_dir()/is_file() after the symlink
+    # check.
     stat = value.lstat()
     mode = stat.st_mode
     reparse = bool(getattr(stat, "st_file_attributes", 0) & getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
     if root:
         kind = "root"
-    elif os.path.islink(value):
+    elif stat_module.S_ISLNK(mode):
         kind = "symlink"
     elif reparse:
         kind = "reparse"
-    elif value.is_dir():
+    elif stat_module.S_ISDIR(mode):
         kind = "directory"
-    elif value.is_file():
+    elif stat_module.S_ISREG(mode):
         kind = "file"
     else:
         kind = "other"
@@ -120,8 +125,22 @@ def _parent_id(connection: sqlite3.Connection, root_id: int, key: bytes) -> int 
     return int(found["id"])
 
 
-def upsert_path(connection: sqlite3.Connection, root_id: int, scan_id: int, item: Observation) -> int:
-    parent_id = _parent_id(connection, root_id, item.key)
+def upsert_path(
+    connection: sqlite3.Connection,
+    root_id: int,
+    scan_id: int,
+    item: Observation,
+    *,
+    parent_id: int | None = None,
+) -> int:
+    """Insert or refresh one observed path.
+
+    Callers that already hold the parent's row id (the scanner always does)
+    pass ``parent_id`` to skip a per-entry lookup by ``path_key``; ``None``
+    falls back to that lookup, which also covers the namespace root.
+    """
+    if parent_id is None:
+        parent_id = _parent_id(connection, root_id, item.key)
     old = connection.execute(
         """SELECT id, state, entry_kind, device, inode
            FROM path WHERE root_id=? AND path_key=?""",
@@ -142,11 +161,12 @@ def upsert_path(connection: sqlite3.Connection, root_id: int, scan_id: int, item
         )
         return _last_insert_id(cursor)
     path_id = int(old["id"])
-    if item.kind not in {"root", "directory"}:
-        connection.execute("DELETE FROM directory_summary WHERE path_id=?", (path_id,))
-    elif (
-        old["state"] == "deleted"
-        or old["entry_kind"] not in {"root", "directory"}
+    # Summary rows only ever exist for directory paths, so a path that was not
+    # a directory has nothing to delete; skipping the no-op saves a statement
+    # per file on every rescan.
+    if old["entry_kind"] in {"root", "directory"} and (
+        item.kind not in {"root", "directory"}
+        or old["state"] == "deleted"
         or old["device"] != item.device
         or old["inode"] != item.inode
     ):
@@ -160,13 +180,16 @@ def upsert_path(connection: sqlite3.Connection, root_id: int, scan_id: int, item
         deleted_by_scope_id=NULL, deleted_at_ns=NULL WHERE root_id=? AND path_key=?""",
         values,
     )
-    connection.execute(
-        """UPDATE file_hash SET state='stale', error_message=NULL
-           WHERE path_id=? AND state IN ('quick_ready', 'full_ready') AND
-           (basis_device IS NOT ? OR basis_inode IS NOT ? OR basis_size IS NOT ? OR
-            basis_mtime_ns IS NOT ? OR basis_change_time_ns IS NOT ? OR basis_birth_time_ns IS NOT ?)""",
-        (path_id, item.device, item.inode, item.logical_size, item.mtime_ns, item.change_time_ns, item.birth_time_ns),
-    )
+    # Hash rows are only created for regular files; directories and other kinds
+    # cannot carry one unless the path used to be a file.
+    if item.kind == "file" or old["entry_kind"] == "file":
+        connection.execute(
+            """UPDATE file_hash SET state='stale', error_message=NULL
+               WHERE path_id=? AND state IN ('quick_ready', 'full_ready') AND
+               (basis_device IS NOT ? OR basis_inode IS NOT ? OR basis_size IS NOT ? OR
+                basis_mtime_ns IS NOT ? OR basis_change_time_ns IS NOT ? OR basis_birth_time_ns IS NOT ?)""",
+            (path_id, item.device, item.inode, item.logical_size, item.mtime_ns, item.change_time_ns, item.birth_time_ns),
+        )
     return path_id
 
 
@@ -186,9 +209,11 @@ def _ensure_ancestors(connection: sqlite3.Connection, namespace: Namespace, root
         current = current / part
         values.append(current)
     scope_id = -1
+    parent_id: int | None = None
     for index, value in enumerate(values):
         observed = _observation(namespace, value, root=index == 0)
-        scope_id = upsert_path(connection, root_id, scan_id, observed)
+        scope_id = upsert_path(connection, root_id, scan_id, observed, parent_id=parent_id)
+        parent_id = scope_id
     return scope_id
 
 
@@ -427,7 +452,9 @@ def scan_directory(
                         observed_children.append((child_path, child_observed))
                     if not refresh_parent:
                         for child_path, child_observed in observed_children:
-                            child_id = upsert_path(connection, root_id, scan_id, child_observed)
+                            child_id = upsert_path(
+                                connection, root_id, scan_id, child_observed, parent_id=directory_id
+                            )
                             dirs_seen += 1
                             visit(child_path, child_id)
                         return
@@ -448,7 +475,7 @@ def scan_directory(
                     failed = True
                     directory_complete = False
                     continue
-                path_id = upsert_path(connection, root_id, scan_id, observed)
+                path_id = upsert_path(connection, root_id, scan_id, observed, parent_id=directory_id)
                 if observed.allocation_error is not None:
                     _record_error(connection, scope_id, observed.key, "stat", observed.allocation_error)
                     failed = True
