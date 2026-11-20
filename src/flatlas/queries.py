@@ -11,6 +11,7 @@ from typing import Any
 
 from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError
+from flatlas.lazystat import LUSTRE
 from flatlas.paths import _scope_row, discover_namespace, get_root, path_key
 from flatlas.scanning import Observation, _observation
 
@@ -247,7 +248,7 @@ def list_child_directories(
         actual_keys.add(normalized)
         indexed = indexed_by_path.get(normalized)
         try:
-            observed = _observation(namespace, actual_path)
+            observed = _observation(namespace, actual_path, lazy=root["filesystem_type"] == LUSTRE)
         except OSError as exc:
             raise FlatlasError(f"cannot inspect directory entry {actual_path}: {exc}") from exc
         usage = None if indexed is None else usage_by_id.get(indexed["id"])

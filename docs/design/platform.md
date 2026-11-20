@@ -47,7 +47,7 @@ Windows 集成测试使用临时普通文件、非空 MFT 驻留文件、原生 
 
 ## Linux / Lustre
 
-非 Windows 平台的普通文件占用空间为 `st_blocks * 512`，无 block 信息时保持未知。扫描对每个条目只调用一次 `lstat`（见 [扫描与目录汇总](scanning.md#元数据成本)）；flatlas 当前使用普通 `lstat`，lazy 元数据仍是提案，见 [lazy 元数据](../plan/proposals/lazy-metadata.md)。
+非 Windows 平台的普通文件占用空间为 `st_blocks * 512`，无 block 信息时保持未知。扫描对每个条目只做一次元数据请求；Lustre root 使用 lazy `statx`，见 [扫描与目录汇总](scanning.md#lustre-上的-lazy-元数据)。
 
 ### Lustre 元数据实测（2026-11-19）
 
@@ -66,3 +66,5 @@ Windows 集成测试使用临时普通文件、非空 MFT 驻留文件、原生 
 - 在 489 个静止文件上，`AT_STATX_DONT_SYNC` 得到的 size、ino、dev、mtime_ns 与 blocks 与 `lstat` 完全一致。
 - 一次 1277 个条目的 flatlas 扫描耗时 16.2 s，其中 15.8 s 花在 stat 上。
 - `lfs find --printf` 不输出 inode 与 device，无法直接作为 flatlas 的 metadata 来源。
+- 启用 lazy 后，flatlas 扫描 22,412 个条目（19,118 个文件）用时 22 s，约 1000 条目/s；改动前同类子树约 31 条目/s。
+- 同一次扫描中，6 个文件的 lazy 结果与 `lstat` 不同：blocks 为 0、size 错误（git object 显示为 4096，另有两个相差 20 字节），`lfs getsom` 对它们返回 ENODATA。这些文件经过一次精确 stat 后，lazy 结果即与 `lstat` 一致。该批文件中 size > 0 且 blocks = 0 的共 29 个，据此对这类文件改用精确 `lstat`。

@@ -15,7 +15,6 @@
 - quick hash 当前采样首尾各 64 KiB、不超过 128 KiB 的文件直接全文读取（见 [惰性 Hash 与重复候选](../design/hashing.md)）；是否按存储类型调整采样大小，以及 hash I/O 调度策略如何定义？
 - Windows Volume GUID / reparse tag 和 Linux mount/bind mount 的适配器如何实现？字段和空值语义已由 schema 确定。
 - symlink、mount point、bind mount 与硬链接组采用何种扫描策略？
-- lazy 元数据的启用方式：显式 `scan --lazy` 加配置 `scan.lazy`，还是在文件系统为 Lustre（`statfs` magic `0x0BD00BD0`）时自动启用？lazy 模式记录为 `scanner_version` 后缀还是新列？见 [lazy 元数据](proposals/lazy-metadata.md)。
 
 ## 去重语义
 

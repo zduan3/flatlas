@@ -11,6 +11,7 @@ from typing import Any
 
 from flatlas.db import _last_insert_id, now_ns
 from flatlas.errors import FlatlasError
+from flatlas.lazystat import filesystem_type
 
 
 @dataclass(frozen=True)
@@ -54,17 +55,30 @@ def get_root(connection: sqlite3.Connection, namespace: Namespace) -> sqlite3.Ro
 
 
 def register_namespace(connection: sqlite3.Connection, namespace: Namespace) -> int:
+    """Register a namespace, recording its filesystem type.
+
+    Re-registering refreshes ``filesystem_type`` so roots created before the
+    type was recorded (or whose mount changed) pick up the current value; the
+    scanner reads it to decide whether to use lazy metadata.
+    """
+    fs_type = filesystem_type(namespace.path) if namespace.kind == "posix_mount" else None
     existing = get_root(connection, namespace)
     if existing is not None:
+        if fs_type is not None and existing["filesystem_type"] != fs_type:
+            connection.execute(
+                "UPDATE root SET filesystem_type=?, updated_at_ns=? WHERE id=?",
+                (fs_type, now_ns(), existing["id"]),
+            )
+            connection.commit()
         return int(existing["id"])
     timestamp = now_ns()
     cursor = connection.execute(
         """INSERT INTO root(root_path_raw, root_path_display, platform, namespace_kind,
-           namespace_id_raw, case_sensitive, created_at_ns, updated_at_ns)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+           namespace_id_raw, filesystem_type, case_sensitive, created_at_ns, updated_at_ns)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             namespace.identity, str(namespace.path), namespace.platform, namespace.kind,
-            namespace.identity, 0 if os.name == "nt" else 1, timestamp, timestamp,
+            namespace.identity, fs_type, 0 if os.name == "nt" else 1, timestamp, timestamp,
         ),
     )
     connection.commit()

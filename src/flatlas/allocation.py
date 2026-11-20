@@ -9,6 +9,8 @@ from functools import cache
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from flatlas.lazystat import LazyStat
+
 
 class _WindowsCtypes(Protocol):
     """Windows-only ctypes entry points, also replaced by POSIX test doubles."""
@@ -111,7 +113,7 @@ def _has_no_extents(path: Path) -> bool:
         api.CloseHandle(handle)
 
 
-def allocated_size(path: Path, metadata: os.stat_result) -> int | None:
+def allocated_size(path: Path, metadata: os.stat_result | LazyStat) -> int | None:
     """Called only for ordinary files, never for symlinks or reparse points.
 
     API errors propagate so the caller can record incomplete metadata coverage.

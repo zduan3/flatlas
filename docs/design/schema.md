@@ -27,7 +27,7 @@ PRAGMA cache_size = -262144;  -- 页缓存上限 256 MiB，按需分配
 
 `device + inode`（以及平台适配器可提供时的 `object_id_raw`）只表示某次扫描中的文件对象观测，**不是跨历史永久对象 ID**。因 inode 或文件 ID 可以复用，复用 full hash 必须同时匹配文件身份、size、mtime 与全部可用的 change/birth 时间。Windows 无符号对象身份写入 SQLite 时映射到 signed-64 范围（大于 `2**63 - 1` 的值减去 `2**64`），保持稳定。
 
-`root` 是内部的 **scan namespace**，不是用户查询时必须选择的业务 root。Windows 通常是一块卷的盘符/挂载点，Linux 通常是 `/` 或单独挂载点；全局查询可跨全部 `root` 聚合。该边界不可移除，因为扫描 coverage、挂载策略和任何 hardlink 的同文件系统限制都依赖它。当前实现中 Windows namespace 为路径的盘符根，POSIX 为路径所在的最近挂载点；`namespace_id_raw` 与 `root_path_raw` 相同，`filesystem_type` 未采集。
+`root` 是内部的 **scan namespace**，不是用户查询时必须选择的业务 root。Windows 通常是一块卷的盘符/挂载点，Linux 通常是 `/` 或单独挂载点；全局查询可跨全部 `root` 聚合。该边界不可移除，因为扫描 coverage、挂载策略和任何 hardlink 的同文件系统限制都依赖它。当前实现中 Windows namespace 为路径的盘符根，POSIX 为路径所在的最近挂载点；`namespace_id_raw` 与 `root_path_raw` 相同。`filesystem_type` 在 POSIX 上登记时从 `/proc/self/mounts` 取该挂载点的类型，再次 `init` 时刷新，检测不到时保持原值；Windows 为空。扫描据此决定是否使用 lazy 元数据。
 
 ## 实体关系
 
