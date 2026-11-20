@@ -71,6 +71,14 @@ flatlas plan show [PLAN_ID]
 
 ## 命令默认参数
 
+索引默认放在用户数据目录（Linux 通常为 `~/.local/share/flatlas/index.sqlite`），可以用 `index.dir` 改到别处，例如共享集群上需要让 agent 沙箱可写的目录：
+
+```bash
+flatlas config set index.dir /path/to/flatlas      # 索引为 /path/to/flatlas/index.sqlite
+```
+
+修改只影响配置，不移动文件；已有索引时按提示把 `index.sqlite`（及 `-wal`/`-shm`）移到新目录，或重新 `init`。`--db` 仍可单次覆盖。
+
 用 `config` 将默认参数保存到用户级 `config.toml`，当前支持 `scan.refresh-before`：
 
 ```powershell

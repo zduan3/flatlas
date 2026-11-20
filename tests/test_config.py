@@ -52,7 +52,7 @@ def test_unset_missing_default_does_not_create_config(locations: config.UserPath
 def test_list_without_config_is_read_only(locations: config.UserPaths, options: list[str]) -> None:
     result = CliRunner().invoke(cli.app, ["config", "list", *options])
     assert result.exit_code == 0, result.exception
-    assert result.stdout == ("scan.refresh-before = <unset>\n" if options else "")
+    assert result.stdout == ("index.dir = <unset>\nscan.refresh-before = <unset>\n" if options else "")
     assert not locations.config_dir.exists()
     assert not locations.data_dir.exists()
 
@@ -67,13 +67,13 @@ def test_list_shows_saved_defaults_and_leaves_config_unchanged(
     before = locations.config_file.read_bytes()
     result = CliRunner().invoke(cli.app, ["config", "list", *options])
     assert result.exit_code == 0, result.exception
-    assert result.stdout == "scan.refresh-before = 7d\n"
+    assert result.stdout == ("index.dir = <unset>\n" if options else "") + "scan.refresh-before = 7d\n"
     assert locations.config_file.read_bytes() == before
     assert not locations.data_dir.exists()
     config.set_default("scan.refresh-before", None)
     result = CliRunner().invoke(cli.app, ["config", "list", *options])
     assert result.exit_code == 0, result.exception
-    assert result.stdout == ("scan.refresh-before = <unset>\n" if options else "")
+    assert result.stdout == ("index.dir = <unset>\nscan.refresh-before = <unset>\n" if options else "")
 
 
 @pytest.mark.parametrize("options", [[], ["-a"]])
@@ -232,3 +232,60 @@ def test_relative_default_is_resolved_for_each_scan(locations: config.UserPaths,
         result = runner.invoke(cli.app, ["scan", str(source), *options])
         assert result.exit_code == 0, result.exception
         assert json.loads(result.stdout)["refresh_before_ns"] == now - 604800 * 1_000_000_000
+
+
+@pytest.mark.db
+def test_index_dir_sets_the_default_database_location(locations: config.UserPaths, tmp_path: Path) -> None:
+    index_dir = tmp_path / "per-cluster" / "flatlas"
+    runner = CliRunner()
+    assert runner.invoke(cli.app, ["config", "set", "index.dir", str(index_dir)]).exit_code == 0
+    assert runner.invoke(cli.app, ["config", "get", "index.dir"]).stdout == f"{index_dir}\n"
+    with pytest.raises(FlatlasError, match="not initialized"):
+        config.resolve_database()
+    assert not index_dir.exists()
+
+    source = tmp_path / "source"
+    source.mkdir()
+    result = runner.invoke(cli.app, ["init", str(source)])
+    assert result.exit_code == 0, result.output
+    assert (index_dir / "index.sqlite").is_file()
+    assert config.resolve_database() == index_dir / "index.sqlite"
+    # The location comes from index.dir, so init does not pin a database path.
+    assert "database" not in tomllib.loads(locations.config_file.read_text(encoding="utf-8"))
+    assert not locations.data_dir.exists()
+
+
+@pytest.mark.db
+def test_index_dir_overrides_the_pinned_database_and_reports_moves(
+    locations: config.UserPaths, tmp_path: Path,
+) -> None:
+    pinned = config.resolve_database(create=True)
+    open_database(pinned).close()
+    index_dir = tmp_path / "moved"
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["config", "set", "index.dir", str(index_dir)])
+    assert result.exit_code == 0, result.output
+    assert str(pinned) in result.stderr and str(index_dir / "index.sqlite") in result.stderr
+    assert config.resolve_database(require_existing=False) == index_dir / "index.sqlite"
+
+    index_dir.mkdir()
+    pinned.rename(index_dir / "index.sqlite")
+    assert config.resolve_database() == index_dir / "index.sqlite"
+    result = runner.invoke(cli.app, ["config", "unset", "index.dir"])
+    assert result.exit_code == 0, result.output
+    assert "note:" in result.stderr
+    assert config.resolve_database() == pinned
+
+
+@pytest.mark.parametrize("value", ["", "relative/dir", "   "])
+def test_index_dir_must_be_absolute(locations: config.UserPaths, value: str) -> None:
+    with pytest.raises(FlatlasError, match="index.dir"):
+        config.set_default("index.dir", value)
+    assert not locations.config_dir.exists()
+
+
+def test_index_dir_accepts_home_relative_paths(locations: config.UserPaths, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config.set_default("index.dir", "~/indexes")
+    assert config.get_default("index.dir") == "~/indexes"
+    assert config.resolve_database(require_existing=False) == tmp_path / "indexes" / "index.sqlite"

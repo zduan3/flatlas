@@ -18,7 +18,13 @@ from typing import Annotated, Any, Self
 
 import typer
 
-from flatlas.config import get_default, list_defaults, resolve_database, set_default
+from flatlas.config import (
+    configured_database,
+    get_default,
+    list_defaults,
+    resolve_database,
+    set_default,
+)
 from flatlas.core import (
     HashProgress,
     HashSummary,
@@ -94,14 +100,32 @@ def _parse_refresh_before(value: str, *, current_ns: int | None = None) -> int:
         raise typer.BadParameter(str(exc)) from exc
 
 
-config_app = typer.Typer(help="Manage persistent defaults for commands.", no_args_is_help=True)
+config_app = typer.Typer(
+    help="Manage persistent settings: the default index directory and command defaults.", no_args_is_help=True,
+)
 app.add_typer(config_app, name="config")
+
+
+def _change_setting(key: str, value: str | None) -> None:
+    previous = configured_database() if key == "index.dir" else None
+    set_default(key, value)
+    if key != "index.dir":
+        return
+    current = configured_database()
+    if previous is None or current is None or previous == current:
+        return
+    if previous.exists() and not current.exists():
+        typer.echo(
+            f"note: the default index is now {current}, which does not exist yet; to keep the existing index, "
+            f"move {previous} (with any -wal/-shm files) there, otherwise run 'flatlas init'.",
+            err=True,
+        )
 
 
 @config_app.command("set")
 def config_set(key: str, value: str) -> None:
-    """Save a default, for example: scan.refresh-before 7d."""
-    set_default(key, value)
+    """Save a setting, for example: scan.refresh-before 7d, or index.dir /path/to/dir."""
+    _change_setting(key, value)
 
 
 @config_app.command("get")
@@ -114,8 +138,8 @@ def config_get(key: str) -> None:
 
 @config_app.command("unset")
 def config_unset(key: str) -> None:
-    """Remove a saved default and restore the built-in behavior."""
-    set_default(key, None)
+    """Remove a saved setting and restore the built-in behavior."""
+    _change_setting(key, None)
 
 
 @config_app.command("list")
