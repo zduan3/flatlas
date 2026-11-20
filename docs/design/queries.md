@@ -64,11 +64,11 @@ PATH 默认为当前目录，必须位于已登记的 namespace。命令实时�
 
 ## `du [PATH ...]`
 
-无 PATH 时汇总当前目录 `.`；每个参数输出一行递归汇总并保持参数顺序，因此也能处理 shell 或启动器提前展开后的通配结果。`du` 不实时枚举目标：
+无 PATH 时汇总当前目录 `.`；每个参数输出一行递归汇总并保持参数顺序，因此也能处理 shell 或启动器提前展开后的通配结果。PATH 先完整解析（含最后一级 symlink，类似 GNU `du -D` 对命令行参数的处理），因此 `du ~/scratch` 这类指向其他位置的 symlink 汇总的是目标；`largest`、`dupes` 的 PATH 同样如此。`du` 不实时枚举目标：
 
 - 已索引目录或 namespace root：读取目录汇总缓存中的 `subtree_files`、`subtree_logical_size` 与 `subtree_allocated_size`。
 - 已索引普通文件：`N=1`，大小为索引中的文件大小。
-- 已索引的特殊条目（symlink 等）：文件数与大小为 0，因为它不包含普通文件内容。
+- 已索引的特殊条目（FIFO、socket、设备文件等；symlink 参数已被解析为目标）：文件数与大小均为未知（表格 `-`，JSON/CSV `null`），与 `ls` 一致。扫描不记录它们自身的大小，不能显示为 0。
 - 已登记 namespace 内实际存在但尚未索引的目录：显示 `new`，文件数和大小为未知值；多路径查询仍保留其他已索引路径的汇总。其他未索引路径报错。
 
 表格列为 `S`、`SIZE(B)`（logical bytes）、`N`（文件数）、可用时的 `ALLOC(B)` 与 `PATH`（相对当前目录）。状态列与 `ls` 一样使用 `ok` / `new` / `part`，JSON/CSV 的 `status` 字段对应 `scanned` / `unscanned` / `incomplete`；`du` 不提供 `ls` 现场枚举得出的 `gone`。最近覆盖目标的 scope 为 completed 时显示 `ok`；最近覆盖它的 scan 未完成时，目录及其全部当前子目录都已在该 scan 中完整枚举才显示 `ok`（`--refresh-before` 扫描中改用子树 freshness 与 cutoff 比较）。目录的 `part` 状态可以附带最后已知聚合，但该值可能不完整或过期。
