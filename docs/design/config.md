@@ -1,6 +1,6 @@
 # 命令默认参数配置
 
-> 状态：0.2 已实现。配置使用既有 platformdirs 用户级目录中的 `config.toml`。
+> 状态：当前设计。配置使用 platformdirs 用户级目录中的 `config.toml`（Linux 通常为 `~/.config/flatlas`，Windows 通常为 `%LOCALAPPDATA%/flatlas`）；随代码更新。
 
 ## CLI 与文件格式
 
@@ -24,7 +24,7 @@ database = "/home/user/.local/share/flatlas/index.sqlite"
 refresh-before = "7d"
 ```
 
-键名按命令与长选项组织，为后续支持其他默认参数保留扩展方式。值支持既有 `scan --refresh-before` 的正整数固定时长与 ISO 8601 日期时间语法。设置时验证格式、未来时间与 SQLite signed-64 纳秒范围；文件手工编辑后的配置在使用时验证。相对时长保存原始字符串，在每次普通 scan 启动时解析为固定 cutoff，写入既有 `scan.refresh_before_ns` 字段。
+键名按命令与长选项组织。值支持既有 `scan --refresh-before` 的正整数固定时长与 ISO 8601 日期时间语法。设置时验证格式、未来时间与 SQLite signed-64 纳秒范围；文件手工编辑后的配置在使用时验证。相对时长保存原始字符串，在每次普通 scan 启动时解析为固定 cutoff，写入既有 `scan.refresh_before_ns` 字段。
 
 ## 优先级和扫描语义
 

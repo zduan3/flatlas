@@ -1,10 +1,8 @@
 # File Atlas (`flatlas`)
 
-跨 Windows/Linux 的持久化、只读文件系统索引工具。当前开发阶段是 0.2；已交付并冻结的 MVP（0.1）基线面向不跨文件系统的普通用户目录和归档目录，用于分析空间占用、定位最大文件和发现重复内容候选。扫描结果保存在 SQLite 中，可离线查询和导出，不会修改用户文件。0.2 正在此基础上完善索引、查询、扫描中断恢复和惰性 hash；规划能力不等同于当前 CLI 已实现能力。
+跨 Windows/Linux 的持久化、只读文件系统索引工具，面向不跨文件系统的普通用户目录和归档目录，用于分析空间占用、定位最大文件和发现重复内容候选。扫描结果保存在 SQLite 中，可离线查询和导出，不会修改用户文件。当前开发阶段是 0.2；已交付的 MVP（0.1）以 git tag `v0.1.0` 冻结。本文只描述当前已实现的行为。
 
-本文是面向日常使用的说明；架构、实现状态、验收与后续规划请从 [开发文档导航](docs/README.md) 进入。
-
-0.2 的范围摘要和专项设计见 [0.2 开发阶段总览](docs/plan/backlog.md)。
+本文是面向日常使用的说明；当前设计、开发计划与历史记录请从 [开发文档导航](docs/README.md) 进入，当前阶段的待办见 [backlog](docs/plan/backlog.md)。
 
 ## 安装
 
@@ -56,15 +54,17 @@ flatlas roots
 flatlas df
 flatlas scan PATH [--refresh-before VALUE | --full | --resume]
 flatlas scan --resume-from ID
-flatlas paths [PATH]
+flatlas scans [PATH] [--limit N] [--format table|json|csv]
+flatlas scan-info ID
+flatlas paths [PATH] [--limit N] [--format json|csv]
 flatlas rm PATH
 flatlas du [PATH ...] [--format table|json|csv]
 flatlas ls [PATH] [--format table|json|csv]
 flatlas largest [PATH] [-n N|--limit N] [--format table|json|csv]
-flatlas dupes [PATH] [--absolute] [--format table|json|csv]
-flatlas export dupes [PATH] [--absolute] --format json|csv --output PATH
+flatlas dupes [PATH] [--absolute] [--min-size B] [--max-size B] [--min-count N] [--min-savings B] [-n N] [--format table|json|csv]
+flatlas export dupes [PATH] [--absolute] [dupes 筛选参数] --format json|csv --output PATH
 flatlas plan create --root PATH
-flatlas plan show PLAN_ID
+flatlas plan show [PLAN_ID]
 ```
 
 在源码仓库或 editable 安装中，`flatlas --version` 同时显示当前 Git 提交、提交日期以及工作区是否为 `dirty`；无法访问 Git 元数据的安装包回退为只显示包版本。
@@ -86,13 +86,17 @@ flatlas config unset scan.refresh-before
 
 上述配置让普通 `scan` 只刷新从未完整扫描或最近完整扫描早于七天前的目录；相对时长在每次扫描启动时重新计算为固定 cutoff。也可保存 ISO 8601 时间，例如 `2026-01-01T00:00:00+08:00`。显式 `--refresh-before` 优先于配置，`--full` 临时执行完整扫描；移除配置后恢复默认完整扫描。`--resume` / `--resume-from` 继承历史扫描的固定 cutoff。`--full`、`--refresh-before`、`--resume`、`--resume-from` 互斥。
 
+## 中断扫描
+
+扫描过程中按 Ctrl-C 会停止遍历并保存已观测的数据，scan 记为 `cancelled`，不确认任何删除；保存阶段再按一次则放弃本次扫描。在 Linux 等 POSIX 系统上，`SIGTERM`（如批处理调度器终止作业）和 `SIGHUP`（如终端关闭或远程会话断开）按同样方式处理；在 `nohup` 下被忽略的 `SIGHUP` 仍保持忽略。之后可用 `flatlas scan PATH --resume` 或 `flatlas scan --resume-from ID` 继续，用 `flatlas scans` / `flatlas scan-info ID` 查看历史记录。进程被强制杀死（如 `SIGKILL`）时本次扫描整体回滚。行为细节见 [扫描与目录汇总](docs/design/scanning.md#中断与续扫)。
+
 `config` 可以在 `init` 前使用；读取或移除未设置的参数时无输出，读取返回退出码 0。配置命令不打开索引数据库，修改配置时保留已有数据库路径、其他字段和注释。配置默认值同样适用于显式指定 `--db` 的扫描。
 
 `config list` 按键名排序，以 `key = value` 列出已设置的命令默认参数；`config list -a`（`--all`）列出所有支持的参数，未设置的值显示为 `<unset>`。没有已设置的参数时，普通 `list` 无输出并返回退出码 0。
 
-## 当前已实现的 MVP（0.1）安全边界
+## 当前安全边界与能力
 
-- MVP（0.1）的测试基线是一个不跨文件系统、使用当前平台常规 Unicode 文件名的普通目录；非 UTF-8、完整长路径/reparse tag、复杂 mount 和物理共享空间语义留给后续版本。
+- 已验收的测试基线是一个不跨文件系统、使用当前平台常规 Unicode 文件名的普通目录；非 UTF-8、完整长路径/reparse tag、复杂 mount 和物理共享空间语义尚未支持。
 - 完整扫描与指定子树更新；仅在 scope 完整覆盖后将缺失路径标记为 `deleted`。
 - size → quick BLAKE3 → full BLAKE3 的重复候选检测；默认不跟随 symlink 或 Windows reparse point。
 - 支持路径、目录大小、最大文件、重复候选查询、JSON/CSV 导出和 dry-run plan。
@@ -111,7 +115,7 @@ flatlas config unset scan.refresh-before
 - `du PATH ...` 用于查询每个显式文件或目录 scope 的递归索引汇总；默认每个参数一行，即使源目录暂时离线仍可使用。
 - `largest PATH` 用于排序 PATH 子树中的最大单个普通文件。
 
-目录的 `part` / `gone` 状态可以附带最后已知聚合，但该值可能不完整或过期；未知必须显示为 `-` / `null`，不能伪装为 0。0.2 的查询演进规划见 [查询命令规划](docs/plan/proposals/query-cli.md)。
+目录的 `part` / `gone` 状态可以附带最后已知聚合，但该值可能不完整或过期；未知必须显示为 `-` / `null`，不能伪装为 0。各查询命令的详细行为见 [查询命令](docs/design/queries.md)。
 
 `SCANNED-THROUGH` 是当前已知目录子树中各目录最近成功完整枚举时间的最小值，并非不可变快照时间。表格按本地时区采用 GNU `ls -l` 风格：近六个月显示月、日和时分，更早或未来的时间显示月、日和年份。JSON/CSV 使用原始 UTC Unix 纳秒字段 `subtree_complete_through_ns`，文件和特殊条目为 `null` / 空值。
 
@@ -136,7 +140,7 @@ flatlas export dupes D:\Archive --min-size 1048576 --limit 20 --format json --ou
 ```
 
 - `--min-size` / `--max-size`：文件 logical size 的闭区间，默认不额外限制大小；在同大小候选选择和 hash 前生效，区间外文件不读取内容，也不显示已有缓存结果。0 B 和已知占用为 0 的文件仍排除。
-- `--min-count`：完整内容重复组至少包含的路径数，默认 2；当前仍按路径计数，尚未识别 hardlink alias。
+- `--min-count`：完整内容重复组至少包含的路径数，默认 2；按路径计数，不识别 hardlink alias（同一文件的多个 hardlink 分别计数）。
 - `--min-savings`：每组最小 theoretical logical savings，包含边界，默认 0；按 `logical_size × (count - 1)` 计算，不是实际物理可回收空间。
 - `--limit` / `-n`：筛选并排序后最多显示的组数，默认不限；按理论节省量降序、文件大小降序、算法与 digest 升序稳定排序，不截断组内成员。
 
@@ -149,8 +153,8 @@ flatlas dupes D:\Archive\Photos\2025
 jdupes -r D:\Archive\Photos\2025
 ```
 
-不要把 `flatlas export dupes` 的结果直接管道到删除命令。dry-run plan 也只是候选建议快照；MVP（0.1）没有 `apply`。
+不要把 `flatlas export dupes` 的结果直接管道到删除命令。dry-run plan 也只是候选建议快照；flatlas 没有 `apply`。
 
 ## 开发文档
 
-架构契约、当前实现记录、验收标准、路线图和调研资料均在[开发文档导航](docs/README.md)中分类；源码开发的环境准备和检查命令见[开发环境与依赖策略](docs/development.md)。
+当前设计、开发计划、历史记录和调研资料均在[开发文档导航](docs/README.md)中分类；源码开发的环境准备和检查命令见[开发环境与依赖策略](docs/development.md)。

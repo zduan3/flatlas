@@ -1,12 +1,12 @@
-# SQLite 数据库结构草案（MVP / 0.1）
+# SQLite 数据库结构
 
-> 状态：开发契约。定义持久化模型、迁移与查询约束。
+> 状态：当前设计。描述 schema v3（`db.SCHEMA_VERSION = 3`）的持久化模型、迁移与查询约束；随代码更新。
 
 ## 目标与范围
 
-本结构服务于只读 Python MVP（版本号 0.1）；本文中的“MVP”和“0.1”是同义词。它持久化根目录、当前路径状态、扫描覆盖、文件 metadata、哈希和 dry-run plan，支持先全量索引、后续仅扫描新增或变化子树、再与历史已索引文件查找重复候选的流程。
+本结构持久化根目录、当前路径状态、扫描覆盖、文件 metadata、目录汇总、哈希和 dry-run plan，支持先全量索引、后续仅扫描新增或变化子树、再与历史已索引文件查找重复候选的流程。
 
-本草案的基线决策是：**保存当前状态与扫描审计，不保存可查询的完整历史快照。** 每个路径保留最近一次确认状态；`scan`、`scan_scope` 和 `scan_error` 保留扫描是否完整及失败原因。未来如需历史快照，应添加独立 snapshot 表，而不是把当前状态表变成无界 observation 日志。
+基线决策是：**保存当前状态与扫描审计，不保存可查询的完整历史快照。** 每个路径保留最近一次确认状态；`scan`、`scan_scope` 和 `scan_error` 保留扫描是否完整及失败原因。未来如需历史快照，应添加独立 snapshot 表，而不是把当前状态表变成无界 observation 日志。
 
 SQLite 连接必须启用：
 
@@ -14,17 +14,20 @@ SQLite 连接必须启用：
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
 PRAGMA busy_timeout = 5000;
+PRAGMA cache_size = -262144;  -- 页缓存上限 256 MiB，按需分配
 ```
 
-所有时间均为 UTC Unix 纳秒（`*_ns`，`INTEGER`）。文件路径以 root-relative 原始字节存为 `BLOB`；Windows 0.1 将原生 Unicode 以固定 UTF-8 编码存入 BLOB，Linux 直接存 `os.fsencode()` 的结果。显示字符串只用于 UI/导出，不参与唯一性或路径比较。0.1 发布验收只覆盖当前平台可正常表示的常规 Unicode 路径；Linux 非 UTF-8 round-trip 留给后续版本，但 schema 的 BLOB 身份设计不得退化。
+默认 2 MiB 页缓存在索引变大后会让逐条 `path_key` 查找反复读取 B-tree 页，在网络文件系统上每次未命中都是远程读取；缓存按需分配，小索引不承担该上限。
+
+所有时间均为 UTC Unix 纳秒（`*_ns`，`INTEGER`）。文件路径以 root-relative 原始字节存为 `BLOB`；Windows 将原生 Unicode 以固定 UTF-8 编码存入 BLOB，Linux 直接存 `os.fsencode()` 的结果。显示字符串只用于 UI/导出，不参与唯一性或路径比较。已验收范围只覆盖当前平台可正常表示的常规 Unicode 路径；Linux 非 UTF-8 round-trip 尚未验收，但 schema 的 BLOB 身份设计不得退化。
 
 ## 路径编码与对象身份
 
 `path_key` 使用路径段原始字节以 `0x00` 分隔并以 `0x00` 结尾的编码。例如 `a/b.txt` 为 `b"a\\x00b.txt\\x00"`，根目录为零长度 blob。POSIX 路径段不能含 NUL，故该编码无歧义；它也不依赖 UTF-8。
 
-`device + inode`（以及平台适配器可提供时的 `object_id_raw`）只表示某次扫描中的文件对象观测，**不是跨历史永久对象 ID**。因 inode 或文件 ID 可以复用，复用 full hash 必须同时匹配文件身份、size、mtime 与全部可用的 change/birth 时间；严格模式还需重新读取内容。
+`device + inode`（以及平台适配器可提供时的 `object_id_raw`）只表示某次扫描中的文件对象观测，**不是跨历史永久对象 ID**。因 inode 或文件 ID 可以复用，复用 full hash 必须同时匹配文件身份、size、mtime 与全部可用的 change/birth 时间。Windows 无符号对象身份写入 SQLite 时映射到 signed-64 范围（大于 `2**63 - 1` 的值减去 `2**64`），保持稳定。
 
-`root` 是内部的 **scan namespace**，不是用户查询时必须选择的业务 root。Windows 通常是一块卷的盘符/挂载点，Linux 通常是 `/` 或单独挂载点；全局查询可跨全部 `root` 聚合。该边界仍不可移除，因为扫描 coverage、挂载策略和 future hardlink 的同文件系统限制都依赖它。
+`root` 是内部的 **scan namespace**，不是用户查询时必须选择的业务 root。Windows 通常是一块卷的盘符/挂载点，Linux 通常是 `/` 或单独挂载点；全局查询可跨全部 `root` 聚合。该边界不可移除，因为扫描 coverage、挂载策略和任何 hardlink 的同文件系统限制都依赖它。当前实现中 Windows namespace 为路径的盘符根，POSIX 为路径所在的最近挂载点；`namespace_id_raw` 与 `root_path_raw` 相同，`filesystem_type` 未采集。
 
 ## 实体关系
 
@@ -32,6 +35,7 @@ PRAGMA busy_timeout = 5000;
 root 1 ── * scan 1 ── * scan_scope
   │                 └── * scan_error
   ├── * path ── 0..1 file_hash
+  │          └── 0..1 directory_summary（目录与 root）
   └── * plan ── * plan_operation
 
 path.parent_path_id ── path.id
@@ -42,9 +46,12 @@ path.parent_path_id ── path.id
 - `scan_scope`：本次扫描申请覆盖的一个子树；只有它完整完成，才允许将该子树内未再次看到的路径标为删除。
 - `path`：每个 root-relative 目录项的**当前**状态，目录、常规文件、symlink 和其他类型都占一行。
 - `file_hash`：常规文件路径的当前 quick/full hash 及其计算依据。
-- `plan` / `plan_operation`：不可变的 dry-run 候选建议快照；0.1 只创建和导出，不执行，也不构成删除或替换授权。
+- `directory_summary`：每个当前 root 或普通目录的派生汇总与扫描 freshness，见 [扫描与目录汇总](scanning.md)。
+- `plan` / `plan_operation`：不可变的 dry-run 候选建议快照；只创建和导出，不执行，也不构成删除或替换授权。
 
-## MVP（0.1）DDL
+## DDL（schema v3）
+
+以下为语义等价的可读版本；实际语句见 `db.py` 的 `DDL` 与 `DIRECTORY_SUMMARY_MIGRATION`（均使用 `IF NOT EXISTS`）。
 
 ```sql
 PRAGMA application_id = 1179402580; -- "FLAT" 的固定项目标识
@@ -81,7 +88,8 @@ CREATE TABLE scan (
     files_seen         INTEGER NOT NULL DEFAULT 0,
     dirs_seen          INTEGER NOT NULL DEFAULT 0,
     errors_seen        INTEGER NOT NULL DEFAULT 0,
-    note               TEXT
+    note               TEXT,
+    refresh_before_ns  INTEGER  -- migration 3；--refresh-before 的固定 cutoff，普通扫描为 NULL
 );
 
 CREATE TABLE path (
@@ -194,13 +202,28 @@ CREATE TABLE plan_operation (
     UNIQUE (plan_id, replacement_path_id),
     CHECK (canonical_path_id <> replacement_path_id)
 );
+
+-- migration 2
+CREATE TABLE directory_summary (
+    path_id                      INTEGER PRIMARY KEY REFERENCES path(id) ON DELETE CASCADE,
+    direct_files                 INTEGER NOT NULL DEFAULT 0 CHECK (direct_files >= 0),
+    direct_logical_size          INTEGER NOT NULL DEFAULT 0 CHECK (direct_logical_size >= 0),
+    direct_allocated_size        INTEGER CHECK (direct_allocated_size IS NULL OR direct_allocated_size >= 0),
+    subtree_files                INTEGER NOT NULL DEFAULT 0 CHECK (subtree_files >= 0),
+    subtree_logical_size         INTEGER NOT NULL DEFAULT 0 CHECK (subtree_logical_size >= 0),
+    subtree_allocated_size       INTEGER CHECK (subtree_allocated_size IS NULL OR subtree_allocated_size >= 0),
+    self_completed_at_ns         INTEGER,
+    subtree_complete_through_ns  INTEGER,
+    last_completed_scan_id       INTEGER REFERENCES scan(id),
+    updated_at_ns                INTEGER NOT NULL
+);
 ```
 
 `path.deleted_by_scope_id` 引用了定义在后面的 `scan_scope`。SQLite 允许外键目标表在 `CREATE TABLE` 时尚未创建；也可在 migration 中先创建 `scan_scope`，再创建 `path` 以方便阅读。
 
 `namespace_id_raw` 在 Windows 可保存 Volume GUID 的标准化字节形式，在 Linux 可保存挂载实例/设备身份的适配器值；无法可靠取得时允许为 `NULL`，此时 `root_path_raw` 仍是 namespace 的稳定键。`object_id_raw` 同理：Windows 适配器可保存文件 ID，纯 Python 无法可靠提供时为 `NULL`，再使用 `device` / `inode` 与时间 metadata 进行保守判断。
 
-`reparse_tag` 仅 Windows 使用，用来区分 junction、symlink 和其他 reparse point；Linux 保持 `NULL`。0.1 默认不跟随 `symlink` 或 `reparse`。POSIX FIFO、socket、device 等存为 `other`，不建立 `file_hash`；完整 reparse tag 采集不作为 0.1 发布门槛。
+`reparse_tag` 预留给 Windows 区分 junction、symlink 和其他 reparse point；当前扫描不写入该列，reparse point 只按文件属性记为 `reparse`。默认不跟随 `symlink` 或 `reparse`。POSIX FIFO、socket、device 等存为 `other`，不建立 `file_hash`。`scan_error.operation` 的 `readlink`、`hash_quick`、`hash_full` 为预留值：当前 readlink 失败只令 `symlink_target_raw` 为 `NULL`，hash 错误写入 `file_hash.error_message`。
 
 ## 索引
 
@@ -210,29 +233,30 @@ CREATE INDEX idx_scope_scan_status ON scan_scope(scan_id, status);
 CREATE INDEX idx_path_root_parent_live ON path(root_id, parent_path_id, state);
 CREATE INDEX idx_path_root_kind_size_live ON path(root_id, entry_kind, logical_size)
     WHERE state = 'present' AND entry_kind = 'file';
-CREATE INDEX idx_path_last_seen ON path(root_id, last_seen_scan_id);
 CREATE INDEX idx_hash_quick ON file_hash(quick_algorithm, quick_digest)
     WHERE state IN ('quick_ready', 'full_ready');
 CREATE INDEX idx_hash_full ON file_hash(full_algorithm, full_digest)
     WHERE state = 'full_ready';
 CREATE INDEX idx_plan_root_created ON plan(root_id, created_at_ns DESC);
-CREATE INDEX idx_plan_operation_plan_status ON plan_operation(plan_id, status);
+-- migration 2
+CREATE INDEX idx_directory_summary_freshness
+    ON directory_summary(self_completed_at_ns, subtree_complete_through_ns);
 ```
 
 `path_key` 的唯一索引用于稳定地 upsert 路径；`parent_path_id` 使目录浏览和递归 CTE 能准确定位一个 scope 的后代，而无需依赖二进制前缀匹配。
 
 ## 扫描与删除语义
 
-每个扫描在一个事务中按下列规则写入：
+每个扫描在一个事务中按下列规则写入（完整流程、刷新扫描与中断语义见 [扫描与目录汇总](scanning.md)）：
 
-1. 创建 `scan(status='running')`，并为全根或请求的每个子树创建 `scan_scope(status='running')`。
+1. 创建 `scan(status='running')`，并为请求的 namespace root 或子树创建一个 `scan_scope(status='running')`；目标即 namespace 根时 `scan.kind='full'`，否则为 `subtree`。
 2. 枚举到路径时，以 `(root_id, path_key)` upsert `path`，更新 metadata、`state='present'` 和 `last_seen_scan_id`。Windows 使用 UTF-8 编码的原生 Unicode path；Linux 保留原始字节。任何已用于 hash 的 identity、size、mtime、change/birth time 变化或不可可靠比较时，将对应 `file_hash.state` 标记为 `stale`。
 3. scan 不读取普通文件内容，也不创建新的 `file_hash`。已有 hash 的依据随 metadata 变化时标为 `stale`。
 4. 遍历或 stat 失败时插入 `scan_error`，并将 scope 标为 `partial` 或 `failed`。
 5. **仅当某个 `scan_scope.status='completed'` 时**，利用 `parent_path_id` 的递归 CTE 找到该 scope 后代，将其中 `last_seen_scan_id <> 当前 scan` 的 `present` 路径更新为 `deleted`，再填充 `deleted_by_scope_id` 与 `deleted_at_ns`。
 6. scope 只要是 `partial`、`failed` 或 `cancelled`，绝不依据本次扫描修改任何旧路径为 `deleted`。最后才汇总 `scan.status`。
 
-这满足 0.1 的关键验收：中断扫描、权限错误和扫描中改名均不得被解释为“文件已删除”。`deleted` 行暂不物理清理，保留至手动维护任务或保留策略落地。
+这满足关键安全要求：中断扫描、权限错误和扫描中改名均不得被解释为“文件已删除”。`deleted` 行不自动物理清理；只有显式 `flatlas rm PATH` 会从索引中物理删除路径行及其 hash。
 
 删除状态的用户可见流程如下：
 
@@ -252,10 +276,6 @@ CREATE INDEX idx_plan_operation_plan_status ON plan_operation(plan_id, status);
 
 quick hash 只用于缩小候选集；重复组必须以相同 `logical_size`、`full_algorithm` 和 `full_digest` 查询，并限制路径和 hash 都仍为当前有效状态：
 
-0.1 在执行 `dupes PATH` 时先用单次范围查询选出 PATH 后代中 size 大于 0 且计数大于 1 的普通文件，再按 size → quick → full 补齐 hash。0 B 文件不进入候选、不计算 hash、也不显示为重复组。小文件的 quick 读取覆盖全文，可直接写为 `full_ready`；大文件只有 quick 相同才读取全文。每次打开文件后在读取前后使用 `fstat` 与索引依据比较，变化或错误只会使该文件成为 stale/failed 并令结果不完整，不会改变 scan coverage。完成的 hash 按批提交，后续查询可保守复用。
-
-Windows 上 Python 的 `st_ctime` 不提供稳定的 POSIX change-time 语义，因此 `change_time_ns` 不参与 hash basis；`mtime_ns`、可用的 `birth_time_ns`、对象身份和 size 仍必须一致。Linux 上可靠的 `st_ctime_ns` 继续参与校验。
-
 ```sql
 SELECT h.full_algorithm, h.full_digest, p.logical_size,
        group_concat(p.path_display, char(10)) AS paths
@@ -268,19 +288,36 @@ GROUP BY h.full_algorithm, h.full_digest, p.logical_size
 HAVING count(*) > 1;
 ```
 
-0.1 的 `full_verification` 写入 `hash_only`，因此重复组只是清理候选。未来任何 apply 都必须重新扫描和验证 metadata 与内容；安全模式应将最终逐字节比较成功记为 `byte_compare`，不得仅凭历史 hash 创建链接或删除文件。0.1 的缓存只在文件身份、size、mtime 和全部可用且可靠的 change/birth time 匹配时复用；平台最低可靠 basis 在执行器设计前必须进一步明确。
+`file_hash` 的写入时机、metadata basis 校验、批量提交与 dupes 筛选见 [惰性 Hash 与重复候选](hashing.md)。Windows 上 Python 的 `st_ctime` 不提供稳定的 POSIX change-time 语义，因此 `change_time_ns` 与 `basis_change_time_ns` 在 Windows 为 `NULL`、不参与 hash basis；`mtime_ns`、可用的 `birth_time_ns`、对象身份和 size 仍必须一致。Linux 上可靠的 `st_ctime_ns` 参与校验。
 
-## Plan 不可变性与后续执行
+`full_verification` 当前只写入 `hash_only`，因此重复组只是清理候选；`byte_compare` 为预留值，当前没有逐字节比较。
 
-0.1 只能创建 `draft` / `dry_run` plan。一旦设置 `immutable_at_ns`，应用层不得更新 `policy_json`、操作目标、预期 size 或 digest；变更必须创建新 plan，并将旧 plan 标为 `superseded`。plan 是候选建议快照，不表示其操作已安全验证。
+## Plan 不可变性
 
-未来安全执行器阶段才允许写入 `applied`、`partially_applied` 或 `failed` 状态，并应新增 `operation_attempt` 审计表来记录执行前复核、临时重命名、错误与恢复。`action` 中预留 `hardlink` / `reflink` / `delete` 不代表它们属于 0.1。
+当前只创建 `dry_run` plan，并在创建时同时设置 `created_at_ns` 与 `immutable_at_ns`。一旦设置 `immutable_at_ns`，应用层不得更新 `policy_json`、操作目标、预期 size 或 digest；变更必须创建新 plan，并将旧 plan 标为 `superseded`。plan 是候选建议快照，不表示其操作已安全验证。
 
-## 待确认的设计点
+`plan.status` 的 `draft`、`applied`、`partially_applied`、`failed`，`plan_operation.status` 的 `applied`、`failed`，以及 `action` 的 `reflink` / `delete` 均为预留值，当前代码不写入；flatlas 没有 apply。显式 `rm PATH` 若移除被 plan 引用的路径，会连同引用它的整个 plan 一起删除。
 
-- Windows Volume GUID / reparse tag 和 Linux mount/bind mount 的适配器实现细节；本草案已确定字段和空值语义。
-- `allocated_size` 的采集方式和跨文件系统可比性；报告时必须与 logical size 分开。
-- quick hash 的首尾采样大小、短文件规则和 hash I/O 调度。
-- `config_json` / `policy_json` 的正式 schema 与版本化规则。
-- deleted path 的保留时长、历史 snapshot 是否在阶段 2 引入。
-- symlink、mount point、bind mount 与硬链接组的扫描策略。
+## Migration 历史
+
+`schema_migration` 每行记录一个已提交的版本。已发布 migration 的语义不可修改；新增 schema 变更时提高版本号，只做向前迁移，并保留既有数据，不通过删表、重建或清空数据库实现升级。
+
+| 版本 | 说明（`description`） | 内容 |
+|---|---|---|
+| 1 | `initial persistent index schema` | 初始 schema：root、scan、scan_scope、path、scan_error、file_hash、plan、plan_operation 与索引；设置 `application_id` |
+| 2 | `cache directory usage and scan freshness` | 原地创建 `directory_summary` 与 freshness 索引，并为全部 root 回填当前目录汇总 |
+| 3 | `record directory refresh cutoff` | 为 `scan` 增加可空 `refresh_before_ns`（列已存在时只写版本记录） |
+
+migration 2 回填既有索引时，历史完成时间只从覆盖相应目录的 completed `scan_scope` 保守恢复；partial、failed 或 cancelled scope 不用于推断完整时间。migration 不重建或清空现有 root、path、scan、error、hash 或 plan 数据。
+
+migration 3 记录 `--refresh-before` 解析后的固定 UTC Unix 纳秒时间点。既有普通扫描保留为 `NULL`，迁移不修改 scan、scope、path、error、hash 或 plan 的既有数据。
+
+### 执行机制
+
+连接先只读检查 `schema_migration` 是否包含当前所需的全部版本；满足要求时跳过全部 migration 写操作，包括 application ID 设置和 DDL。已有 WAL 数据库也不重复设置 journal mode，因此扫描持有写事务时，`ls` 等查询可以读取已提交的索引。只有缺少迁移版本时才以 `BEGIN IMMEDIATE` 获取写锁，并在锁内重新检查版本，避免并发打开重复升级。待执行的 schema、回填数据与版本记录在同一事务中提交，失败则一起回滚；DDL 逐条执行而不用 `executescript`，以免隐式提交释放写锁。两个扫描仍会竞争同一数据库的写锁。
+
+CLI 打开已有数据库并检测到待执行 migration 时，先在 stderr 输出 migration 版本与说明。目录回填期间交互式终端原地显示“已完成目录数 / 总目录数”，非交互式调用按进度里程碑输出；提交 migration 版本记录后再显示完成提示。stdout 不混入 migration 信息，以保持 JSON/CSV 可解析。新建空数据库的 schema 初始化默认静默。migration 中断时不写完成版本，下次打开数据库可幂等重试。
+
+回归测试覆盖扫描 A 时查询 B、当前 schema 的只读检查、待迁移时的写锁竞争、并发打开后的版本复查，以及迁移故障回滚和重试。这些测试可在 Windows/Linux CI 运行；Windows 本地结果不能替代 Linux 验证。
+
+未决的 schema 设计点见 [待决策清单](../plan/decisions.md)。
