@@ -50,8 +50,8 @@ flatlas config set scan.refresh-before VALUE
 flatlas config get scan.refresh-before
 flatlas config unset scan.refresh-before
 flatlas config list [-a|--all]
-flatlas roots
-flatlas df
+flatlas roots [-h]
+flatlas df [-h] [-T] [FILE ...]
 flatlas scan PATH [--refresh-before VALUE | --full | --resume]
 flatlas scan --resume-from ID
 flatlas scans [PATH] [--limit N] [--format table|json|csv]
@@ -100,7 +100,8 @@ flatlas config unset scan.refresh-before
 - 完整扫描与指定子树更新；仅在 scope 完整覆盖后将缺失路径标记为 `deleted`。
 - size → quick BLAKE3 → full BLAKE3 的重复候选检测；默认不跟随 symlink 或 Windows reparse point。
 - 支持路径、目录大小、最大文件、重复候选查询、JSON/CSV 导出和 dry-run plan。
-- `roots` 及其别名 `df` 默认以 GNU `df` 风格表格显示 registered filesystem 的实时容量；不可访问的容量明确显示为未知。
+- `roots` 只读索引，显示各 registered namespace 的文件系统类型、元数据方式（Lustre 为 lazy）、已索引文件数与大小和最近一次扫描。
+- `df [FILE ...]` 贴近 GNU `df` 实时显示容量：给出 FILE 时对 FILE 本身查询（Lustre project quota 下即显示项目配额），无参数时列出 registered namespace；支持 `-h`、`-T`，不可访问的容量显示为未知。
 - `du` 默认输出带表头且按列对齐的汇总，包含逻辑字节数、文件数、可用时的实际分配字节数和相对路径；紧凑表头使用 `SIZE(B)`、`N` 和 `ALLOC(B)`。
 - `du` 可同时接受多个文件或目录路径，因此也能处理 shell 或启动器提前展开后的通配结果。
 - `ls -h [PATH]` 和 `du -h [PATH ...]`（长选项 `--human-readable`）以 1024 进制的 `K`、`M`、`G`、`T` 显示表格大小，保留至多一位小数；小于 1024 的值仍显示字节整数，未知值显示 `-`。大小表头省略 `(B)`，文件数不缩放，JSON/CSV 仍输出原始字节整数。

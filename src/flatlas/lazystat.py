@@ -130,37 +130,3 @@ def lazy_lstat(path: Path) -> os.stat_result | LazyStat:
         st_mtime_ns=_ns(buffer.stx_mtime),
         st_ctime_ns=_ns(buffer.stx_ctime),
     )
-
-
-def _unescape_mount_field(value: str) -> str:
-    # /proc mount tables escape space, tab, newline and backslash as \ooo.
-    out, index = [], 0
-    while index < len(value):
-        if value[index] == "\\" and index + 3 < len(value) and value[index + 1:index + 4].isdigit():
-            out.append(chr(int(value[index + 1:index + 4], 8)))
-            index += 4
-        else:
-            out.append(value[index])
-            index += 1
-    return "".join(out)
-
-
-def filesystem_type(mount_point: Path, mounts: Path = Path("/proc/self/mounts")) -> str | None:
-    """Return the type of the filesystem mounted exactly at ``mount_point``.
-
-    The last matching entry wins because later mounts shadow earlier ones.
-    Returns ``None`` off Linux or when the table is unreadable or has no entry.
-    """
-    if not sys.platform.startswith("linux") and mounts == Path("/proc/self/mounts"):
-        return None
-    try:
-        lines = mounts.read_text(encoding="utf-8", errors="surrogateescape").splitlines()
-    except OSError:
-        return None
-    target = str(mount_point)
-    found = None
-    for line in lines:
-        fields = line.split()
-        if len(fields) >= 3 and _unescape_mount_field(fields[1]) == target:
-            found = fields[2]
-    return found

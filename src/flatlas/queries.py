@@ -12,50 +12,106 @@ from typing import Any
 from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError
 from flatlas.lazystat import LUSTRE
+from flatlas.mounts import mount_entry
 from flatlas.paths import _scope_row, discover_namespace, get_root, path_key
 from flatlas.scanning import Observation, _observation
 
 
 def list_roots(connection: sqlite3.Connection) -> list[dict[str, Any]]:
-    return [dict(row) for row in connection.execute("SELECT id, root_path_display, platform, namespace_kind, enabled FROM root ORDER BY id")]
+    """Registered namespaces as recorded in the index; never touches the filesystem.
 
-
-def filesystem_usage(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    ``metadata`` is the mode the scanner will use for the root (``lazy`` for
+    Lustre, otherwise ``exact``). Indexed totals come from the namespace root's
+    directory summary and are ``None`` until something under it was scanned.
+    """
     rows = connection.execute(
-        """SELECT id, root_path_display, platform, namespace_kind, filesystem_type, enabled
-        FROM root ORDER BY root_path_display"""
-    )
-    result = []
-    for row in rows:
-        try:
-            usage = shutil.disk_usage(row["root_path_display"])
-        except OSError:
-            total = used = available = use_percent = None
-            status = "unavailable"
-        else:
-            total = _blocks_1k(usage.total)
-            used = _blocks_1k(usage.used)
-            available = _blocks_1k(usage.free)
-            use_percent = 0 if usage.total == 0 else min(100, (usage.used * 100 + usage.total - 1) // usage.total)
-            status = "ok" if row["enabled"] else "disabled"
-        result.append(
-            {
-                "id": row["id"],
-                "root_path_display": row["root_path_display"],
-                "platform": row["platform"],
-                "namespace_kind": row["namespace_kind"],
-                "enabled": bool(row["enabled"]),
-                "filesystem": row["root_path_display"],
-                "filesystem_type": row["filesystem_type"],
-                "blocks_1k": total,
-                "used_1k": used,
-                "available_1k": available,
-                "use_percent": use_percent,
-                "mounted_on": row["root_path_display"],
-                "status": status,
-            }
-        )
-    return result
+        """SELECT r.id, r.root_path_display, r.platform, r.namespace_kind, r.filesystem_type,
+                  r.enabled, r.created_at_ns, r.updated_at_ns,
+                  ds.subtree_files, ds.subtree_logical_size, ds.subtree_allocated_size,
+                  s.id AS last_scan_id, s.status AS last_scan_status,
+                  s.started_at_ns AS last_scan_started_at_ns,
+                  s.finished_at_ns AS last_scan_finished_at_ns
+           FROM root r
+           LEFT JOIN path p ON p.root_id=r.id AND p.parent_path_id IS NULL
+                AND p.entry_kind='root' AND p.state='present'
+           LEFT JOIN directory_summary ds ON ds.path_id=p.id
+           LEFT JOIN scan s ON s.id=(SELECT max(id) FROM scan WHERE root_id=r.id)
+           ORDER BY r.id"""
+    ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "root_path_display": row["root_path_display"],
+            "platform": row["platform"],
+            "namespace_kind": row["namespace_kind"],
+            "filesystem_type": row["filesystem_type"],
+            "metadata": "lazy" if row["filesystem_type"] == LUSTRE else "exact",
+            "enabled": bool(row["enabled"]),
+            "created_at_ns": row["created_at_ns"],
+            "updated_at_ns": row["updated_at_ns"],
+            "files": row["subtree_files"],
+            "logical_size": row["subtree_logical_size"],
+            "allocated_size": row["subtree_allocated_size"],
+            "last_scan_id": row["last_scan_id"],
+            "last_scan_status": row["last_scan_status"],
+            "last_scan_started_at_ns": row["last_scan_started_at_ns"],
+            "last_scan_finished_at_ns": row["last_scan_finished_at_ns"],
+        }
+        for row in rows
+    ]
+
+
+def _usage_row(mount_point: Path, *, statfs_path: Path | None = None, status_when_ok: str = "ok") -> dict[str, Any]:
+    entry = mount_entry(mount_point)
+    try:
+        # Like GNU df, query the given FILE itself rather than its mount point:
+        # filesystems with directory quotas (Lustre project quotas, for one)
+        # answer statfs with the quota that applies to that directory.
+        usage = shutil.disk_usage(statfs_path or mount_point)
+    except OSError:
+        total = used = available = use_percent = None
+        status = "unavailable"
+    else:
+        # shutil reports used = f_blocks - f_bfree and free = f_bavail, the same
+        # quantities GNU df prints as Used and Available. GNU df computes Use%
+        # against used + available (space usable by unprivileged users),
+        # rounded up, not against the total.
+        total = _blocks_1k(usage.total)
+        used = _blocks_1k(usage.used)
+        available = _blocks_1k(usage.free)
+        usable = usage.used + usage.free
+        use_percent = None if usable == 0 else -(-usage.used * 100 // usable)
+        status = status_when_ok
+    return {
+        "filesystem": str(mount_point) if entry is None else entry.source,
+        "type": None if entry is None else entry.fstype,
+        "blocks_1k": total,
+        "used_1k": used,
+        "available_1k": available,
+        "use_percent": use_percent,
+        "mounted_on": str(mount_point),
+        "status": status,
+    }
+
+
+def filesystem_usage(
+    connection: sqlite3.Connection | None = None,
+    files: list[Path] | None = None,
+) -> list[dict[str, Any]]:
+    """Live capacity in the shape of GNU ``df``.
+
+    With ``files``, report the filesystem containing each one (registration is
+    not required). Without, report every registered namespace from the index.
+    """
+    if files:
+        return [_usage_row(discover_namespace(value).path, statfs_path=value) for value in files]
+    if connection is None:
+        raise ValueError("a connection is required when no files are given")
+    rows = connection.execute("SELECT root_path_display, enabled FROM root ORDER BY root_path_display")
+    return [
+        _usage_row(Path(row["root_path_display"]), status_when_ok="ok" if row["enabled"] else "disabled")
+        for row in rows
+    ]
 
 
 def _blocks_1k(byte_count: int) -> int:

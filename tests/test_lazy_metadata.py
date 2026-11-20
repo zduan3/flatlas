@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from flatlas import lazystat, paths, scanning
+from flatlas import lazystat, mounts, paths, scanning
 from flatlas.core import (
     discover_namespace,
     open_database,
@@ -33,10 +33,10 @@ def test_filesystem_type_matches_exact_mount_point_and_last_entry_wins(tmp_path:
         "tmpfs /lustre/fs1/sub tmpfs rw 0 0",
         r"tmpfs /mnt/with\040space ext4 rw 0 0",
     )
-    assert lazystat.filesystem_type(Path("/lustre/fs1"), table) == "lustre"
-    assert lazystat.filesystem_type(Path("/lustre"), table) is None
-    assert lazystat.filesystem_type(Path("/mnt/with space"), table) == "ext4"
-    assert lazystat.filesystem_type(Path("/x"), tmp_path / "missing") is None
+    assert mounts.filesystem_type(Path("/lustre/fs1"), table) == "lustre"
+    assert mounts.filesystem_type(Path("/lustre"), table) is None
+    assert mounts.filesystem_type(Path("/mnt/with space"), table) == "ext4"
+    assert mounts.filesystem_type(Path("/x"), tmp_path / "missing") is None
 
 
 @pytest.mark.db
@@ -122,7 +122,7 @@ def test_scan_uses_lazy_metadata_only_for_lustre_roots(tmp_path: Path, monkeypat
 
 @pytest.mark.skipif(sys.platform != "linux", reason="reads /proc/self/mounts")
 def test_filesystem_type_reads_live_mount_table() -> None:
-    root_type = lazystat.filesystem_type(Path("/"))
+    root_type = mounts.filesystem_type(Path("/"))
     assert root_type is None or isinstance(root_type, str)
 
 
