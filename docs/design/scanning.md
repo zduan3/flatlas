@@ -16,7 +16,16 @@
 - 扫描器把已知的父目录行 id 直接传给子条目的 upsert，不再逐条按 `path_key` 查找父目录；非目录条目不执行无效的 `directory_summary` 删除，非文件条目不执行无效的 `file_hash` 失效更新。
 - SQLite 页缓存上限为 256 MiB（按需分配），避免大索引在逐条查找时反复读取 B-tree 页。
 
-在 Lustre 等网络文件系统上，每个条目首次 stat 的延迟是扫描的主要成本，实测见 [平台差异](platform.md#linux--lustre)。`tests/test_scan_costs.py` 覆盖只调用一次 `lstat`、父目录关联正确，以及类型变化时仍会清除汇总并让 hash 失效。
+### Lustre 上的 lazy 元数据
+
+`init` 登记 root 时从 `/proc/self/mounts` 读取挂载点的文件系统类型，写入 `root.filesystem_type`；对已有 root 再次执行 `init` 会刷新该值，检测不到时不覆盖已有记录。扫描读取所属 root 的类型：
+
+- `filesystem_type = 'lustre'` 时，把这一次 `lstat` 换成 `statx(AT_SYMLINK_NOFOLLOW | AT_STATX_DONT_SYNC)`（`flatlas.lazystat`），读取 MDT 上已有的 size 与时间，不向 OST 同步文件大小；该 scan 的 `scanner_version` 带 `+lazy-statx` 后缀。`ls` 的现场条目检查同样使用 lazy 方式。
+- 普通文件返回 size > 0 但 blocks = 0 时，改用精确 `lstat`：没有 size-on-MDT 记录（`lfs getsom` 返回 ENODATA）的文件会得到占位值。
+- `statx` 不可用（非 Linux、glibc < 2.28 或 `ENOSYS`）时回退到 `lstat`。
+- 正在写入的文件，其 lazy size 与 mtime 可能滞后。这只影响索引中的估计值：hash 在打开文件后以 `fstat` 重验 basis，不一致的文件成为 stale，不会进入重复组。coverage、错误处理与删除确认规则不受影响。
+
+每个条目首次 stat 的延迟是网络文件系统上扫描的主要成本，实测见 [平台差异](platform.md#linux--lustre)。`tests/test_scan_costs.py` 覆盖只调用一次 `lstat`、父目录关联正确，以及类型变化时仍会清除汇总并让 hash 失效。
 
 ## 目录汇总缓存
 
@@ -89,4 +98,4 @@ CLI 在 POSIX 上把 `SIGTERM`（批处理调度器终止作业前发送）和 `
 - deleted 行保留在 SQLite，不参与 `paths`、`du`、`largest` 或 `dupes` 的当前状态结果；同一路径重新出现并被扫描时恢复为 present，旧 hash 在 metadata basis 不匹配时变为 stale。
 - `ls` 现场发现缺失只显示 `gone`，不写数据库。
 
-相关提案：[扫描短事务 checkpoint 与崩溃恢复](../plan/proposals/scan-checkpoint.md)、[lazy 元数据](../plan/proposals/lazy-metadata.md)、[浅扫描与增量刷新](../plan/proposals/incremental-refresh.md)。
+相关提案：[扫描短事务 checkpoint 与崩溃恢复](../plan/proposals/scan-checkpoint.md)、[浅扫描与增量刷新](../plan/proposals/incremental-refresh.md)。

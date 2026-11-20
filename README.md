@@ -24,7 +24,7 @@ flatlas --help
 
 ## 首次使用
 
-`init` 仅登记当前路径所属的文件系统 namespace，不会遍历或扫描文件。配置在用户级目录，Linux 通常为 `~/.config/flatlas`，Windows 通常为 `%LOCALAPPDATA%/flatlas`；索引数据库独立于项目目录。
+`init` 仅登记当前路径所属的文件系统 namespace，不会遍历或扫描文件；Linux 上同时记录挂载点的文件系统类型，Lustre 上的扫描据此使用 lazy 元数据（大幅减少对存储服务器的请求，正在写入的文件大小可能滞后）。配置在用户级目录，Linux 通常为 `~/.config/flatlas`，Windows 通常为 `%LOCALAPPDATA%/flatlas`；索引数据库独立于项目目录。
 
 ```powershell
 flatlas init D:\Archive

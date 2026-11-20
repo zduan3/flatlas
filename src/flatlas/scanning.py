@@ -14,6 +14,7 @@ from typing import Any
 from flatlas.allocation import allocated_size
 from flatlas.db import _last_insert_id, now_ns
 from flatlas.errors import FlatlasError
+from flatlas.lazystat import LUSTRE, lazy_lstat
 from flatlas.paths import (
     Namespace,
     _sqlite_integer,
@@ -25,6 +26,7 @@ from flatlas.paths import (
 from flatlas.summaries import refresh_directory_summaries
 
 SCANNER_VERSION = "flatlas-python-0.2"
+LAZY_SCANNER_SUFFIX = "+lazy-statx"
 
 
 @dataclass(frozen=True)
@@ -64,13 +66,14 @@ class ResumeSelection:
     scope: Path
 
 
-def _observation(namespace: Namespace, value: Path, *, root: bool = False) -> Observation:
+def _observation(namespace: Namespace, value: Path, *, root: bool = False, lazy: bool = False) -> Observation:
     # Classify from this single lstat. Extra islink/is_dir/is_file probes would
     # repeat the metadata request per entry, which is the dominant scan cost on
     # network filesystems such as Lustre. lstat never follows the final link, so
     # S_ISDIR/S_ISREG here match the former is_dir()/is_file() after the symlink
-    # check.
-    stat = value.lstat()
+    # check. ``lazy`` (Lustre roots) reads metadata without forcing a size
+    # resynchronisation; see flatlas.lazystat.
+    stat = lazy_lstat(value) if lazy else value.lstat()
     mode = stat.st_mode
     reparse = bool(getattr(stat, "st_file_attributes", 0) & getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
     if root:
@@ -201,7 +204,15 @@ def _record_error(connection: sqlite3.Connection, scope_id: int, key: bytes, ope
     connection.execute("UPDATE scan_scope SET error_count = error_count + 1 WHERE id = ?", (scope_id,))
 
 
-def _ensure_ancestors(connection: sqlite3.Connection, namespace: Namespace, root_id: int, scan_id: int, scope: Path) -> int:
+def _ensure_ancestors(
+    connection: sqlite3.Connection,
+    namespace: Namespace,
+    root_id: int,
+    scan_id: int,
+    scope: Path,
+    *,
+    lazy: bool = False,
+) -> int:
     values = [namespace.path]
     relative = scope.relative_to(namespace.path)
     current = namespace.path
@@ -211,7 +222,7 @@ def _ensure_ancestors(connection: sqlite3.Connection, namespace: Namespace, root
     scope_id = -1
     parent_id: int | None = None
     for index, value in enumerate(values):
-        observed = _observation(namespace, value, root=index == 0)
+        observed = _observation(namespace, value, root=index == 0, lazy=lazy)
         scope_id = upsert_path(connection, root_id, scan_id, observed, parent_id=parent_id)
         parent_id = scope_id
     return scope_id
@@ -361,6 +372,7 @@ def scan_directory(
     if not scope.is_dir():
         raise FlatlasError(f"scan path must be a directory: {scope}")
     root_id = int(root["id"])
+    lazy = root["filesystem_type"] == LUSTRE
     kind = "full" if scope == namespace.path else "subtree"
     started = now_ns()
     if refresh_before_ns is not None and refresh_before_ns > started:
@@ -370,14 +382,14 @@ def scan_directory(
         scan_id = _last_insert_id(connection.execute(
             """INSERT INTO scan(root_id, kind, status, started_at_ns, scanner_version, refresh_before_ns)
                VALUES (?, ?, 'running', ?, ?, ?)""",
-            (root_id, kind, started, SCANNER_VERSION, refresh_before_ns),
+            (root_id, kind, started, SCANNER_VERSION + (LAZY_SCANNER_SUFFIX if lazy else ""), refresh_before_ns),
         ))
         scope_id = _last_insert_id(connection.execute(
             "INSERT INTO scan_scope(scan_id, root_id, scope_path_key, status, started_at_ns) VALUES (?, ?, ?, 'running', ?)",
             (scan_id, root_id, scope_key, started),
         ))
         try:
-            scope_path_id = _ensure_ancestors(connection, namespace, root_id, scan_id, scope)
+            scope_path_id = _ensure_ancestors(connection, namespace, root_id, scan_id, scope, lazy=lazy)
         except OSError as exc:
             _record_error(connection, scope_id, scope_key, "stat", exc)
             connection.execute("UPDATE scan_scope SET status='failed', finished_at_ns=? WHERE id=?", (now_ns(), scope_id))
@@ -435,7 +447,7 @@ def scan_directory(
                             continue
                         child_path = Path(str(child["path_display"]))
                         try:
-                            child_observed = _observation(namespace, child_path)
+                            child_observed = _observation(namespace, child_path, lazy=lazy)
                         except FileNotFoundError:
                             # The child was known when the parent was last
                             # enumerated. Re-enumerate the parent before
@@ -469,7 +481,7 @@ def scan_directory(
             for entry in entries:
                 entry_path = Path(entry.path)
                 try:
-                    observed = _observation(namespace, entry_path)
+                    observed = _observation(namespace, entry_path, lazy=lazy)
                 except OSError as exc:
                     _record_error(connection, scope_id, path_key(namespace, entry_path), "stat", exc)
                     failed = True

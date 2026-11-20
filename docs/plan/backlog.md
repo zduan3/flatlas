@@ -10,42 +10,37 @@
 
 ## 待办（按优先级）
 
-1. **lazy 元数据（Linux `statx` `AT_STATX_DONT_SYNC`）**
-   目标：Linux 扫描以 lazy `statx` 取代冷 `lstat`。
-   原因：Lustre 上约 130 万 inode 的全量扫描用 `lstat` 估计需 4.5–11 小时，lazy 约 5 分钟；扫描时间几乎全部花在首次 stat 上（[实测](../design/platform.md#linux--lustre)）。
-   → [proposals/lazy-metadata.md](proposals/lazy-metadata.md)
-
-2. **扫描短事务 checkpoint 与崩溃恢复**
+1. **扫描短事务 checkpoint 与崩溃恢复**
    目标：扫描按批次提交并持久化工作队列，崩溃或 `SIGKILL` 后可续扫。
    原因：当前单事务扫描在收尾阶段中断、崩溃或调度器宽限期后被杀时整体回滚，长扫描的全部观测丢失。
    → [proposals/scan-checkpoint.md](proposals/scan-checkpoint.md)
 
-3. **dupes 识别 hardlink alias**
+2. **dupes 识别 hardlink alias**
    目标：按 `(device, inode)` 合并 hash 读取与节省量。
    原因：外部 hardlink 去重后，dupes 仍报告完整节省量并重复读取每个 alias。
    → [proposals/hardlink-alias.md](proposals/hardlink-alias.md)
 
-4. **du 深度展开 / top-N / 按文件数排序，并补目录条目数（inode 归因）**
+3. **du 深度展开 / top-N / 按文件数排序，并补目录条目数（inode 归因）**
    目标：一次命令定位大目录和文件过多的目录。
    原因：当前 `du` 每个参数只输出一行，定位需要逐层 `ls`；目录汇总只统计普通文件，无法归因 inode 配额。
    → [proposals/query-cli.md](proposals/query-cli.md#du-规划)
 
-5. **浅扫描与按目录 mtime 的增量刷新**
+4. **浅扫描与按目录 mtime 的增量刷新**
    目标：只重列一层以确认删除；目录未变化时跳过 readdir。
    原因：`--refresh-before` 无法只重列一层（父目录完成时间总晚于子目录）；大树上刷新仍需完整 readdir。
    → [proposals/incremental-refresh.md](proposals/incremental-refresh.md)
 
-6. **lazy-hash 后续能力**
+5. **lazy-hash 后续能力**
    目标：有界并发、`--cached` / `--rehash`、hash 运行审计、多 PATH 与 include/exclude。
    原因：大语料上 hash 串行读取慢，且 hash 结果缺少可审计的运行记录。
    → [proposals/lazy-hash.md](proposals/lazy-hash.md)
 
-7. **query-cli GNU 兼容批次**
+6. **query-cli GNU 兼容批次**
    目标：按批次增加 `ls` / `du` / `df` 常用 GNU 参数，以及 `coverage`、`errors` 等可信度诊断命令。
    原因：降低使用门槛，并解释结果何时完整、何时不完整。
    → [proposals/query-cli.md](proposals/query-cli.md)
 
-8. **跨平台与数据真实性**
+7. **跨平台与数据真实性**
    目标：Linux 非 UTF-8 路径、Windows 长路径与 reparse tag、跨 mount/volume 策略、allocated size 平台校准；hardlink、稀疏、压缩、reflink 与索引范围外 alias 的保守表达。
    原因：这些情况目前不在验收范围内，可能导致路径无法表示或物理节省量被夸大。
    → [路线图](roadmap.md)、[待决策清单](decisions.md)

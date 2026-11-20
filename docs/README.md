@@ -21,7 +21,6 @@
 - [路线图](plan/roadmap.md)：版本级目标（唯一副本）。
 - [backlog](plan/backlog.md)：当前阶段按优先级排列的待办。
 - [待决策清单](plan/decisions.md)：尚未定案的产品与技术选择。
-- [proposals/lazy-metadata.md](plan/proposals/lazy-metadata.md)：Linux `statx` `AT_STATX_DONT_SYNC` lazy 元数据。
 - [proposals/scan-checkpoint.md](plan/proposals/scan-checkpoint.md)：扫描短事务 checkpoint 与崩溃恢复。
 - [proposals/hardlink-alias.md](plan/proposals/hardlink-alias.md)：dupes 识别 hardlink alias。
 - [proposals/incremental-refresh.md](plan/proposals/incremental-refresh.md)：浅扫描与按目录 mtime 的增量刷新。
