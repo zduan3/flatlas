@@ -135,5 +135,5 @@ def test_df_unavailable_capacity_is_unknown(indexed, monkeypatch) -> None:
     "blocks_1k, expected",
     [(0, "0"), (1, "1.0K"), (10, "10K"), (1536, "1.5M"), (1537, "1.6M"), (1048575, "1.0G"), (10 * 1024**3 + 1, "11T")],
 )
-def test_df_human_sizes_round_up_like_gnu(blocks_1k: int, expected: str) -> None:
-    assert cli._format_df_human(blocks_1k) == expected
+def test_human_sizes_round_up_like_gnu(blocks_1k: int, expected: str) -> None:
+    assert cli._format_size(blocks_1k * 1024, human_readable=True) == expected
