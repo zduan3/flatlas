@@ -57,7 +57,8 @@ def test_human_readable_usage_table(command, option, usage_rows, tmp_path: Path)
     else:
         assert "ALLOC" in header
     assert "(B)" not in lines[0]
-    expected = ["-", "0", "1023", "1K", "1.5K", "1M", "1G", "1T", "1024T", "1M"]
+    # GNU -h: rounded up, one decimal below 10.
+    expected = ["-", "0", "1023", "1.0K", "1.5K", "1.0M", "1.0G", "1.0T", "1.0P", "1.0M"]
     for line, size, row in zip(lines[1:], expected, usage_rows, strict=True):
         fields = line.split()
         assert fields[header.index(size_header)] == size

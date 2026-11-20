@@ -14,7 +14,7 @@
 
 ### 大小显示
 
-`ls -h`、`du -h` 和 `largest -h`（长选项 `--human-readable`）以 1024 进制的 `K`、`M`、`G`、`T` 显示表格大小，四舍五入保留至多一位小数；小于 1024 的值仍显示字节整数，超过 T 的值继续以 T 表示，未知值显示 `-`。大小表头省略 `(B)`；文件数、状态不缩放，JSON/CSV 仍输出原始字节整数。
+`ls -h`、`du -h` 和 `largest -h`（长选项 `--human-readable`）按 GNU coreutils 的 `-h` 规则显示表格大小：以 1024 为底、单位 `K` 至 `E`、一律向上取整（大小不会被低估），小于 10 时保留一位小数（如 `1.0K`、`1.5M`、`12G`）；小于 1024 的值显示字节整数，未知值显示 `-`。`roots -h` 与 `df -h` 使用同一规则。大小表头省略 `(B)`；文件数、状态不缩放，JSON/CSV 仍输出原始字节整数。
 
 表格按 Unicode 显示宽度对齐。`ALLOC(B)` 列在至少一行占用已知时显示，未知行显示 `-`；全部未知时隐藏此列。
 
@@ -104,7 +104,7 @@ server:/ochsgs01/.../fs1 lustre  325T  284T    42T   88%  /lustre/fs1
 - 给出 FILE 时，对每个 FILE 本身调用 statfs 并显示其所在挂载点，不打开索引，FILE 也不必已登记。与 GNU 一致，查询的是 FILE 而非挂载点：带目录配额的文件系统（如 Lustre project quota）会返回该目录适用的配额，因此 `df ~/scratch` 可能显示项目配额而不是整个文件系统。
 - 无 FILE 时列出全部 registered namespace（对 root 路径查询，即整个文件系统）。**这与 GNU 不同**：GNU 无参数时列出系统挂载表中的全部文件系统。
 - `Filesystem` 为挂载表中的来源（设备或远端路径），取不到时为挂载点；`-T` 增加 `Type` 列（挂载表中的实时类型）。
-- 默认列为 `1K-blocks`、`Used`、`Available`，按 1024 bytes 向上取整；`-h` 改为 `Size`、`Used`、`Avail`，以 1024 为底、向上取整、小于 10 时保留一位小数（GNU `df -h` 规则）。
+- 默认列为 `1K-blocks`、`Used`、`Available`，按 1024 bytes 向上取整；`-h` 改为 `Size`、`Used`、`Avail`，规则见上文大小显示。
 - `Used` 为 total − free，`Available` 为非特权用户可用空间；`Use%` = ⌈used ÷ (used + available)⌉，与 GNU 相同，因此 `Used + Available` 可以小于总量。
 - 容量不可访问时显示 `-`，JSON/CSV 为 `null` 且 `status=unavailable`；可访问时 `status` 为 `ok`，root 被禁用时为 `disabled`。JSON/CSV 字段为 `filesystem`、`type`、`blocks_1k`、`used_1k`、`available_1k`、`use_percent`、`mounted_on`、`status`。
 - 容量不缓存进 SQLite，`df` 不承诺离线可用。filesystem used 与 `du` 的 indexed allocated 汇总不是同一指标，两者差值不能解释为“未索引文件”或“可回收空间”。

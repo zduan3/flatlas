@@ -185,17 +185,24 @@ def _print(rows: object, fmt: str = "json", output: Path | None = None) -> None:
 
 
 def _format_size(value: object, *, human_readable: bool = False) -> str:
+    """Format a byte count for tables; ``None`` (unknown) is ``-``.
+
+    Human-readable sizes follow GNU coreutils (``ls -lh``, ``du -h``, ``df -h``):
+    powers of 1024, always rounded up so a size is never understated, one decimal
+    below 10, and plain bytes below 1 KiB.
+    """
     if value is None:
         return "-"
     if not human_readable or not isinstance(value, int) or value < 1024:
         return str(value)
-    divisor = 1
-    for unit in "KMGT":
-        divisor *= 1024
-        tenths = (value * 10 + divisor // 2) // divisor
-        if tenths < 10240 or unit == "T":
-            whole, fraction = divmod(tenths, 10)
-            return f"{whole}.{fraction}{unit}" if fraction else f"{whole}{unit}"
+    for exponent, unit in enumerate("KMGTPE", start=1):
+        scale = 1024**exponent
+        tenths = -(-value * 10 // scale)
+        if tenths < 100:
+            return f"{tenths // 10}.{tenths % 10}{unit}"
+        whole = -(-value // scale)
+        if whole < 1024 or unit == "E":
+            return f"{whole}{unit}"
     raise AssertionError("size unit must be selected")
 
 
@@ -583,25 +590,6 @@ def _warn_incomplete_hashes(summary: HashSummary) -> None:
         )
 
 
-def _format_df_human(blocks_1k: object) -> str:
-    """GNU ``df -h`` style: powers of 1024, rounded up, one decimal below 10."""
-    if not isinstance(blocks_1k, int):
-        return "-"
-    value = blocks_1k * 1024
-    if value < 1024:
-        return str(value)
-    for exponent, unit in enumerate("KMGTPE", start=1):
-        scale = 1024**exponent
-        if value < scale * 1024 or unit == "E":
-            tenths = -(-value * 10 // scale)
-            if tenths < 100:
-                return f"{tenths // 10}.{tenths % 10}{unit}"
-            whole = -(-value // scale)
-            if whole < 1024 or unit == "E":
-                return f"{whole}{unit}"
-    raise AssertionError("size unit must be selected")
-
-
 def _print_df(rows: list[dict[str, object]], fmt: str, *, human_readable: bool, print_type: bool) -> None:
     if fmt in {"json", "csv"}:
         _print(rows, fmt)
@@ -609,10 +597,10 @@ def _print_df(rows: list[dict[str, object]], fmt: str, *, human_readable: bool, 
     if fmt != "table":
         raise FlatlasError("format must be table, json or csv")
 
-    def size(value: object) -> str:
-        if human_readable:
-            return _format_df_human(value)
-        return "-" if value is None else str(value)
+    def size(blocks_1k: object) -> str:
+        if human_readable and isinstance(blocks_1k, int):
+            return _format_size(blocks_1k * 1024, human_readable=True)
+        return _format_size(blocks_1k)
 
     headers = ["Filesystem", *(["Type"] if print_type else []),
                "Size" if human_readable else "1K-blocks", "Used",
