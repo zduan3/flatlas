@@ -1,6 +1,6 @@
 # 查询命令 GNU 兼容规划
 
-> 状态：提案，未实现。当前 `ls`、`du`、`largest`、`roots` / `df`、`scans` 等行为见 [查询命令](../../design/queries.md)；本文只描述后续参数、子命令与默认行为调整。
+> 状态：提案，未实现。当前 `ls`、`du`、`largest`、`roots`、`df`、`scans` 等行为见 [查询命令](../../design/queries.md)；本文只描述后续参数、子命令与默认行为调整。
 
 ## 目标
 
@@ -8,7 +8,7 @@
 
 - `flatlas ls [PATH]` 保持接近 `ls -Al PATH` 的一层长格式列表。
 - `flatlas du [PATH ...]` 保持接近 `du -s PATH ...`：每个参数仅输出一条递归汇总。
-- `flatlas roots` 与别名 `flatlas df` 保持 GNU `df` 风格容量表，范围只包含 registered namespace。
+- `flatlas df` 贴近 GNU `df`；`flatlas roots` 只读索引记录，不承担容量视图。
 - 后续增加的短参数和长参数，在不破坏持久化索引、coverage 与跨平台语义时优先沿用 GNU 名称。
 - flatlas 独有能力使用可读的长参数表达，不占用与 GNU 含义冲突的短参数。
 - 表格服务交互使用；JSON/CSV 字段必须稳定、明确，不因终端缩写而改变语义。
@@ -28,7 +28,7 @@ GNU `ls` 和 `du` 主要读取当前文件系统；flatlas 同时使用实时目
 | symlink / reparse | 由 `-H`、`-L`、`-P` 等控制 | 默认不跟随 symlink 或 Windows reparse point；兼容参数须在跨平台策略完成后加入 |
 | 排序与字符 | locale、终端与环境变量会影响输出 | 表格按 Unicode 显示宽度对齐；机器输出使用稳定字段和排序规则 |
 
-`df` 还有一项产品边界差异：GNU `df` 无参数时列出当前系统挂载表中的文件系统；flatlas 的 `roots` / `df` 无参数时只列内部 registered namespace。两者不能静默混为一谈。
+`df` 还有一项产品边界差异：GNU `df` 无参数时列出当前系统挂载表中的文件系统；flatlas 的 `df` 无参数时只列内部 registered namespace。两者不能静默混为一谈。
 
 ## `ls` 规划
 
@@ -145,18 +145,15 @@ hardlink 的默认计数应尽量对齐 GNU `du`：同一可靠对象身份在�
 | `--columns=LIST` | 为交互表格选择列，不改变 JSON/CSV schema。 |
 | `--format=table|json|csv` | 保留现有稳定机器输出能力；未来可增加 `jsonl`，不复用 GNU 的 `--format` 含义。 |
 
-## `roots` / `df` 规划
+## `df` 规划
 
 ### GNU 兼容参数规划
 
 | 优先级 | 参数 | 规划语义 |
 |---|---|---|
-| P0 | `-h`, `--human-readable` | 以 1024 进制缩写显示容量。 |
 | P0 | `-H`, `--si` | 以 1000 进制缩写显示容量。 |
-| P0 | `-k` | 显式选择 1024-byte blocks；与当前默认幂等。 |
+| P0 | `-k` | 显式选择 1024-byte blocks；与默认幂等。 |
 | P0 | `-B SIZE`, `--block-size=SIZE` | 控制表格容量缩放；机器输出继续保存 byte 或明确的原始整数。 |
-| P0 | `-T`, `--print-type` | 显示 filesystem type；未知时为 `-`。 |
-| P1 | `[FILE ...]` | 显示每个参数所在的 registered namespace，并按首次出现去重。未登记文件系统返回领域错误。 |
 | P1 | `-i`, `--inodes` | 平台可可靠取得时显示 inode total/used/available；Windows 不伪造 inode 指标。 |
 | P1 | `--output=FIELD_LIST` | 采用 GNU field 名称 `source`、`fstype`、`size`、`used`、`avail`、`pcent`、`target` 选择表格列。 |
 | P1 | `--total` | 增加容量总计；必须避免重复 namespace，并说明跨设备相加只是展示总和。 |
@@ -181,7 +178,6 @@ hardlink 的默认计数应尽量对齐 GNU `du`：同一可靠对象身份在�
 - 容量来自操作系统实时查询，因此 `df` 不承诺离线容量；SQLite 只保存 root 身份与配置，不缓存容量快照。
 - `USED + AVAILABLE` 不一定等于 total；文件系统保留块、权限和平台 API 差异必须允许存在。
 - `df` 的 filesystem used 与 `du` 的 indexed allocated 汇总不是同一指标，两者差值不能直接解释为“未索引文件”或“可回收空间”。
-- 同一 namespace 的 `roots` 与 `df` 表格、JSON 和错误行为必须逐项一致。
 - Windows/Linux 测试应 mock 固定容量验证单位和舍入，并各自增加真实文件系统 smoke test。
 
 ## `largest` 规划
@@ -244,7 +240,7 @@ GNU `find` 默认遍历实时目录树，而 `flatlas find` 应默认查询 SQLi
 | `du` 全局汇总 | 无参数汇总当前目录，无跨 namespace 汇总 | 保持默认 | 增加 `--all-roots` |
 | `du` size | logical bytes、文件数、可用 allocated bytes | used block、apparent bytes、文件数并列且语义清晰 | `-b`、`--apparent-size`、`-B` 控制表格 |
 | 机器输出 | JSON/CSV 完整字段 | 保持稳定字段；新增 completeness/status 字段 | schema 变更须测试列名、类型和顺序 |
-| `roots` / `df` | 只列 registered namespace | 保持默认范围，逐步增加 GNU 缩放、类型、字段选择和 FILE 参数 | 系统全部 mount 只能由 `--all-mounted` 显式请求 |
+| `df` | 无参数只列 registered namespace（已支持 FILE、`-h`、`-T`） | 保持默认范围，逐步增加 GNU 缩放与字段选择 | 系统全部 mount 只能由 `--all-mounted` 显式请求 |
 
 默认行为变更应在同一功能提交中更新 README、`--help`、JSON/CSV 回归测试和 Windows/Linux 专项测试。若后续已有正式发布版本，必须提供 release note；CLI 参数兼容与机器输出 schema 兼容分开管理。
 
@@ -264,7 +260,7 @@ GNU `find` 默认遍历实时目录树，而 `flatlas find` 应默认查询 SQLi
 
 - `du` 新增 `--all-roots`，显式请求跨全部 registered namespace 的汇总。
 - 接受 `ls -A -l` 与 `du -s` 作为显式但幂等的兼容写法；`ls -a` 另行增加 `.` 与 `..`。
-- `roots` / `df` 增加 `-h`、`-k`、`-T`，并固定 registered-only 默认范围。
+- `df` 增加 `-k`、`-H`、`-B`，并固定 registered-only 默认范围（`-h`、`-T`、FILE 已实现）。
 - 为 partial/stale/unknown allocated size 增加机器可读 completeness 字段。
 
 ### 兼容第二批：最常用显示参数
@@ -283,7 +279,7 @@ GNU `find` 默认遍历实时目录树，而 `flatlas find` 应默认查询 SQLi
 每批至少覆盖：
 
 - 无参数、单参数、多参数与当前目录行为。
-- `roots` 与 `df` 等价、容量不可访问、block 舍入、use% 和 registered/all-mounted 范围。
+- `df` 容量不可访问、block 舍入、use% 和 registered/all-mounted 范围。
 - 空目录、隐藏条目、普通文件、目录、symlink/reparse 与特殊文件。
 - completed、partial、failed、cancelled、未扫描、stale、实时缺失和离线源。
 - logical 与 allocated 不同、allocated 未知、稀疏文件、hardlink 和跨 namespace。

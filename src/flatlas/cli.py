@@ -32,6 +32,7 @@ from flatlas.core import (
     largest_files,
     list_child_directories,
     list_plans,
+    list_roots,
     list_scans,
     open_database,
     plan_operations,
@@ -582,7 +583,57 @@ def _warn_incomplete_hashes(summary: HashSummary) -> None:
         )
 
 
-def _print_filesystems(rows: list[dict[str, object]], fmt: str) -> None:
+def _format_df_human(blocks_1k: object) -> str:
+    """GNU ``df -h`` style: powers of 1024, rounded up, one decimal below 10."""
+    if not isinstance(blocks_1k, int):
+        return "-"
+    value = blocks_1k * 1024
+    if value < 1024:
+        return str(value)
+    for exponent, unit in enumerate("KMGTPE", start=1):
+        scale = 1024**exponent
+        if value < scale * 1024 or unit == "E":
+            tenths = -(-value * 10 // scale)
+            if tenths < 100:
+                return f"{tenths // 10}.{tenths % 10}{unit}"
+            whole = -(-value // scale)
+            if whole < 1024 or unit == "E":
+                return f"{whole}{unit}"
+    raise AssertionError("size unit must be selected")
+
+
+def _print_df(rows: list[dict[str, object]], fmt: str, *, human_readable: bool, print_type: bool) -> None:
+    if fmt in {"json", "csv"}:
+        _print(rows, fmt)
+        return
+    if fmt != "table":
+        raise FlatlasError("format must be table, json or csv")
+
+    def size(value: object) -> str:
+        if human_readable:
+            return _format_df_human(value)
+        return "-" if value is None else str(value)
+
+    headers = ["Filesystem", *(["Type"] if print_type else []),
+               "Size" if human_readable else "1K-blocks", "Used",
+               "Avail" if human_readable else "Available", "Use%", "Mounted on"]
+    table_rows = [
+        [
+            str(row["filesystem"]),
+            *([str(row["type"] or "-")] if print_type else []),
+            size(row["blocks_1k"]),
+            size(row["used_1k"]),
+            size(row["available_1k"]),
+            "-" if row["use_percent"] is None else f"{row['use_percent']}%",
+            str(row["mounted_on"]),
+        ]
+        for row in rows
+    ]
+    first_number = 2 if print_type else 1
+    typer.echo(_render_table(headers, table_rows, set(range(first_number, first_number + 4))), nl=False)
+
+
+def _print_roots(rows: list[dict[str, Any]], fmt: str, *, human_readable: bool) -> None:
     if fmt in {"json", "csv"}:
         _print(rows, fmt)
         return
@@ -590,23 +641,21 @@ def _print_filesystems(rows: list[dict[str, object]], fmt: str) -> None:
         raise FlatlasError("format must be table, json or csv")
     table_rows = [
         [
-            str(row["filesystem"]),
-            "-" if row["blocks_1k"] is None else str(row["blocks_1k"]),
-            "-" if row["used_1k"] is None else str(row["used_1k"]),
-            "-" if row["available_1k"] is None else str(row["available_1k"]),
-            "-" if row["use_percent"] is None else f"{row['use_percent']}%",
-            str(row["mounted_on"]),
+            str(row["id"]),
+            row["filesystem_type"] or "-",
+            row["metadata"],
+            _format_size(row["files"]),
+            _format_size(row["logical_size"], human_readable=human_readable),
+            "-" if row["last_scan_id"] is None else str(row["last_scan_id"]),
+            row["last_scan_status"] or "-",
+            _format_ls_timestamp_ns(row["last_scan_finished_at_ns"] or row["last_scan_started_at_ns"]),
+            row["root_path_display"],
         ]
         for row in rows
     ]
-    typer.echo(
-        _render_table(
-            ["FILESYSTEM", "1K-BLOCKS", "USED", "AVAILABLE", "USE%", "MOUNTED ON"],
-            table_rows,
-            {1, 2, 3, 4},
-        ),
-        nl=False,
-    )
+    headers = ["ID", "TYPE", "METADATA", "FILES", "LOGICAL" if human_readable else "LOGICAL(B)",
+               "SCAN", "STATUS", "SCANNED", "ROOT"]
+    typer.echo(_render_table(headers, table_rows, {0, 3, 4, 5}), nl=False)
 
 
 @app.command()
@@ -625,24 +674,46 @@ def init(
     typer.echo(f"registered filesystem {namespace.path} as root {root_id}; no files were scanned")
 
 
-def _show_filesystems(db: Path | None, fmt: str) -> None:
+@app.command("roots")
+def roots(
+    db: db_option = None,
+    format: Annotated[str, typer.Option("--format")] = "table",
+    human_readable: Annotated[
+        bool, typer.Option("-h", "--human-readable", help="Show indexed sizes in 1024-based K, M, G, T units.")
+    ] = False,
+) -> None:
+    """Show registered namespaces as recorded in the index, without touching the filesystem."""
     connection = _open_database(_database(db))
     try:
-        _print_filesystems(filesystem_usage(connection), fmt)
+        rows = list_roots(connection)
     finally:
         connection.close()
-
-
-@app.command("roots")
-def roots(db: db_option = None, format: Annotated[str, typer.Option("--format")] = "table") -> None:
-    """Show registered filesystems in a GNU df-like table."""
-    _show_filesystems(db, format)
+    _print_roots(rows, format, human_readable=human_readable)
 
 
 @app.command("df")
-def df_command(db: db_option = None, format: Annotated[str, typer.Option("--format")] = "table") -> None:
-    """Alias for roots; show registered filesystem capacity and usage."""
-    _show_filesystems(db, format)
+def df_command(
+    files: Annotated[
+        list[Path] | None,
+        typer.Argument(help="Report the filesystem containing each FILE; defaults to all registered namespaces."),
+    ] = None,
+    db: db_option = None,
+    format: Annotated[str, typer.Option("--format")] = "table",
+    human_readable: Annotated[
+        bool, typer.Option("-h", "--human-readable", help="Print sizes in powers of 1024 (GNU df -h style).")
+    ] = False,
+    print_type: Annotated[bool, typer.Option("-T", "--print-type", help="Print the filesystem type.")] = False,
+) -> None:
+    """Show live filesystem capacity in the style of GNU df."""
+    if files:
+        rows = filesystem_usage(files=files)
+    else:
+        connection = _open_database(_database(db))
+        try:
+            rows = filesystem_usage(connection)
+        finally:
+            connection.close()
+    _print_df(rows, format, human_readable=human_readable, print_type=print_type)
 
 
 @app.command()

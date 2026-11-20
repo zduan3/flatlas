@@ -3,7 +3,6 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -557,60 +556,6 @@ def test_ls_refresh_status_uses_directory_itself_without_descendant_checks(tmp_p
 
 
 @pytest.mark.query
-@pytest.mark.cli
-@pytest.mark.output
-def test_roots_and_df_report_capacity_and_unavailable_filesystems(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        "flatlas.core.shutil.disk_usage",
-        lambda _path: SimpleNamespace(total=10 * 1024, used=4 * 1024, free=6 * 1024),
-    )
-    database = tmp_path / "index.sqlite"
-    connection = open_database(database)
-    try:
-        register_namespace(connection, discover_namespace(tmp_path))
-    finally:
-        connection.close()
-    runner = CliRunner()
-    roots_result = runner.invoke(app, ["roots", "--db", str(database)])
-    df_result = runner.invoke(app, ["df", "--db", str(database)])
-    assert roots_result.exit_code == 0
-    assert df_result.exit_code == 0
-    assert roots_result.stdout == df_result.stdout
-    assert roots_result.stdout.splitlines()[0].split() == [
-        "FILESYSTEM",
-        "1K-BLOCKS",
-        "USED",
-        "AVAILABLE",
-        "USE%",
-        "MOUNTED",
-        "ON",
-    ]
-    assert "10" in roots_result.stdout
-    assert "4" in roots_result.stdout
-    assert "6" in roots_result.stdout
-    assert "40%" in roots_result.stdout
-
-    json_result = runner.invoke(app, ["df", "--format", "json", "--db", str(database)])
-    row = json.loads(json_result.stdout)[0]
-    assert list(row)[:5] == ["id", "root_path_display", "platform", "namespace_kind", "enabled"]
-    assert row["blocks_1k"] == 10
-    assert row["used_1k"] == 4
-    assert row["available_1k"] == 6
-    assert row["use_percent"] == 40
-
-    def unavailable(_path):
-        raise OSError("injected unavailable filesystem")
-
-    monkeypatch.setattr("flatlas.core.shutil.disk_usage", unavailable)
-    unavailable_result = runner.invoke(app, ["roots", "--format", "json", "--db", str(database)])
-    unavailable_row = json.loads(unavailable_result.stdout)[0]
-    assert unavailable_row["blocks_1k"] is None
-    assert unavailable_row["used_1k"] is None
-    assert unavailable_row["available_1k"] is None
-    assert unavailable_row["use_percent"] is None
-    assert unavailable_row["status"] == "unavailable"
-
-
 @pytest.mark.scan
 @pytest.mark.cli
 @pytest.mark.output

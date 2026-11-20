@@ -1,10 +1,10 @@
 # 查询命令
 
-> 状态：当前设计。描述 `ls`、`du`、`largest`、`roots` / `df`、`paths`、`rm`、`scans` / `scan-info`、`export`、`plan` 的现有行为；随代码更新。`dupes` 见 [惰性 Hash 与重复候选](hashing.md)，`scan` 见 [扫描与目录汇总](scanning.md)，`config` 见 [命令默认参数配置](config.md)。
+> 状态：当前设计。描述 `ls`、`du`、`largest`、`roots`、`df`、`paths`、`rm`、`scans` / `scan-info`、`export`、`plan` 的现有行为；随代码更新。`dupes` 见 [惰性 Hash 与重复候选](hashing.md)，`scan` 见 [扫描与目录汇总](scanning.md)，`config` 见 [命令默认参数配置](config.md)。
 
 ## 通用约定
 
-- 除 `ls` 的一层实时枚举和 `roots` / `df` 的实时容量查询外，查询只读取 SQLite 索引，不隐式遍历或更新文件系统；源目录离线时仍可使用。`dupes` 是唯一会读取文件内容的查询，且不改变 scan coverage。
+- 除 `ls` 的一层实时枚举和 `df` 的实时容量查询外，查询只读取 SQLite 索引，不隐式遍历或更新文件系统；源目录离线时仍可使用。`dupes` 是唯一会读取文件内容的查询，且不改变 scan coverage。
 - 当前状态查询只使用 `state='present'` 的路径；deleted tombstone 不参与 `paths`、`du`、`largest` 或 `dupes`。
 - 未知值在表格中显示 `-`，在 JSON/CSV 中为 `null` / 空值，不能伪装为 0。
 - 用户可预期错误（未初始化、路径未索引、namespace 未登记、参数非法等）输出 `error: ...` 并返回退出码 2，不输出 traceback。
@@ -77,22 +77,37 @@ PATH 默认为当前目录，必须位于已登记的 namespace。命令实时�
 
 PATH 默认为当前目录，必须是当前已索引的文件或目录 scope。只列 scope 内 present 普通文件，按 logical size 降序、路径升序稳定排序；默认返回 10 项，`-n` 是 `--limit` 的短别名。路径相对于 PATH 显示。表格只显示 `SIZE(B)`（使用 `-h` 时为 `SIZE`）和 `PATH`，不显示 allocated 列；JSON/CSV 含 `root_id`、`logical_size`、`allocated_size` 与 `path`。
 
-## `roots` / `df`
+## `roots`
 
-`df` 是 `roots` 的等价别名，两者读取同一批 registered namespace，并以 GNU `df` 熟悉的列顺序输出：
+只读 SQLite，不访问文件系统，显示每个 registered namespace 在索引中记录的内容：
 
 ```text
-FILESYSTEM  1K-BLOCKS       USED  AVAILABLE  USE%  MOUNTED ON
-C:\         997482492  391581348  605901144   40%  C:\
+ID  TYPE    METADATA  FILES  LOGICAL(B)  SCAN  STATUS     SCANNED       ROOT
+ 1  lustre  lazy      19118   534929936     1  completed  Nov 19 22:47  /lustre/fs1
 ```
 
-- `FILESYSTEM` 与 `MOUNTED ON` 当前都使用 registered namespace 路径。
-- `1K-BLOCKS`、`USED`、`AVAILABLE` 来自本次实时文件系统容量查询，不来自路径索引，也不等同于 indexed logical/allocated 汇总。block 单位固定为 1024 bytes，非整数向上取整。
-- `USE%` 由 used/total 向上取整并限制在 0–100%；不用 indexed 文件大小推导。
-- 实时容量不可访问时，表格显示 `-`；JSON/CSV 使用 `null` 并提供 `status=unavailable`，不显示 0。可访问时 `status` 为 `ok`，root 被禁用时为 `disabled`。
-- `--format json|csv` 输出 root 身份字段（`id`、`root_path_display`、`platform`、`namespace_kind`、`enabled`、`filesystem_type`）和完整容量字段（`filesystem`、`blocks_1k`、`used_1k`、`available_1k`、`use_percent`、`mounted_on`、`status`）。
+- `TYPE`：登记时记录的 `filesystem_type`，未知为 `-`。
+- `METADATA`：扫描该 root 时采用的元数据方式，`lazy`（Lustre，见 [扫描与目录汇总](scanning.md#lustre-上的-lazy-元数据)）或 `exact`。由记录的类型决定，不检测当前挂载。
+- `FILES`、`LOGICAL(B)`：namespace root 目录汇总中的已索引普通文件数与 logical size；尚未扫描时为 `-`。`-h` 缩放大小列，规则同 `ls` / `du`。
+- `SCAN`、`STATUS`、`SCANNED`：该 root 最近一次 scan 的 ID、状态与结束时间（未结束时为开始时间），时间格式同 `ls` 的 `SCANNED-THROUGH`。
+- JSON/CSV 输出 `id`、`root_path_display`、`platform`、`namespace_kind`、`filesystem_type`、`metadata`、`enabled`、`created_at_ns`、`updated_at_ns`、`files`、`logical_size`、`allocated_size`、`last_scan_id`、`last_scan_status`、`last_scan_started_at_ns`、`last_scan_finished_at_ns`；未知为 `null`。
 
-与 GNU `df` 不同，无参数只列 registered namespace，不枚举全部系统 mount。容量不缓存进 SQLite，因此 `df` 不承诺离线容量；`USED + AVAILABLE` 不一定等于 total。`df` 的 filesystem used 与 `du` 的 indexed allocated 汇总不是同一指标，两者差值不能直接解释为“未索引文件”或“可回收空间”。
+## `df [FILE ...]`
+
+实时查询容量，行为贴近 GNU `df`：
+
+```text
+Filesystem               Type    Size  Used  Avail  Use%  Mounted on
+server:/ochsgs01/.../fs1 lustre  325T  284T    42T   88%  /lustre/fs1
+```
+
+- 给出 FILE 时，对每个 FILE 本身调用 statfs 并显示其所在挂载点，不打开索引，FILE 也不必已登记。与 GNU 一致，查询的是 FILE 而非挂载点：带目录配额的文件系统（如 Lustre project quota）会返回该目录适用的配额，因此 `df ~/scratch` 可能显示项目配额而不是整个文件系统。
+- 无 FILE 时列出全部 registered namespace（对 root 路径查询，即整个文件系统）。**这与 GNU 不同**：GNU 无参数时列出系统挂载表中的全部文件系统。
+- `Filesystem` 为挂载表中的来源（设备或远端路径），取不到时为挂载点；`-T` 增加 `Type` 列（挂载表中的实时类型）。
+- 默认列为 `1K-blocks`、`Used`、`Available`，按 1024 bytes 向上取整；`-h` 改为 `Size`、`Used`、`Avail`，以 1024 为底、向上取整、小于 10 时保留一位小数（GNU `df -h` 规则）。
+- `Used` 为 total − free，`Available` 为非特权用户可用空间；`Use%` = ⌈used ÷ (used + available)⌉，与 GNU 相同，因此 `Used + Available` 可以小于总量。
+- 容量不可访问时显示 `-`，JSON/CSV 为 `null` 且 `status=unavailable`；可访问时 `status` 为 `ok`，root 被禁用时为 `disabled`。JSON/CSV 字段为 `filesystem`、`type`、`blocks_1k`、`used_1k`、`available_1k`、`use_percent`、`mounted_on`、`status`。
+- 容量不缓存进 SQLite，`df` 不承诺离线可用。filesystem used 与 `du` 的 indexed allocated 汇总不是同一指标，两者差值不能解释为“未索引文件”或“可回收空间”。
 
 ## `paths [PATH]`
 

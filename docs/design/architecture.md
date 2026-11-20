@@ -101,7 +101,7 @@ hash 复用在两个平台均采取保守规则：仅在当前文件身份、siz
 
 - `ls` 是一层 live/index 合并视图：列出直接文件、目录和特殊条目；文件大小是自身 logical size，目录大小是已知递归索引聚合，而不是 GNU `ls -l` 的目录对象 `st_size`。`part` / `gone` 可以显示最后已知聚合，但必须保留不完整或现场缺失状态。
 - `du` 是显式文件或目录 scope 的递归索引汇总，默认每个参数一行，并可在源目录离线时使用。`ls` 的空间列用于导航提示，`du` 是正式的 scope 汇总接口。
-- `roots` 与别名 `df` 使用 GNU `df` 风格容量表，但只列 registered namespace。
+- `roots` 只读索引中的 namespace 记录；`df` 实时查询容量并贴近 GNU `df`，无参数时只列 registered namespace。
 
 各命令的具体行为见 [查询命令](queries.md)。
 

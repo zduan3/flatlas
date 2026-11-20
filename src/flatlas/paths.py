@@ -11,7 +11,7 @@ from typing import Any
 
 from flatlas.db import _last_insert_id, now_ns
 from flatlas.errors import FlatlasError
-from flatlas.lazystat import filesystem_type
+from flatlas.mounts import filesystem_type
 
 
 @dataclass(frozen=True)
