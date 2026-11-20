@@ -9,9 +9,11 @@ import signal
 import sys
 import time
 import unicodedata
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Self
 
 import typer
 
@@ -56,6 +58,12 @@ max_size_option = Annotated[int | None, typer.Option("--max-size", min=0, help="
 min_count_option = Annotated[int, typer.Option("--min-count", min=2, help="Minimum number of paths in a full-hash group.")]
 min_savings_option = Annotated[int, typer.Option("--min-savings", min=0, help="Minimum theoretical logical savings per group in bytes (inclusive).")]
 group_limit_option = Annotated[int | None, typer.Option("--limit", "-n", min=1, help="Maximum groups after filtering and sorting by theoretical savings.")]
+table_format_option = Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")]
+data_format_option = Annotated[str, typer.Option("--format", help="Output format: json or csv.")]
+output_option = Annotated[Path | None, typer.Option("--output", help="Write output to this file instead of stdout.")]
+human_readable_option = Annotated[
+    bool, typer.Option("-h", "--human-readable", help="Show table sizes in GNU -h style (1024-based, rounded up).")
+]
 
 def _version_callback(value: bool) -> None:
     if value:
@@ -168,11 +176,20 @@ class _MigrationProgressDisplay:
 
 
 def _open_database(location: Path) -> Any:
-    progress = _MigrationProgressDisplay(enabled=sys.stderr.isatty())
+    progress = _MigrationProgressDisplay(enabled=_stderr_is_tty())
     try:
         return open_database(location, on_migration=progress.update)
     finally:
         progress.close()
+
+
+@contextmanager
+def _connection(db: Path | None, *, create: bool = False) -> Iterator[Any]:
+    connection = _open_database(_database(db, create=create))
+    try:
+        yield connection
+    finally:
+        connection.close()
 
 
 def _print(rows: object, fmt: str = "json", output: Path | None = None) -> None:
@@ -182,6 +199,25 @@ def _print(rows: object, fmt: str = "json", output: Path | None = None) -> None:
     rendered = export_rows(rows, fmt, output)
     if output is None:
         typer.echo(rendered, nl=False)
+
+
+def _emit(rendered: str, output: Path | None) -> None:
+    """Write rendered table/text output to stdout or to ``output``."""
+    if output is None:
+        typer.echo(rendered, nl=False)
+        return
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(rendered, encoding="utf-8", newline="")
+
+
+def _print_machine(rows: list[dict[str, Any]], fmt: str, output: Path | None = None) -> bool:
+    """Print JSON/CSV and return True; return False for ``table``; reject other formats."""
+    if fmt in {"json", "csv"}:
+        _print(rows, fmt, output)
+        return True
+    if fmt != "table":
+        raise FlatlasError("format must be table, json or csv")
+    return False
 
 
 def _format_size(value: object, *, human_readable: bool = False) -> str:
@@ -218,11 +254,8 @@ def _print_usage(
     include_scanned_through: bool = False,
     human_readable: bool = False,
 ) -> None:
-    if fmt in {"json", "csv"}:
-        _print(rows, fmt, output)
+    if _print_machine(rows, fmt, output):
         return
-    if fmt != "table":
-        raise FlatlasError("format must be table, json or csv")
 
     show_allocated = any(row["allocated_size"] is not None for row in rows)
     headers = ["T"] if include_kind else []
@@ -262,11 +295,7 @@ def _print_usage(
     leading_columns = int(include_kind) + int(include_status)
     numeric_columns = set(range(leading_columns, len(headers) - 1 - int(include_scanned_through)))
     rendered = _render_table(headers, table_rows, numeric_columns)
-    if output is None:
-        typer.echo(rendered, nl=False)
-    else:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(rendered, encoding="utf-8", newline="")
+    _emit(rendered, output)
 
 
 def _print_largest_files(
@@ -276,11 +305,8 @@ def _print_largest_files(
     *,
     human_readable: bool = False,
 ) -> None:
-    if fmt in {"json", "csv"}:
-        _print(rows, fmt, output)
+    if _print_machine(rows, fmt, output):
         return
-    if fmt != "table":
-        raise FlatlasError("format must be table, json or csv")
 
     headers = ["SIZE" if human_readable else "SIZE(B)", "PATH"]
     table_rows = [
@@ -289,11 +315,7 @@ def _print_largest_files(
     ]
 
     rendered = _render_table(headers, table_rows, set(range(len(headers) - 1)))
-    if output is None:
-        typer.echo(rendered, nl=False)
-    else:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(rendered, encoding="utf-8", newline="")
+    _emit(rendered, output)
 
 
 def _display_width(value: str) -> int:
@@ -381,8 +403,7 @@ def _format_ls_timestamp_ns(value: int | None, *, now_ns: int | None = None) -> 
 
 
 def _print_scans(rows: list[dict[str, Any]], fmt: str) -> None:
-    if fmt != "table":
-        _print(rows, fmt)
+    if _print_machine(rows, fmt):
         return
     headers = ["ID", "STATUS", "STARTED", "FINISHED", "FILES", "DIRS", "ERRORS", "SCOPE"]
     values = [
@@ -408,19 +429,48 @@ def _counted(count: int, noun: str) -> str:
     return f"{count} {plural}"
 
 
-class _ScanProgressDisplay:
+class _ProgressLine:
+    """A single self-overwriting stderr status line, throttled per phase.
+
+    Subclasses build the text; this class owns throttling, clearing, truncation
+    to the terminal width and the final newline. Use as a context manager.
+    """
+
     def __init__(self, *, enabled: bool, interval: float = 0.1) -> None:
         self.enabled = enabled
         self.interval = interval
         self.last_update = 0.0
+        self.now = 0.0
         self.last_phase: str | None = None
         self.width = 0
 
-    def update(self, progress: ScanProgress) -> None:
+    def _due(self, phase: str) -> bool:
         if not self.enabled:
-            return
-        current = time.monotonic()
-        if progress.phase == self.last_phase and current - self.last_update < self.interval:
+            return False
+        self.now = time.monotonic()
+        return phase != self.last_phase or self.now - self.last_update >= self.interval
+
+    def _show(self, line: str, phase: str) -> None:
+        line = _truncate_display(line, max(_terminal_columns() - 1, 0))
+        typer.echo(f"\r\x1b[2K{line}", err=True, nl=False)
+        self.width = max(self.width, _display_width(line))
+        self.last_phase = phase
+        self.last_update = self.now
+
+    def close(self) -> None:
+        if self.enabled and self.width:
+            typer.echo(err=True)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+
+class _ScanProgressDisplay(_ProgressLine):
+    def update(self, progress: ScanProgress) -> None:
+        if not self._due(progress.phase):
             return
         phase = {
             "scanning": "Scanning",
@@ -436,39 +486,20 @@ class _ScanProgressDisplay:
         )
         if progress.current_directory is not None:
             separator = " · "
-            terminal_width = _terminal_columns()
-            line_width = max(terminal_width - 1, 0)
+            line_width = max(_terminal_columns() - 1, 0)
             directory_width = max(line_width - _display_width(line) - _display_width(separator), 0)
             if directory_width:
                 line += separator + _truncate_display(progress.current_directory, directory_width)
-            line = _truncate_display(line, line_width)
-        typer.echo(f"\r\x1b[2K{line}", err=True, nl=False)
-        self.width = max(self.width, _display_width(line))
-        self.last_phase = progress.phase
-        self.last_update = current
-
-    def close(self) -> None:
-        if self.enabled and self.width:
-            typer.echo(err=True)
+        self._show(line, progress.phase)
 
 
 def _stderr_is_tty() -> bool:
     return sys.stderr.isatty()
 
 
-class _HashProgressDisplay:
-    def __init__(self, *, enabled: bool, interval: float = 0.1) -> None:
-        self.enabled = enabled
-        self.interval = interval
-        self.last_update = 0.0
-        self.last_phase: str | None = None
-        self.width = 0
-
+class _HashProgressDisplay(_ProgressLine):
     def update(self, progress: HashProgress) -> None:
-        if not self.enabled:
-            return
-        current = time.monotonic()
-        if progress.phase == self.last_phase and current - self.last_update < self.interval:
+        if not self._due(progress.phase):
             return
         if progress.phase == "candidates":
             line = f"Candidates: {_counted(progress.total_files, 'file')} · {_format_iec_size(progress.total_bytes)}"
@@ -484,14 +515,7 @@ class _HashProgressDisplay:
             line = f"Hashing: incomplete · {_counted(progress.total_files, 'candidate')}"
         else:
             line = f"Hashing: complete · {_counted(progress.total_files, 'candidate')}"
-        typer.echo(f"\r{line.ljust(self.width)}", err=True, nl=False)
-        self.width = max(self.width, len(line))
-        self.last_phase = progress.phase
-        self.last_update = current
-
-    def close(self) -> None:
-        if self.enabled and self.width:
-            typer.echo(err=True)
+        self._show(line, progress.phase)
 
 
 def _duplicate_display_paths(
@@ -531,11 +555,7 @@ def _print_duplicate_groups(
             indent=2,
             default=str,
         ) + "\n"
-        if output is None:
-            typer.echo(rendered, nl=False)
-        else:
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(rendered, encoding="utf-8", newline="")
+        _emit(rendered, output)
         return
     if fmt == "csv":
         rows = [{**hash_summary.as_dict(), **group} for group in groups]
@@ -575,11 +595,7 @@ def _print_duplicate_groups(
             ]
         )
     rendered = "\n".join(lines) + "\n"
-    if output is None:
-        typer.echo(rendered, nl=False)
-    else:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(rendered, encoding="utf-8", newline="")
+    _emit(rendered, output)
 
 
 def _warn_incomplete_hashes(summary: HashSummary) -> None:
@@ -591,11 +607,8 @@ def _warn_incomplete_hashes(summary: HashSummary) -> None:
 
 
 def _print_df(rows: list[dict[str, object]], fmt: str, *, human_readable: bool, print_type: bool) -> None:
-    if fmt in {"json", "csv"}:
-        _print(rows, fmt)
+    if _print_machine(rows, fmt):
         return
-    if fmt != "table":
-        raise FlatlasError("format must be table, json or csv")
 
     def size(blocks_1k: object) -> str:
         if human_readable and isinstance(blocks_1k, int):
@@ -622,11 +635,8 @@ def _print_df(rows: list[dict[str, object]], fmt: str, *, human_readable: bool, 
 
 
 def _print_roots(rows: list[dict[str, Any]], fmt: str, *, human_readable: bool) -> None:
-    if fmt in {"json", "csv"}:
-        _print(rows, fmt)
+    if _print_machine(rows, fmt):
         return
-    if fmt != "table":
-        raise FlatlasError("format must be table, json or csv")
     table_rows = [
         [
             str(row["id"]),
@@ -652,30 +662,21 @@ def init(
     db: db_option = None,
 ) -> None:
     """Initialize global configuration and register a filesystem without scanning it."""
-    database = _database(db, create=True)
-    connection = _open_database(database)
-    try:
+    with _connection(db, create=True) as connection:
         namespace = discover_namespace(path)
         root_id = register_namespace(connection, namespace)
-    finally:
-        connection.close()
     typer.echo(f"registered filesystem {namespace.path} as root {root_id}; no files were scanned")
 
 
 @app.command("roots")
 def roots(
     db: db_option = None,
-    format: Annotated[str, typer.Option("--format")] = "table",
-    human_readable: Annotated[
-        bool, typer.Option("-h", "--human-readable", help="Show indexed sizes in 1024-based K, M, G, T units.")
-    ] = False,
+    format: table_format_option = "table",
+    human_readable: human_readable_option = False,
 ) -> None:
     """Show registered namespaces as recorded in the index, without touching the filesystem."""
-    connection = _open_database(_database(db))
-    try:
+    with _connection(db) as connection:
         rows = list_roots(connection)
-    finally:
-        connection.close()
     _print_roots(rows, format, human_readable=human_readable)
 
 
@@ -686,21 +687,16 @@ def df_command(
         typer.Argument(help="Report the filesystem containing each FILE; defaults to all registered namespaces."),
     ] = None,
     db: db_option = None,
-    format: Annotated[str, typer.Option("--format")] = "table",
-    human_readable: Annotated[
-        bool, typer.Option("-h", "--human-readable", help="Print sizes in powers of 1024 (GNU df -h style).")
-    ] = False,
+    format: table_format_option = "table",
+    human_readable: human_readable_option = False,
     print_type: Annotated[bool, typer.Option("-T", "--print-type", help="Print the filesystem type.")] = False,
 ) -> None:
     """Show live filesystem capacity in the style of GNU df."""
     if files:
         rows = filesystem_usage(files=files)
     else:
-        connection = _open_database(_database(db))
-        try:
+        with _connection(db) as connection:
             rows = filesystem_usage(connection)
-        finally:
-            connection.close()
     _print_df(rows, format, human_readable=human_readable, print_type=print_type)
 
 
@@ -743,9 +739,7 @@ def scan(
     if not (resume or resume_from is not None or full):
         value = refresh_before if refresh_before is not None else get_default("scan.refresh-before")
         cutoff = _parse_refresh_before(value) if value is not None else None
-    connection = _open_database(_database(db))
-    progress = _ScanProgressDisplay(enabled=_stderr_is_tty())
-    try:
+    with _connection(db) as connection, _ScanProgressDisplay(enabled=_stderr_is_tty()) as progress:
         scan_path = path
         if resume_from is not None:
             selection = resume_selection_from_scan(connection, resume_from)
@@ -756,9 +750,6 @@ def scan(
             cutoff = resume_selection(connection, path).refresh_before_ns
         assert scan_path is not None
         result = scan_directory(connection, scan_path, refresh_before_ns=cutoff, on_progress=progress.update)
-    finally:
-        progress.close()
-        connection.close()
     _print(result)
 
 
@@ -766,17 +757,12 @@ def scan(
 def scans_command(
     path: Annotated[Path | None, typer.Argument(help="Optional path whose related scan scopes are listed.")] = None,
     limit: Annotated[int, typer.Option("--limit", min=1)] = 50,
-    format: Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")] = "table",
+    format: table_format_option = "table",
     db: db_option = None,
 ) -> None:
     """List scan and scope audit records without accessing file contents."""
-    if format not in {"table", "json", "csv"}:
-        raise FlatlasError("format must be table, json or csv")
-    connection = _open_database(_database(db))
-    try:
+    with _connection(db) as connection:
         rows = list_scans(connection, scope=path, limit=limit)
-    finally:
-        connection.close()
     _print_scans(rows, format)
 
 
@@ -786,11 +772,8 @@ def scan_info_command(
     db: db_option = None,
 ) -> None:
     """Show one scan with its scopes and recorded errors as JSON."""
-    connection = _open_database(_database(db))
-    try:
+    with _connection(db) as connection:
         result = scan_info(connection, scan_id)
-    finally:
-        connection.close()
     _print(result)
 
 
@@ -798,16 +781,13 @@ def scan_info_command(
 def paths_command(
     path: Annotated[Path | None, typer.Argument(help="Optional indexed directory scope.")] = None,
     limit: Annotated[int, typer.Option("--limit", min=1)] = 500,
-    format: Annotated[str, typer.Option("--format")] = "json",
-    output: Annotated[Path | None, typer.Option("--output")] = None,
+    format: data_format_option = "json",
+    output: output_option = None,
     db: db_option = None,
 ) -> None:
     """Browse current indexed paths; it remains available while sources are offline."""
-    connection = _open_database(_database(db))
-    try:
+    with _connection(db) as connection:
         _print(query_paths(connection, scope=path, limit=limit), format, output)
-    finally:
-        connection.close()
 
 
 @app.command("rm")
@@ -816,11 +796,8 @@ def rm(
     db: db_option = None,
 ) -> None:
     """Remove an indexed path subtree; never checks or changes filesystem entries."""
-    connection = _open_database(_database(db))
-    try:
+    with _connection(db) as connection:
         _print(remove_indexed_subtree(connection, path))
-    finally:
-        connection.close()
 
 @app.command("du")
 def du(
@@ -828,33 +805,26 @@ def du(
         list[Path] | None,
         typer.Argument(help="Optional file or directory scopes; defaults to the current directory."),
     ] = None,
-    human_readable: Annotated[
-        bool, typer.Option("-h", "--human-readable", help="Show table sizes in 1024-based K, M, G, T units.")
-    ] = False,
-    format: Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")] = "table",
-    output: Annotated[Path | None, typer.Option("--output")] = None,
+    human_readable: human_readable_option = False,
+    format: table_format_option = "table",
+    output: output_option = None,
     db: db_option = None,
 ) -> None:
     """Summarize indexed usage. S: ok=scanned, new=unscanned, part=incomplete.
 
     SIZE(B)=logical bytes; N=file count; ALLOC(B)=allocated bytes.
     """
-    connection = _open_database(_database(db))
-    try:
+    with _connection(db) as connection:
         rows = [row for path in (paths or [Path(".")]) for row in disk_usage(connection, scope=path)]
         _print_usage(rows, format, output, include_status=True, human_readable=human_readable)
-    finally:
-        connection.close()
 
 
 @app.command("ls")
 def ls_command(
     path: Annotated[Path, typer.Argument(help="Directory whose live direct children are listed.")] = Path("."),
-    human_readable: Annotated[
-        bool, typer.Option("-h", "--human-readable", help="Show table sizes in 1024-based K, M, G, T units.")
-    ] = False,
-    format: Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")] = "table",
-    output: Annotated[Path | None, typer.Option("--output")] = None,
+    human_readable: human_readable_option = False,
+    format: table_format_option = "table",
+    output: output_option = None,
     db: db_option = None,
 ) -> None:
     """List live direct entries. S: ok=scanned, new=unscanned, part=incomplete, gone=missing.
@@ -862,8 +832,7 @@ def ls_command(
     LOGICAL(B)=file bytes or indexed directory bytes; N=file count; ALLOC(B)=allocated bytes.
     SCANNED-THROUGH=oldest successful directory scan in an indexed subtree, not a snapshot.
     """
-    connection = _open_database(_database(db))
-    try:
+    with _connection(db) as connection:
         _print_usage(
             list_child_directories(connection, scope=path),
             format,
@@ -875,37 +844,30 @@ def ls_command(
             include_scanned_through=True,
             human_readable=human_readable,
         )
-    finally:
-        connection.close()
 
 
 @app.command("largest")
 def largest(
     path: Annotated[Path, typer.Argument(help="Indexed file or directory scope.")] = Path("."),
     limit: Annotated[int, typer.Option("--limit", "-n", min=1)] = 10,
-    human_readable: Annotated[
-        bool, typer.Option("-h", "--human-readable", help="Show table sizes in 1024-based K, M, G, T units.")
-    ] = False,
-    format: Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")] = "table",
-    output: Annotated[Path | None, typer.Option("--output")] = None,
+    human_readable: human_readable_option = False,
+    format: table_format_option = "table",
+    output: output_option = None,
     db: db_option = None,
 ) -> None:
     """List the largest currently indexed files."""
-    connection = _open_database(_database(db))
-    try:
+    with _connection(db) as connection:
         _print_largest_files(
             largest_files(connection, scope=path, limit=limit), format, output, human_readable=human_readable
         )
-    finally:
-        connection.close()
 
 
 @app.command("dupes")
 def dupes(
     path: Annotated[Path, typer.Argument(help="Indexed directory whose duplicate groups are listed.")] = Path("."),
     absolute: Annotated[bool, typer.Option("--absolute", help="Show absolute paths instead of paths relative to PATH.")] = False,
-    format: Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")] = "table",
-    output: Annotated[Path | None, typer.Option("--output")] = None,
+    format: table_format_option = "table",
+    output: output_option = None,
     db: db_option = None,
     min_size: min_size_option = 0,
     max_size: max_size_option = None,
@@ -915,14 +877,9 @@ def dupes(
 ) -> None:
     """List full-hash duplicate groups within an indexed directory."""
     filters = DuplicateFilters(min_size, max_size, min_count, min_savings, limit)
-    connection = _open_database(_database(db))
-    hash_progress = _HashProgressDisplay(enabled=_stderr_is_tty())
-    try:
+    with _connection(db) as connection, _HashProgressDisplay(enabled=_stderr_is_tty()) as hash_progress:
         hash_summary = ensure_duplicate_hashes(connection, path, on_progress=hash_progress.update, filters=filters)
         groups = _duplicate_display_paths(duplicate_groups(connection, scope=path, filters=filters), path, absolute=absolute)
-    finally:
-        hash_progress.close()
-        connection.close()
     _warn_incomplete_hashes(hash_summary)
     _print_duplicate_groups(groups, format, output, hash_summary)
 
@@ -936,7 +893,7 @@ def export_dupes(
     output: Annotated[Path, typer.Option("--output")],
     path: Annotated[Path, typer.Argument(help="Indexed directory whose duplicate groups are exported.")] = Path("."),
     absolute: Annotated[bool, typer.Option("--absolute", help="Show absolute paths instead of paths relative to PATH.")] = False,
-    format: Annotated[str, typer.Option("--format")] = "json",
+    format: data_format_option = "json",
     db: db_option = None,
     min_size: min_size_option = 0,
     max_size: max_size_option = None,
@@ -962,30 +919,24 @@ def plan_create(
     db: db_option = None,
 ) -> None:
     """Create an immutable hardlink dry-run plan without changing any file."""
-    connection = _open_database(_database(db))
-    try:
+    with _connection(db) as connection:
         root = get_root(connection, discover_namespace(root_path))
         if root is None:
             raise FlatlasError(f"filesystem is not registered; run 'flatlas init {root_path}' first")
         plan_id = create_dry_run_plan(connection, int(root["id"]))
-    finally:
-        connection.close()
     typer.echo(plan_id)
 
 
 @plan_app.command("show")
 def plan_show(
     plan_id: Annotated[str | None, typer.Argument(help="Plan ID to inspect; omit to list plan summaries.")] = None,
-    format: Annotated[str, typer.Option("--format")] = "json",
-    output: Annotated[Path | None, typer.Option("--output")] = None,
+    format: data_format_option = "json",
+    output: output_option = None,
     db: db_option = None,
 ) -> None:
-    connection = _open_database(_database(db))
-    try:
+    with _connection(db) as connection:
         rows = plan_operations(connection, plan_id) if plan_id is not None else list_plans(connection)
         _print(rows, format, output)
-    finally:
-        connection.close()
 
 
 def _raise_keyboard_interrupt(signum: int, frame: object) -> None:

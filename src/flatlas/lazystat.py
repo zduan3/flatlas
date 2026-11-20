@@ -23,6 +23,11 @@ from pathlib import Path
 
 LUSTRE = "lustre"
 
+
+def uses_lazy_metadata(filesystem_type: str | None) -> bool:
+    """Whether scans of a root with this recorded filesystem type use lazy metadata."""
+    return filesystem_type == LUSTRE
+
 _AT_FDCWD = -100
 _AT_SYMLINK_NOFOLLOW = 0x100
 _AT_STATX_DONT_SYNC = 0x4000

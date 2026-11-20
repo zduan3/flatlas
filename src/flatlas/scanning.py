@@ -14,7 +14,7 @@ from typing import Any
 from flatlas.allocation import allocated_size
 from flatlas.db import _last_insert_id, now_ns
 from flatlas.errors import FlatlasError
-from flatlas.lazystat import LUSTRE, lazy_lstat
+from flatlas.lazystat import lazy_lstat, uses_lazy_metadata
 from flatlas.paths import (
     Namespace,
     _sqlite_integer,
@@ -372,7 +372,7 @@ def scan_directory(
     if not scope.is_dir():
         raise FlatlasError(f"scan path must be a directory: {scope}")
     root_id = int(root["id"])
-    lazy = root["filesystem_type"] == LUSTRE
+    lazy = uses_lazy_metadata(root["filesystem_type"])
     kind = "full" if scope == namespace.path else "subtree"
     started = now_ns()
     if refresh_before_ns is not None and refresh_before_ns > started:
