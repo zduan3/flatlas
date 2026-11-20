@@ -11,7 +11,7 @@ from typing import Any
 
 from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError
-from flatlas.lazystat import LUSTRE
+from flatlas.lazystat import uses_lazy_metadata
 from flatlas.mounts import mount_entry
 from flatlas.paths import _scope_row, discover_namespace, get_root, path_key
 from flatlas.scanning import Observation, _observation
@@ -45,7 +45,7 @@ def list_roots(connection: sqlite3.Connection) -> list[dict[str, Any]]:
             "platform": row["platform"],
             "namespace_kind": row["namespace_kind"],
             "filesystem_type": row["filesystem_type"],
-            "metadata": "lazy" if row["filesystem_type"] == LUSTRE else "exact",
+            "metadata": "lazy" if uses_lazy_metadata(row["filesystem_type"]) else "exact",
             "enabled": bool(row["enabled"]),
             "created_at_ns": row["created_at_ns"],
             "updated_at_ns": row["updated_at_ns"],
@@ -304,7 +304,7 @@ def list_child_directories(
         actual_keys.add(normalized)
         indexed = indexed_by_path.get(normalized)
         try:
-            observed = _observation(namespace, actual_path, lazy=root["filesystem_type"] == LUSTRE)
+            observed = _observation(namespace, actual_path, lazy=uses_lazy_metadata(root["filesystem_type"]))
         except OSError as exc:
             raise FlatlasError(f"cannot inspect directory entry {actual_path}: {exc}") from exc
         usage = None if indexed is None else usage_by_id.get(indexed["id"])
