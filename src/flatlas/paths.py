@@ -36,6 +36,21 @@ def discover_namespace(value: Path) -> Namespace:
     return Namespace(current, platform, "posix_mount", os.fsencode(str(current)))
 
 
+def display_path(value: Path | str) -> str:
+    """Text form of a path for ``*_display`` columns, messages and lookups.
+
+    Identity lives in the raw-byte ``path_key``; SQLite TEXT must be valid
+    UTF-8, so bytes that are not (POSIX names decoded with surrogateescape)
+    are shown as ``\\xNN`` escapes instead of aborting the transaction.
+    """
+    return os.fsencode(str(value)).decode("utf-8", "backslashreplace")
+
+
+def display_text(value: object) -> str:
+    """``str(value)`` made storable as SQLite TEXT (lone surrogates escaped)."""
+    return str(value).encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def path_key(namespace: Namespace, value: Path) -> bytes:
     relative = os.path.relpath(str(value), str(namespace.path))
     if relative in (".", ""):
@@ -77,7 +92,7 @@ def register_namespace(connection: sqlite3.Connection, namespace: Namespace) -> 
            namespace_id_raw, filesystem_type, case_sensitive, created_at_ns, updated_at_ns)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            namespace.identity, str(namespace.path), namespace.platform, namespace.kind,
+            namespace.identity, display_path(namespace.path), namespace.platform, namespace.kind,
             namespace.identity, fs_type, 0 if os.name == "nt" else 1, timestamp, timestamp,
         ),
     )
@@ -95,7 +110,7 @@ def _sqlite_integer(value: int | None) -> int | None:
 
 
 def _scope_row(connection: sqlite3.Connection, value: Path) -> sqlite3.Row:
-    display = str(value.expanduser().resolve())
+    display = display_path(value.expanduser().resolve())
     row = connection.execute(
         """SELECT p.id, p.root_id, p.path_key, p.parent_path_id, p.state,
                   p.last_seen_scan_id, p.path_display, p.entry_kind,
@@ -117,7 +132,7 @@ def _lexical_absolute_path(value: Path) -> Path:
 
 def remove_indexed_subtree(connection: sqlite3.Connection, value: Path) -> dict[str, Any]:
     """Remove one indexed path and all indexed descendants without touching the filesystem."""
-    display = str(_lexical_absolute_path(value))
+    display = display_path(_lexical_absolute_path(value))
     selected = connection.execute(
         "SELECT id, root_id, parent_path_id FROM path WHERE path_display=?",
         (display,),

@@ -19,7 +19,7 @@ PRAGMA cache_size = -262144;  -- 页缓存上限 256 MiB，按需分配
 
 默认 2 MiB 页缓存在索引变大后会让逐条 `path_key` 查找反复读取 B-tree 页，在网络文件系统上每次未命中都是远程读取；缓存按需分配，小索引不承担该上限。
 
-所有时间均为 UTC Unix 纳秒（`*_ns`，`INTEGER`）。文件路径以 root-relative 原始字节存为 `BLOB`；Windows 将原生 Unicode 以固定 UTF-8 编码存入 BLOB，Linux 直接存 `os.fsencode()` 的结果。显示字符串只用于 UI/导出，不参与唯一性或路径比较。已验收范围只覆盖当前平台可正常表示的常规 Unicode 路径；Linux 非 UTF-8 round-trip 尚未验收，但 schema 的 BLOB 身份设计不得退化。
+所有时间均为 UTC Unix 纳秒（`*_ns`，`INTEGER`）。文件路径以 root-relative 原始字节存为 `BLOB`；Windows 将原生 Unicode 以固定 UTF-8 编码存入 BLOB，Linux 直接存 `os.fsencode()` 的结果。显示字符串只用于 UI/导出，不参与唯一性或路径比较；SQLite TEXT 必须是合法 UTF-8，因此显示字符串、错误消息中不可解码的字节分别写作 `\xNN`、`\udcNN`（`paths.display_path` / `display_text`），否则一个这样的文件名会让整次扫描事务回滚。已验收范围只覆盖当前平台可正常表示的常规 Unicode 路径；Linux 非 UTF-8 round-trip 尚未验收，但 schema 的 BLOB 身份设计不得退化。
 
 ## 路径编码与对象身份
 

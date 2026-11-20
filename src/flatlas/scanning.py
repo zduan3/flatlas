@@ -19,6 +19,8 @@ from flatlas.paths import (
     Namespace,
     _sqlite_integer,
     discover_namespace,
+    display_path,
+    display_text,
     get_root,
     parent_key,
     path_key,
@@ -150,7 +152,7 @@ def upsert_path(
         (root_id, item.key),
     ).fetchone()
     values = (
-        parent_id, item.name, str(item.path), item.kind, item.device, item.inode, item.mode,
+        parent_id, item.name, display_path(item.path), item.kind, item.device, item.inode, item.mode,
         item.uid, item.gid, item.nlink, item.logical_size, item.allocated_size, item.mtime_ns,
         item.change_time_ns, item.birth_time_ns, item.symlink_target, scan_id, root_id, item.key,
     )
@@ -199,7 +201,7 @@ def upsert_path(
 def _record_error(connection: sqlite3.Connection, scope_id: int, key: bytes, operation: str, exc: OSError | Exception) -> None:
     connection.execute(
         "INSERT INTO scan_error(scan_scope_id, path_key, operation, error_code, message, occurred_at_ns) VALUES (?, ?, ?, ?, ?, ?)",
-        (scope_id, key, operation, getattr(exc, "errno", None), str(exc), now_ns()),
+        (scope_id, key, operation, getattr(exc, "errno", None), display_text(exc), now_ns()),
     )
     connection.execute("UPDATE scan_scope SET error_count = error_count + 1 WHERE id = ?", (scope_id,))
 
@@ -414,7 +416,7 @@ def scan_directory(
                 current_directory = None
                 if directory is not None:
                     relative_directory = directory.relative_to(scope)
-                    current_directory = str(relative_directory) if relative_directory.parts else "."
+                    current_directory = display_path(relative_directory) if relative_directory.parts else "."
                 on_progress(
                     ScanProgress(phase, files_seen, dirs_seen, logical_bytes_seen, current_directory)
                 )
