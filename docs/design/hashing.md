@@ -16,7 +16,7 @@
 
 每个 `file_hash` 行记录计算依据：device、inode、size、mtime、change time 与 birth time（Windows 的 change time 为 `NULL`，不参与比较）。
 
-- 打开文件后先 `fstat`：不是普通文件或与索引中的依据不一致时不读取内容；读取完成后再 `fstat` 一次，仍须与依据一致。任一不一致使该文件记为 `stale`（"metadata changed"），读取错误记为 `failed` 并保存错误信息。两者都令本次结果不完整，但不改变 scan coverage 或路径状态。
+- 打开文件后先 `fstat`：不是普通文件或与索引中的依据不一致时不读取内容；读取完成后再 `fstat` 一次，仍须与依据一致。例外：root 以 lazy 元数据扫描（Lustre）时，若 device、inode、size 一致而只有 mtime/change/birth time 不同，视为索引中的 lazy 时间滞后，以 `fstat` 的精确时间更新 path 与 hash basis 后继续读取（`tests/test_lazy_hash_basis.py`）；exact root 仍严格比较。其余任一不一致使该文件记为 `stale`（"metadata changed"），读取错误记为 `failed` 并保存错误信息。两者都令本次结果不完整，但不改变 scan coverage 或路径状态。
 - quick/full 缓存只有在算法为 `blake3`、quick 采样大小等于当前 64 KiB，且依据与索引中当前 metadata 完全一致时才复用；否则重新读取。
 - 扫描发现已用于 hash 的身份、size、mtime、change/birth time 任一变化时，把 `quick_ready` / `full_ready` 标为 `stale`，见 [扫描与目录汇总](scanning.md)。
 - `full_verification` 只写 `hash_only`；没有逐字节比较。

@@ -16,6 +16,7 @@ from blake3 import blake3
 
 from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError
+from flatlas.lazystat import uses_lazy_metadata
 from flatlas.paths import _scope_row, _sqlite_integer
 
 QUICK_SAMPLE_BYTES = 64 * 1024
@@ -79,14 +80,43 @@ def _candidate_hash_basis(candidate: dict[str, Any]) -> tuple[int | None, ...]:
     )
 
 
+def _reconcile_lazy_times(candidate: dict[str, Any], actual: tuple[int | None, ...]) -> bool:
+    """Accept exact times from ``fstat`` for a root scanned with lazy metadata.
+
+    Lazy Lustre metadata can carry a modification/change time that trails the
+    object storage targets (see flatlas.lazystat), which would mark the file as
+    changed forever. Identity and size must still match; only the times are
+    replaced, and the caller persists them on the path row.
+    """
+    expected = _candidate_hash_basis(candidate)
+    if not candidate.get("lazy_metadata") or actual[:3] != expected[:3]:
+        return False
+    candidate["mtime_ns"], candidate["change_time_ns"], candidate["birth_time_ns"] = actual[3:]
+    candidate["times_reconciled"] = True
+    return True
+
+
+def _persist_reconciled_times(connection: sqlite3.Connection, candidate: dict[str, Any]) -> None:
+    if candidate.pop("times_reconciled", False):
+        connection.execute(
+            "UPDATE path SET mtime_ns=?, change_time_ns=?, birth_time_ns=? WHERE id=?",
+            (candidate["mtime_ns"], candidate["change_time_ns"], candidate["birth_time_ns"], candidate["id"]),
+        )
+
+
 def _validated_digest(candidate: dict[str, Any], *, full: bool) -> bytes:
     expected = _candidate_hash_basis(candidate)
     size = int(candidate["logical_size"])
     digest = blake3()
     with Path(candidate["path_display"]).open("rb") as stream:
         before = os.fstat(stream.fileno())
-        if not stat_module.S_ISREG(before.st_mode) or _stat_hash_basis(before) != expected:
+        if not stat_module.S_ISREG(before.st_mode):
             raise _HashBasisChanged
+        actual = _stat_hash_basis(before)
+        if actual != expected:
+            if not _reconcile_lazy_times(candidate, actual):
+                raise _HashBasisChanged
+            expected = actual
         if full or size <= QUICK_SAMPLE_BYTES * 2:
             while chunk := stream.read(1024 * 1024):
                 digest.update(chunk)
@@ -178,6 +208,7 @@ def _duplicate_hash_candidates(
         )
         SELECT p.id, p.path_display, p.logical_size, p.device, p.inode, p.mtime_ns,
                p.change_time_ns, p.birth_time_ns, p.last_seen_scan_id,
+               r.filesystem_type,
                h.state AS hash_state, h.quick_algorithm, h.quick_digest, h.quick_sample_bytes,
                h.full_algorithm, h.full_digest,
                h.basis_device AS hash_device, h.basis_inode AS hash_inode,
@@ -186,13 +217,17 @@ def _duplicate_hash_candidates(
                h.basis_birth_time_ns AS hash_birth_time_ns
         FROM path p JOIN descendants d ON d.id=p.id
         JOIN duplicate_sizes s ON s.logical_size=p.logical_size
+        JOIN root r ON r.id=p.root_id
         LEFT JOIN file_hash h ON h.path_id=p.id
         WHERE p.state='present' AND p.entry_kind='file' AND p.logical_size > 0
           AND (p.allocated_size IS NULL OR p.allocated_size > 0)
         ORDER BY p.logical_size, p.path_display""",
         (selected["id"], *filters.size_bounds),
     ).fetchall()
-    return [dict(row) for row in rows]
+    candidates = [dict(row) for row in rows]
+    for candidate in candidates:
+        candidate["lazy_metadata"] = uses_lazy_metadata(candidate.pop("filesystem_type"))
+    return candidates
 
 
 def ensure_duplicate_hashes(
@@ -276,6 +311,7 @@ def ensure_duplicate_hashes(
             size = int(candidate["logical_size"])
             try:
                 quick = _validated_digest(candidate, full=False)
+                _persist_reconciled_times(connection, candidate)
                 is_full = size <= QUICK_SAMPLE_BYTES * 2
                 _save_hash(connection, candidate, quick=quick, full=quick if is_full else None)
                 candidate["hash_state"] = "full_ready" if is_full else "quick_ready"
@@ -340,6 +376,7 @@ def ensure_duplicate_hashes(
             size = int(candidate["logical_size"])
             try:
                 full = _validated_digest(candidate, full=True)
+                _persist_reconciled_times(connection, candidate)
                 _save_hash(connection, candidate, quick=candidate["quick_digest"], full=full)
                 candidate["hash_state"] = "full_ready"
                 candidate["full_algorithm"] = "blake3"

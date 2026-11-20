@@ -128,18 +128,38 @@ def test_filesystem_type_reads_live_mount_table() -> None:
 
 @linux_statx
 @pytest.mark.safety
-def test_lazy_lstat_rechecks_regular_files_reporting_size_without_blocks(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "lazy_size, lazy_blocks",
+    [
+        (4096, 0),  # placeholder without a size-on-MDT record (git objects)
+        (None, 1),  # right size, blocks counted before the data was flushed (TensorRT-LLM checkout)
+    ],
+)
+def test_lazy_lstat_rechecks_regular_files_with_fewer_blocks_than_bytes(
+    tmp_path: Path, monkeypatch, lazy_size, lazy_blocks,
+) -> None:
     file = tmp_path / "file.bin"
-    file.write_bytes(b"x" * 5000)
+    file.write_bytes(b"x" * 9020)
     exact = file.lstat()
     real = lazystat._statx
 
     def placeholder_statx(dirfd, path, flags, mask, ref):
         result = real(dirfd, path, flags, mask, ref)
-        ref._obj.stx_size = 4096  # what Lustre returned without a size-on-MDT record
-        ref._obj.stx_blocks = 0
+        if lazy_size is not None:
+            ref._obj.stx_size = lazy_size
+        ref._obj.stx_blocks = lazy_blocks
         return result
 
     monkeypatch.setattr(lazystat, "_statx", placeholder_statx)
     observed = lazystat.lazy_lstat(file)
     assert (observed.st_size, observed.st_blocks) == (exact.st_size, exact.st_blocks)
+
+
+@linux_statx
+def test_lazy_lstat_keeps_lazy_values_when_blocks_cover_the_size(tmp_path: Path, monkeypatch) -> None:
+    file = tmp_path / "file.bin"
+    file.write_bytes(b"x" * 9020)
+    monkeypatch.setattr(Path, "lstat", lambda self: pytest.fail("exact lstat is not needed"))
+    observed = lazystat.lazy_lstat(file)
+    assert isinstance(observed, lazystat.LazyStat)
+    assert observed.st_blocks * 512 >= observed.st_size

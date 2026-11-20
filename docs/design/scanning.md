@@ -21,9 +21,9 @@
 `init` 登记 root 时从 `/proc/self/mounts` 读取挂载点的文件系统类型，写入 `root.filesystem_type`；对已有 root 再次执行 `init` 会刷新该值，检测不到时不覆盖已有记录。扫描读取所属 root 的类型：
 
 - `filesystem_type = 'lustre'` 时，把这一次 `lstat` 换成 `statx(AT_SYMLINK_NOFOLLOW | AT_STATX_DONT_SYNC)`（`flatlas.lazystat`），读取 MDT 上已有的 size 与时间，不向 OST 同步文件大小；该 scan 的 `scanner_version` 带 `+lazy-statx` 后缀。`ls` 的现场条目检查同样使用 lazy 方式。
-- 普通文件返回 size > 0 但 blocks = 0 时，改用精确 `lstat`：没有 size-on-MDT 记录（`lfs getsom` 返回 ENODATA）的文件会得到占位值。
+- 普通文件的 `blocks × 512` 小于 size 时，改用精确 `lstat`。没有 size-on-MDT 记录（`lfs getsom` 返回 ENODATA）的文件，lazy 结果是客户端 close 时报给 MDT 的值：可能是占位值（blocks = 0、size 错误），也可能 size 正确而 blocks 只计到 close 时已落盘的部分（批量写入后立即 close，如 `git clone`、LFS checkout）。真正的稀疏文件同样走精确 `lstat`，只多花时间。
 - `statx` 不可用（非 Linux、glibc < 2.28 或 `ENOSYS`）时回退到 `lstat`。
-- 正在写入的文件，其 lazy size 与 mtime 可能滞后。这只影响索引中的估计值：hash 在打开文件后以 `fstat` 重验 basis，不一致的文件成为 stale，不会进入重复组。coverage、错误处理与删除确认规则不受影响。
+- 正在写入的文件，其 lazy size 与 mtime 可能滞后；同一机制下，已静止文件的 lazy mtime/ctime 也可能比 OST 上的值早约 1 s，且无法从 lazy 结果本身识别。这只影响索引中的估计值：hash 在打开文件后以 `fstat` 重验 basis，lazy root 上身份与 size 一致、仅时间不同的文件以 `fstat` 的精确时间写回 path 后继续（见 [惰性 Hash](hashing.md#metadata-basis-校验与缓存复用)），其余不一致的文件成为 stale，不会进入重复组。目录的 mtime 只在 MDT 上维护，不受影响。coverage、错误处理与删除确认规则不受影响。
 
 每个条目首次 stat 的延迟是网络文件系统上扫描的主要成本，实测见 [平台差异](platform.md#linux--lustre)。`tests/test_scan_costs.py` 覆盖只调用一次 `lstat`、父目录关联正确，以及类型变化时仍会清除汇总并让 hash 失效。
 

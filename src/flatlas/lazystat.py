@@ -3,8 +3,16 @@
 On Lustre a plain ``lstat`` of a regular file asks the object storage targets
 for the current size (a "glimpse"), which costs milliseconds per entry and
 dominates full scans. ``statx`` with ``AT_STATX_DONT_SYNC`` instead returns the
-size and times the metadata server already holds (lazy size-on-MDT), which is
-exact for files that are not being written and may lag for files that are.
+size and times the metadata server already holds (lazy size-on-MDT).
+
+Files without a size-on-MDT record (``lfs getsom`` reports ENODATA, the common
+case where this was measured) return what the client reported at close. For files
+written in a burst and closed before their data reached the object storage
+targets (``git clone``, LFS checkout) that copy keeps the right size but too few
+blocks, and a modification time that can trail the real one by about a second.
+Blocks below the size are detected here and re-read exactly; a trailing mtime
+cannot be detected from the lazy result, so hashing reconciles it against
+``fstat`` (see flatlas.hashing).
 
 Only the scanner uses this, and only for roots recorded as Lustre. Content
 hashing still validates its basis with ``fstat`` on the opened file, so a lagging
@@ -116,12 +124,13 @@ def lazy_lstat(path: Path) -> os.stat_result | LazyStat:
         if code == errno.ENOSYS:
             return path.lstat()
         raise OSError(code, os.strerror(code), str(path))
-    if stat_module.S_ISREG(buffer.stx_mode) and buffer.stx_size > 0 and buffer.stx_blocks == 0:
-        # Without a size-on-MDT record (``lfs getsom`` reports ENODATA) Lustre
-        # answers DONT_SYNC with placeholder values: on the measured system such
-        # files reported 0 blocks and a wrong size (4096 for git objects).
-        # Pay for an exact lstat on these few entries instead of indexing
-        # wrong sizes; genuinely sparse or data-on-MDT files cost the same.
+    if stat_module.S_ISREG(buffer.stx_mode) and buffer.stx_blocks * 512 < buffer.stx_size:
+        # Fewer allocated bytes than logical bytes means the metadata server's
+        # copy is stale: placeholders with 0 blocks and a wrong size (4096 for
+        # git objects), or the right size with blocks counted before the data
+        # was flushed (TensorRT-LLM checkout: 1 block for a 9020-byte file,
+        # 6449 of 14905 files). Pay for an exact lstat on these entries;
+        # genuinely sparse files take the same path and only cost the time.
         return path.lstat()
     return LazyStat(
         st_mode=buffer.stx_mode,

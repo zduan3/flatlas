@@ -68,3 +68,4 @@ Windows 集成测试使用临时普通文件、非空 MFT 驻留文件、原生 
 - `lfs find --printf` 不输出 inode 与 device，无法直接作为 flatlas 的 metadata 来源。
 - 启用 lazy 后，flatlas 扫描 22,412 个条目（19,118 个文件）用时 22 s，约 1000 条目/s；改动前同类子树约 31 条目/s。
 - 同一次扫描中，6 个文件的 lazy 结果与 `lstat` 不同：blocks 为 0、size 错误（git object 显示为 4096，另有两个相差 20 字节），`lfs getsom` 对它们返回 ENODATA。这些文件经过一次精确 stat 后，lazy 结果即与 `lstat` 一致。该批文件中 size > 0 且 blocks = 0 的共 29 个，据此对这类文件改用精确 `lstat`。
+- `TensorRT-LLM` checkout（2026-04-07 一次 `git clone` 写入，14,905 个文件）首次扫描中 6,449 个文件 size 正确但 blocks 偏小（例如 9020 字节的文件只有 1 个 block），`.git/lfs` 合计记为 0.50 GiB，精确值 3.06 GiB；同时有 1 个文件的 mtime 比 `lstat` 早 1 s。这些文件同样没有 size-on-MDT 记录，HSM 状态为 0、文件系统没有 pool，与冷数据处理无关；同批写入的其余文件 lazy 结果正确。其他三棵目录各抽 300 个文件未见差异。据此把精确 `lstat` 的条件推广为 `blocks × 512 < size`，重扫后与 GNU `du` 只差目录本身的 4 KiB。
