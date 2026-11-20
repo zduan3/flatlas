@@ -451,7 +451,9 @@ def disk_usage(
             "allocated_size": usage["allocated_size"],
         }
     else:
-        row = {"files": 0, "logical_size": 0, "allocated_size": 0}
+        # Sizes only count regular-file content and special entries record none;
+        # report unknown rather than 0, matching ls.
+        row = {"files": None, "logical_size": None, "allocated_size": None}
         usage = None
     parent_summary = connection.execute(
         """SELECT self_completed_at_ns, last_completed_scan_id
