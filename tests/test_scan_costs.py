@@ -1,11 +1,13 @@
-"""Per-entry metadata and SQLite costs of scanning."""
+"""Per-entry metadata and SQLite costs of scanning, and termination handling."""
 
 import os
+import signal
+import sys
 from pathlib import Path
 
 import pytest
 
-from flatlas import scanning
+from flatlas import cli, scanning
 from flatlas.core import (
     discover_namespace,
     open_database,
@@ -17,6 +19,8 @@ from flatlas.paths import parent_key
 
 pytestmark = pytest.mark.scan
 
+posix_signals = pytest.mark.skipif(sys.platform == "win32", reason="POSIX termination signals")
+
 
 def make_connection(tmp_path: Path):
     source = tmp_path / "source"
@@ -25,6 +29,14 @@ def make_connection(tmp_path: Path):
     register_namespace(connection, discover_namespace(source))
     return connection, source
 
+
+@pytest.fixture
+def restore_signals():
+    names = [name for name in ("SIGTERM", "SIGHUP") if hasattr(signal, name)]
+    saved = {name: signal.getsignal(getattr(signal, name)) for name in names}
+    yield
+    for name, handler in saved.items():
+        signal.signal(getattr(signal, name), handler)
 
 
 @pytest.mark.safety
@@ -136,5 +148,53 @@ def test_open_database_raises_page_cache_ceiling(tmp_path: Path) -> None:
     connection = open_database(tmp_path / "index.sqlite")
     try:
         assert connection.execute("PRAGMA cache_size").fetchone()[0] == -CACHE_SIZE_KIB
+    finally:
+        connection.close()
+
+
+@posix_signals
+@pytest.mark.cli
+def test_termination_signals_raise_keyboard_interrupt(restore_signals) -> None:
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)
+    cli._route_termination_signals()
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        with pytest.raises(KeyboardInterrupt):
+            os.kill(os.getpid(), signum)  # the handler runs before the next bytecode
+
+
+@posix_signals
+@pytest.mark.cli
+def test_ignored_hangup_stays_ignored(restore_signals) -> None:
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    cli._route_termination_signals()
+    assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+
+
+@posix_signals
+@pytest.mark.safety
+def test_sigterm_during_scan_saves_observed_paths_as_cancelled(tmp_path: Path, restore_signals) -> None:
+    connection, source = make_connection(tmp_path)
+    payload = source / "payload.bin"
+    payload.write_bytes(b"saved")
+    (source / "later").mkdir()
+    (source / "later" / "unseen.bin").write_bytes(b"unseen")
+    cli._route_termination_signals()
+    sent = False
+
+    def terminate_once(progress) -> None:
+        nonlocal sent
+        if progress.phase == "scanning" and progress.files_seen == 1 and not sent:
+            sent = True
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            scan_directory(connection, source, on_progress=terminate_once)
+        scan = connection.execute("SELECT status, files_seen FROM scan ORDER BY id DESC LIMIT 1").fetchone()
+        assert scan["status"] == "cancelled"
+        assert scan["files_seen"] == 1
+        # Cancellation never confirms deletions.
+        assert connection.execute("SELECT count(*) FROM path WHERE state='deleted'").fetchone()[0] == 0
     finally:
         connection.close()

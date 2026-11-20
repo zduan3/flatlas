@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import sys
 import time
 import unicodedata
@@ -928,8 +929,30 @@ def plan_show(
         connection.close()
 
 
+def _raise_keyboard_interrupt(signum: int, frame: object) -> None:
+    raise KeyboardInterrupt
+
+
+def _route_termination_signals() -> None:
+    """Treat SIGTERM and SIGHUP like Ctrl-C.
+
+    Batch schedulers send SIGTERM before killing a job, and closing a terminal
+    or a dropped remote session sends SIGHUP. Their default action ends the
+    process at once, so a running scan rolls back and hashing loses the work
+    since its last batch commit. Raising KeyboardInterrupt instead reuses the
+    existing cancellation paths that persist observed work. A signal that the
+    parent already ignores (for example under ``nohup``) stays ignored.
+    """
+    for name in ("SIGTERM", "SIGHUP"):
+        signum = getattr(signal, name, None)
+        if signum is None or signal.getsignal(signum) is signal.SIG_IGN:
+            continue
+        signal.signal(signum, _raise_keyboard_interrupt)
+
+
 def main() -> int:
     """Run the CLI while rendering domain errors without a Python traceback."""
+    _route_termination_signals()
     try:
         app()
     except FlatlasError as exc:
