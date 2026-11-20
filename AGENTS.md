@@ -4,9 +4,9 @@
 
 File Atlas (flatlas) 是跨平台、持久化且只读的文件系统索引工具。SQLite 保存当前路径状态、扫描 coverage、错误、hash 与 dry-run plan；它不是每次命令都重新遍历目录的即时查重工具。
 
-当前开发阶段是纯 Python 3.12 的 0.2；MVP（0.1）已完成并冻结，0.2 在其只读基线上完善索引、查询、扫描中断恢复与惰性 hash。除非用户明确要求并且相关设计已更新，不实现删除、移动、hardlink/reflink/symlink 替换、监听、TUI、Rust/PyO3 或 plan apply 等后续规划内容。
+当前开发阶段是纯 Python 3.12 的 0.2；MVP（0.1）已完成并以 git tag `v0.1.0` 冻结，0.2 在其只读基线上完善索引、查询、扫描性能与恢复、惰性 hash。除非用户明确要求并且相关设计已更新，不实现删除、移动、hardlink/reflink/symlink 替换、监听、TUI、Rust/PyO3 或 plan apply 等后续规划内容。
 
-开始功能修改前，先阅读与任务相关的 `docs/design/architecture.md`、`docs/design/schema.md`、`docs/history/0.1-acceptance.md` 和 `docs/history/0.1-implementation.md`，再阅读 `docs/plan/backlog.md` 及其链接的专项规划。0.1 文档是不可破坏的冻结基线；0.2 文档承载当前阶段的新设计与验收标准。
+开始功能修改前，依次阅读 `docs/design/architecture.md`、所涉领域的 design 文档（`schema.md`、`scanning.md`、`hashing.md`、`queries.md`、`config.md`、`platform.md`）、相关提案（`docs/plan/proposals/`）和 `docs/plan/backlog.md`。0.1 基线由 git tag `v0.1.0` 与 `docs/history/` 固定，不可破坏，也不要修改 `docs/history/` 的内容（只修正链接）。文档的分类与维护规则见 `docs/README.md`：功能落地时把提案合并进 `docs/design/`、删除提案并移除 backlog 条目；design 只写现状，plan 只写计划。
 
 ## 绝不可破坏的语义
 
@@ -29,7 +29,7 @@ File Atlas (flatlas) 是跨平台、持久化且只读的文件系统索引工�
 
 ## 代码与 CLI 约定
 
-- 当前 MVP 实现在 `src/flatlas/core.py`；新增功能可以在职责清晰时拆分模块，但应保留公开 CLI 行为和数据库语义。
+- 实现按职责拆分在 `src/flatlas/` 的 `db.py`、`paths.py`、`scanning.py`（及 `summaries.py`、`refresh.py`）、`allocation.py`、`hashing.py`、`queries.py`、`planning.py`、`output.py`、`config.py`、`cli.py` 中；`core.py` 只是兼容性 facade（re-export 与故障注入入口），不要在其中加新逻辑。新增功能可以在职责清晰时拆分模块，但应保留公开 CLI 行为和数据库语义。
 - 用户可预期错误抛出 `FlatlasError`，由 `flatlas.cli.main()` 统一渲染为 `error: ...` 并返回退出码 2；不得给普通输入错误输出 traceback。
 - 新 CLI 命令默认只读；若未来增加风险操作，必须先有独立设计、明确 approval/dry-run、执行前重验与审计。
 - JSON/CSV 输出要稳定、可解析；二进制 digest 输出为 hex，不能依赖 Python `bytes` 的 repr。

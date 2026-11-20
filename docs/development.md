@@ -1,6 +1,6 @@
 # 开发环境与依赖策略
 
-> 状态：开发记录。说明本地环境、依赖与检查命令。
+> 状态：开发指南。说明本地环境、依赖与检查命令。
 
 ## 当前环境
 
@@ -65,18 +65,9 @@ uv run pytest -q tests/test_dupes_filters.py::test_local_rescan_combines_new_and
 
 现有 `test_mvp.py` 用函数级 marker 区分职责，专项文件用文件级 marker 并按需要补充交叉标记。新增测试必须至少属于一个功能范围；新增共享 fixture 时检查所有使用方。维护分组时用 `uv run pytest --collect-only -q` 与 `uv run pytest --collect-only -q -m "hash or safety"` 核对总量与选择结果，不能只改文档而遗漏实际测试归属。
 
-### WSL 验证与本次记录（2026-11-10）
+### WSL 验证
 
-从 Windows 可以通过 `wsl.exe -d Ubuntu --exec bash -lc 'cd ~/code/flatlas && uv sync --locked && uv run ruff check . && uv run pytest -q -rs && uv run pyright && git diff --check'` 调用 Linux 检查。执行前确认 Linux 副本包含待验证的提交和未提交改动；两端使用各自的 `.venv`，测试语料放在 WSL 原生文件系统中。
-
-本次 Windows 使用 Python 3.12.13，Ubuntu 22.04 / WSL2 使用 Python 3.12.14。由于 WSL 仓库落后于 Windows，本次验证将 Windows 当前源码与未提交改动复制到 WSL 原生临时目录，并独立执行 `uv sync --locked`，没有更新 WSL 仓库代码。
-
-| 环境 | Ruff | pytest | Pyright |
-|---|---|---|---|
-| Windows | 通过 | 132 passed，1 skipped（无法创建 symlink） | 0 errors |
-| Ubuntu / WSL2 | 通过 | 128 passed，5 skipped（原生 Windows API 用例） | 0 errors |
-
-Windows 工作区的 `git diff --check` 通过。Linux Pyright 的 Node 运行时需要 `libatomic.so.1`；本次 Ubuntu 缺少该库，通过下载发行版 `libatomic1` 包、解包到验证临时目录，并设置该进程的 `LD_LIBRARY_PATH` 完成检查，未安装系统软件包。正常复跑前需由环境提供该运行库；这不是 Python 锁文件依赖。
+从 Windows 可以通过 `wsl.exe -d Ubuntu --exec bash -lc 'cd ~/code/flatlas && uv sync --locked && uv run ruff check . && uv run pytest -q -rs && uv run pyright && git diff --check'` 调用 Linux 检查。执行前确认 Linux 副本包含待验证的提交和未提交改动；两端使用各自的 `.venv`，测试语料放在 WSL 原生文件系统中。Linux Pyright 的 Node 运行时需要 `libatomic.so.1`，应由环境提供（这不是 Python 锁文件依赖）。历次带日期的验证结果记录在 [验证记录](history/verification-log.md)。
 
 ## 后续 Rust 配置
 

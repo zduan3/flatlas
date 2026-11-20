@@ -1,12 +1,6 @@
-# 0.2 惰性 Hash 规划
+# 惰性 Hash 后续能力
 
-> 状态：0.2 规划。不纳入已冻结的 MVP（0.1）。
-
-## 状态与当前基线
-
-本文记录 0.2 的惰性 Hash 规划。0.1 当前基线是：`scan` 只采集 metadata；`dupes PATH` 只为 PATH 子树内的同大小普通文件计算 hash，使用 size → quick → full 流水线、前后 `fstat` 校验和保守缓存复用。已完成的 hash 分批提交，因此中断 `dupes` 不会丢失此前已提交的缓存；这不等同于完整的 hash 运行审计或可恢复任务。0.1 的结果只用于清理指导，实际去重由 jdupes 重新扫描和验证。
-
-当前 0.2 的 `dupes` 与 `export dupes` 在同大小分组前排除索引中 `allocated_size=0` 的普通文件（例如 Windows MFT 驻留数据）；这些文件不读取内容、不计入 hash 候选，也不进入重复组，即使已有 `full_ready` 缓存。过滤后不足两个文件的大小组不计算 hash，重复组数量和 theoretical logical savings 只使用剩余成员。占用未知（`NULL`）仍参与候选，不能当作 0；过滤不修改路径状态、scan coverage 或已有 hash，也不将 allocated size 当作真实可回收空间。已有索引以普通重扫更新占用值，无需 migration。
+> 状态：提案，未实现。当前的 size → quick → full 流水线、basis 校验、批量提交与 dupes 筛选见 [惰性 Hash 与重复候选](../../design/hashing.md)。
 
 ## 后续能力
 
@@ -26,17 +20,13 @@
 
 ### 查询范围与过滤
 
-- 已实现第 1 批筛选：`dupes` 与 `export dupes` 共用 `--min-size`、`--max-size`、`--min-count`、`--min-savings`、`--limit` / `-n`。大小和节省量均为字节整数；文件大小闭区间默认不额外限制，最小路径数默认 2，最小节省量默认 0，组数默认不限。大小参数必须在 SQLite 非负 signed-64 范围内且 min 不大于 max；路径数至少 2、节省量非负、组数至少 1，非法输入以退出码 2 结束且不打开数据库。
-- 大小筛选在同大小候选分组前应用，也约束已有 full hash 的最终查询；区间外文件不读取、不参与候选或输出。不改变原有 0 B、allocated=0 排除和未知占用可参与的语义。
-- 路径数与 `size * (count - 1)` 理论 logical savings 阈值均包含边界，在 full hash 分组后筛选；`limit` 在原有稳定排序后截取完整组。路径数仍不是独立文件对象数，hardlink alias 识别后置。各组互不拆分，hash 统计覆盖大小区间内全部候选，不能将 top N 误解为只读取 N 组。
-- 表格汇总对应最终显示组；JSON/CSV 保持字段和类型，空 CSV 仍无独立 hash 摘要。`hash.complete` 只描述该候选范围内的 hash 处理，不保证 scan coverage，也不表示筛选外无重复。筛选不会删除 hash、修改 path/coverage 或改变 dry-run plan 默认行为，无需 migration。
 - include/exclude 过滤仍待设计。
 - 多个 PATH 的 union 与交叉目录比较；必须定义路径显示基准、namespace 边界和候选组语义。
 - 算法升级和 quick 采样策略版本化；采样大小或布局变化必须使旧 quick cache 不可复用。
 
 ### 空间真实性与安全验证
 
-- 识别同一文件对象的 hardlink alias，分别报告路径冗余、logical 理论节省量、allocated size 与可物理回收空间，不能把它们相加或互换。
+- 识别同一文件对象的 hardlink alias，分别报告路径冗余、logical 理论节省量、allocated size 与可物理回收空间，不能把它们相加或互换；见 [dupes 识别 hardlink alias](hardlink-alias.md)。
 - 对稀疏、压缩、reflink/shared extent 和索引范围外 alias 明确标记物理节省量未知或估算。
 - `full hash` 适合持久缓存、跨多文件分组和后续增量查询；逐字节比较无需依赖碰撞假设，但不能作为可复用的全局分组键且会重复读取。未来任何修改文件系统的 apply 都必须在执行前重新验证身份与 metadata，并可在安全模式中逐字节比较；不能只凭历史 full hash 修改文件。
 
@@ -44,7 +34,7 @@
 
 若新增 hash run、error、算法策略或统计字段，应提高 migration 版本并执行只向前迁移。迁移必须保留现有 `path`、`file_hash`、scan coverage 与 plan 数据；不得通过删表、重建数据库或清空缓存实现升级。
 
-## 建议测试
+## 测试
 
 - HDD/SSD 友好的有界并发与取消，不泄漏文件句柄，不阻塞 SQLite reader。
 - 中断或崩溃后已提交 hash 可复用，未完成文件不会被误标为 `full_ready`。

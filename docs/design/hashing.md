@@ -1,0 +1,62 @@
+# 惰性 Hash 与重复候选
+
+> 状态：当前设计。描述 `dupes` / `export dupes` 的惰性 hash 流水线、缓存复用、筛选和分组语义；随代码更新。
+
+## 流水线
+
+`scan` 只采集 metadata；内容 hash 只在 `dupes PATH`（及 `export dupes PATH`）执行时、只为 PATH 子树内的候选文件计算。PATH 默认为当前目录，必须是已索引的目录或 namespace root。
+
+1. **size**：单次范围查询选出 PATH 后代中仍为 `present`、普通文件、logical size 大于 0、未被大小筛选排除，且同大小文件数大于 1 的候选。0 B 文件不进入候选、不计算 hash、也不显示为重复组。
+2. **quick BLAKE3**：读取文件头 64 KiB 与尾 64 KiB 计算 quick digest。不超过 128 KiB 的文件读取全文，quick 即覆盖全文，直接写为 `full_ready`（full digest 与 quick 相同）；已有的小文件 quick 缓存也直接提升为 `full_ready`，不重复读取。
+3. **full BLAKE3**：只有 size 与 quick digest 都相同的组（至少两个成员）才以 1 MiB 块读取全文计算 full digest。
+
+索引中 `allocated_size=0` 的普通文件（例如 Windows MFT 驻留数据）在同大小分组前排除：不读取内容、不计入 hash 候选，也不进入重复组，即使已有 `full_ready` 缓存。过滤后不足两个文件的大小组不计算 hash，重复组数量和 theoretical logical savings 只使用剩余成员。占用未知（`NULL`）仍参与候选，不能当作 0；该过滤不修改路径状态、scan coverage 或已有 hash，也不将 allocated size 当作真实可回收空间。已有索引以普通重扫更新占用值，无需 migration。
+
+## metadata basis 校验与缓存复用
+
+每个 `file_hash` 行记录计算依据：device、inode、size、mtime、change time 与 birth time（Windows 的 change time 为 `NULL`，不参与比较）。
+
+- 打开文件后先 `fstat`：不是普通文件或与索引中的依据不一致时不读取内容；读取完成后再 `fstat` 一次，仍须与依据一致。任一不一致使该文件记为 `stale`（"metadata changed"），读取错误记为 `failed` 并保存错误信息。两者都令本次结果不完整，但不改变 scan coverage 或路径状态。
+- quick/full 缓存只有在算法为 `blake3`、quick 采样大小等于当前 64 KiB，且依据与索引中当前 metadata 完全一致时才复用；否则重新读取。
+- 扫描发现已用于 hash 的身份、size、mtime、change/birth time 任一变化时，把 `quick_ready` / `full_ready` 标为 `stale`，见 [扫描与目录汇总](scanning.md)。
+- `full_verification` 只写 `hash_only`；没有逐字节比较。
+
+完成的 hash 每 100 次写入提交一次，结束时再提交。hash 阶段被中断（Ctrl-C，或 POSIX 上的 `SIGTERM` / `SIGHUP`）时先提交已完成的写入再退出，因此后续 `dupes` 可复用此前的结果；这不等同于 hash 运行审计或可恢复任务。
+
+交互式终端在 stderr 显示候选、quick、full 各阶段的文件数与字节数进度。
+
+## 重复组
+
+重复组由仍为 `present`、普通文件、`file_hash.state='full_ready'` 且 logical size、algorithm 与 full digest 都相同的记录组成，与 [架构不变量](architecture.md#不可破坏的语义) 一致。
+
+- **按路径计数**：`count` 是组内路径数；当前不识别 hardlink alias，同一 `(device, inode)` 的多条路径分别计数、分别读取。
+- **theoretical savings** = `logical_size × (count - 1)`，是理论 logical savings，不是实际物理可回收空间。
+- 组按理论节省量降序、文件大小降序、算法与 digest 升序稳定排序；组内路径按路径升序。路径默认相对于 PATH 显示，`--absolute` 显示绝对路径。
+
+## 筛选参数
+
+`dupes` 与 `export dupes` 共用以下参数，大小与节省量均为字节整数：
+
+| 参数 | 默认 | 语义与应用时机 |
+|---|---|---|
+| `--min-size` / `--max-size` | 0 / 不限 | 文件 logical size 闭区间；在同大小候选分组和 hash 前生效，也约束最终查询。区间外文件不读取，也不显示已有缓存结果 |
+| `--min-count` | 2 | 组内路径数下限（含边界）；full hash 分组后应用 |
+| `--min-savings` | 0 | 每组理论 logical savings 下限（含边界）；full hash 分组后应用 |
+| `--limit` / `-n` | 不限 | 筛选和稳定排序后最多保留的组数，不截断组内成员 |
+
+大小参数必须在 SQLite 非负 signed-64 范围内且 min 不大于 max；路径数至少 2、节省量非负、组数至少 1，非法输入以退出码 2 结束且不打开数据库。组成员数、节省量与组数限制在 full hash 分组后应用，不减少候选 hash 读取。筛选不删除 hash、不修改 path/coverage，也不改变 dry-run plan 的行为。
+
+## 输出
+
+- **表格**：首行汇总筛选后显示的组数、冗余文件数与理论节省量，再逐组列出大小 × 路径数、节省量和路径；hash 不完整时末尾提示 changed 与 error 数。
+- **JSON**：`{"hash": {...}, "groups": [...]}`。`hash` 含 `complete`、`candidate_files`、`candidate_bytes`、`content_files_read`、`changed_files`、`errors`，描述大小筛选后的全部候选，不因组数限制截断；每组含 `algorithm`、hex `digest`、`logical_size`、`count`、`theoretical_savings` 与 `paths`。零组时 `groups` 为 `[]`。
+- **CSV**：每组一行，并在行内重复 `hash` 摘要字段；零组时为空文件，没有独立摘要。
+- hash 不完整时 stderr 输出 `warning: duplicate analysis incomplete: ...`。
+
+`hash.complete` 仅描述该候选范围的 hash 处理状态，不保证 scan coverage 完整，也不表示筛选范围外没有重复。`export dupes` 以同一实现写入 `--output` 文件（默认 JSON），并在 stdout 打印输出路径。
+
+## 结果的使用边界
+
+`dupes` 输出的是基于完整 BLAKE3 的重复内容候选和理论 logical savings，不是删除授权。需要实际去重时，应选择值得处理的较小目录，让 jdupes 重新扫描、独立验证并由用户显式执行；不要把 `export dupes` 的结果直接管道到删除命令。
+
+相关提案：[lazy-hash 后续能力](../plan/proposals/lazy-hash.md)、[hardlink alias 识别](../plan/proposals/hardlink-alias.md)。

@@ -1,18 +1,14 @@
-# 0.2 查询命令规划
+# 查询命令 GNU 兼容规划
 
-> 状态：0.2 规划。除明确标记为已实现的内容外，不代表当前 CLI 已支持。
+> 状态：提案，未实现。当前 `ls`、`du`、`largest`、`roots` / `df`、`scans` 等行为见 [查询命令](../../design/queries.md)；本文只描述后续参数、子命令与默认行为调整。
 
-## 状态与目标
-
-本文定义 File Atlas 0.2 的查询体验与兼容性规划。0.1 已完成并冻结；当前已交付行为以 [0.1 实现状态](../../history/0.1-implementation.md) 为准。本文中的“目标默认行为”和参数均为后续规划，不代表当前 CLI 已支持。
+## 目标
 
 兼容参照优先采用 GNU Coreutils 与 GNU Findutils。Linux 上的 BusyBox、BSD 工具和发行版 alias 可能不同，因此这里追求的是一致的用户心智模型和常用参数语义，不承诺逐字符复刻 GNU 输出。
 
-设计目标：
-
-- `flatlas ls [PATH]` 默认接近用户主动执行 `ls -Al PATH`：列出一层直接条目、包含真实隐藏条目但不合成 `.` 与 `..`、采用长格式。
-- `flatlas du [PATH ...]` 默认接近 `du -s PATH ...`：每个参数仅输出一条递归汇总。
-- `flatlas roots` 与别名 `flatlas df` 默认接近 GNU `df` 的容量表，但范围只包含 registered namespace。
+- `flatlas ls [PATH]` 保持接近 `ls -Al PATH` 的一层长格式列表。
+- `flatlas du [PATH ...]` 保持接近 `du -s PATH ...`：每个参数仅输出一条递归汇总。
+- `flatlas roots` 与别名 `flatlas df` 保持 GNU `df` 风格容量表，范围只包含 registered namespace。
 - 后续增加的短参数和长参数，在不破坏持久化索引、coverage 与跨平台语义时优先沿用 GNU 名称。
 - flatlas 独有能力使用可读的长参数表达，不占用与 GNU 含义冲突的短参数。
 - 表格服务交互使用；JSON/CSV 字段必须稳定、明确，不因终端缩写而改变语义。
@@ -29,71 +25,12 @@ GNU `ls` 和 `du` 主要读取当前文件系统；flatlas 同时使用实时目
 | 目录大小 | `ls -l` 显示目录项自身大小，`du` 递归估算空间 | 为归档浏览优化，`ls` 可附带索引中的递归总量，但必须明确它不是目录项 inode 大小 |
 | 空间指标 | `du` 默认以文件系统使用量和 block 单位输出 | 同时保存 logical 与可用时的 allocated size；任一未知不得伪装为 0 |
 | hardlink | `du` 默认对同一 inode 只计一次，`-l` 才重复计数 | 只能基于当前可靠对象身份保守去重；身份不可靠时必须标注限制 |
-| symlink / reparse | 由 `-H`、`-L`、`-P` 等控制 | 0.1 默认不跟随 symlink 或 Windows reparse point；兼容参数须在跨平台策略完成后加入 |
+| symlink / reparse | 由 `-H`、`-L`、`-P` 等控制 | 默认不跟随 symlink 或 Windows reparse point；兼容参数须在跨平台策略完成后加入 |
 | 排序与字符 | locale、终端与环境变量会影响输出 | 表格按 Unicode 显示宽度对齐；机器输出使用稳定字段和排序规则 |
 
 `df` 还有一项产品边界差异：GNU `df` 无参数时列出当前系统挂载表中的文件系统；flatlas 的 `roots` / `df` 无参数时只列内部 registered namespace。两者不能静默混为一谈。
 
-## `ls` 与 `du` 的职责划分
-
-两者共享路径和空间字段，但回答不同问题：
-
-- `ls PATH` 回答“PATH 当前有哪些直接子项，它们是什么，索引对它们了解多少”。它实时枚举一层，将文件自身大小与目录的已知递归聚合大小放在同一视图中，方便选择下一步分析目标。
-- `du PATH ...` 回答“每个显式目标及其后代的索引聚合是多少”。它不枚举现场直接子项，默认每个参数一行，源目录离线时仍可查询。
-- `largest PATH` 回答“PATH 子树中最大的单个当前普通文件是什么”，避免让 `ls` 或 `du` 承担全树文件排序。
-
-GNU `ls -l` 对目录显示的是目录对象自身的 `st_size`，在常见 Linux 文件系统上经常是 4096，但这不是目录内容总量，也不保证恒为 4 KiB。flatlas 为清理指导有意不复制该数值：统一使用 `LOGICAL(B)`，普通文件表示自身 logical size，目录表示索引中以它为根的普通文件递归 logical size。表格的 `N` 对文件显示 `-`，对目录为递归普通文件数；symlink、reparse 和其他特殊条目显示 `-`。JSON/CSV 中普通文件的 `files` 仍为 1。
-
-因此目标心智模型是：
-
-```text
-ls       一层结构 + live/index 状态 + 已知空间提示
-du       显式 scope 的递归索引汇总
-largest  scope 内的最大单文件
-dupes    scope 内的重复内容候选
-```
-
-## `ls` 的目标行为
-
-### 默认行为
-
-目标默认命令：
-
-```text
-flatlas ls [PATH]
-```
-
-在交互体验上视为隐式选择 `-A -l`：
-
-1. PATH 省略时使用当前目录。
-2. 只列 PATH 的直接条目，不递归展开。
-3. 文件与目录都列出，包含名称以 `.` 开头的真实条目。
-4. 最后一列只显示条目名称，不附加 PATH 前缀。
-5. 默认长表以 `T`、`S`、`LOGICAL(B)`、`N`、可用时的 `ALLOC(B)`、`SCANNED-THROUGH` 和 `NAME` 为稳定核心列；更多 metadata 后续按平台能力增加。
-6. 目录的统计列表示索引中的递归总量；文件的统计列表示文件自身。
-7. `ok` 显示最近完整扫描的已知值；`part` 和 `gone` 在存在历史索引值时继续显示，但状态明确表示它不完整、可能过期或仅为最后已知值；`new` 目录显示 `-`，`new` 普通文件可以显示实时 stat 得到的自身大小。任何未知值都不能伪装为精确的 0。
-
-推荐的紧凑表格概念如下；实际列应根据跨平台可用性和终端宽度逐步落地：
-
-```text
-T  S     LOGICAL(B)  N    ALLOC(B)  SCANNED-THROUGH  NAME
-d  ok       13002342  83    16777216  Sep 23 10:00     archive
-d  new             -   -           -  -                incoming
-d  part      7340032  40           -  Sep 20 10:00     private
-f  new       2097152   1     2097152  -                download.tmp
-d  gone      1048576  12           -  Sep 18 10:00     removed
-```
-
-其中 `S` 是 flatlas 扩展：
-
-- `ok`：最近覆盖该目录的 scope 为 completed，且实时条目与当前索引均为 present。
-- `new`：实时存在，但没有当前有效的完整扫描覆盖。
-- `part`：最近未完成 scan 已观察该条目但尚未完成相应目录 coverage；未被本次访问的条目保留此前状态。
-- `gone`：索引曾观察到该直接条目，但本次完整实时枚举未观察到。它只描述本次视图，不更新 `path.state`；如果索引仍保留最后已知文件大小或目录聚合，可以继续展示，但不得计为新的现场观测。
-
-`SCANNED-THROUGH` 是目录及其当前已知子目录成功完整枚举时间的下界；它不表示该时刻的不可变快照。表格按本地时区使用 GNU `ls -l` 风格：近六个月且早于当前时间显示月、日和时分，更早或未来的时间显示月、日和年份。JSON/CSV 的 `subtree_complete_through_ns` 保留 UTC Unix 纳秒整数；文件和其他非目录条目显示未知。
-
-实时枚举只要发生权限、I/O 或类型检查错误，命令就应非零退出，不得通过缺行暗示目录不存在。离线使用由显式的数据源参数处理。
+## `ls` 规划
 
 ### GNU 兼容参数规划
 
@@ -101,7 +38,6 @@ d  gone      1048576  12           -  Sep 18 10:00     removed
 |---|---|---|
 | P1 | `-a`, `--all` | 按 GNU 语义包含全部条目，并额外合成 `.` 与 `..`；与默认的隐式 `-A` 有意不同。 |
 | P0 | `-l` | 显式请求长格式；目标默认已启用。与 `--format table` 配合，不改变 JSON/CSV schema。 |
-| 已实现 | `-h`, `--human-readable` | 以 1024 进制的 K/M/G/T 显示 logical/allocated size，四舍五入至多一位小数；小于 1024 显示字节整数，超过 T 继续以 T 表示。仅影响表格，大小表头省略 `(B)`，机器输出保持原始整数值。 |
 | P0 | `-A`, `--almost-all` | 包含真实隐藏条目但不显示 `.` / `..`；目标默认已启用，保留该参数作为显式兼容写法。 |
 | P1 | `-d`, `--directory` | 将参数目录当作一个条目，而不是列其内容。 |
 | P1 | `-R`, `--recursive` | 递归列出子目录；必须携带每个目录的 coverage 状态且有深度/数量保护。 |
@@ -128,23 +64,9 @@ d  gone      1048576  12           -  Sep 18 10:00     removed
 | `--absolute` | 默认只显示名称；需要复制完整路径时显式请求。 |
 | `--null` | 使用 NUL 分隔名称，安全处理换行等特殊字符；语义参照 Coreutils 通用做法。 |
 
-### `ls` 与 `coverage` 的职责边界
+### `coverage` 与 `ls` 的职责边界
 
 `ls` 回答“这个目录当前有哪些直接子项”，`coverage` 回答“索引对这棵目录树了解得有多完整、哪些结论可信”。`ls` 的状态列是快速告警灯，不是完整的扫描诊断界面：它把实时存在性与索引覆盖度压缩成 `ok`、`new`、`part`、`gone`，其中 `gone` 只表示本次完整实时枚举没有看到旧索引条目，不等于数据库已经可靠确认 `deleted`。
-
-扫描中断后的状态按条目细化：达到该未完成 scan cutoff 的完整目录子树显示 `ok`；本次已经观察但尚未完整覆盖的分支显示 `part`；本次尚未访问的条目回退到此前最近 coverage 状态。普通文件和其他直接条目以父目录是否完整枚举为 coverage 依据。因此外层 cancelled scope 不再把其全部直接条目统一显示成 `part`，但 `ls` 仍不是递归 coverage 诊断的替代品。
-
-### `ls` 与删除状态
-
-`ls` 只提供实时存在性证据，不负责持久化删除：
-
-1. 用户在 flatlas 之外删除文件或目录后，索引暂时仍可保持 `present`。
-2. `ls` 完整枚举父目录时可将缺失的直接文件或目录显示为 `gone`，但不得写入 `path.state`。
-3. 要确认删除，必须扫描一个仍然存在且覆盖被删除路径的父目录；不能扫描已经不存在的目标本身。
-4. 只有该 scan scope 完整完成，缺失路径及其已索引后代才标记为 `deleted`。
-5. partial、failed、cancelled 或枚举错误均不得确认删除。
-6. `deleted` 行保留在 SQLite 作为当前状态 tombstone；`paths`、`du`、`largest` 和 `dupes` 等当前状态查询排除它。
-7. 同一路径再次出现并被扫描时恢复为 `present`，清除删除标记；metadata basis 不匹配时旧 hash 标记为 stale 并按需重算。
 
 仅给 `ls` 增加一列不能满足以下需求：
 
@@ -156,29 +78,26 @@ d  gone      1048576  12           -  Sep 18 10:00     removed
 
 因此 `ls` 应保留紧凑状态列，并允许输出指向进一步诊断所需的 path/status；独立的 `coverage [PATH]` 则提供递归汇总、scope 边界和错误明细。首期若只需较小实现，可以先增加 `ls --coverage` 摘要，但不能以此取代后续 coverage 审计视图。
 
-## `du` 的目标行为
+### 可信度分级
 
-### 默认行为
+目录大小与 freshness 是两个独立维度。机器输出后续应分别暴露数值、freshness 和 coverage/error 状态，而不能把非空时间解释为精确性证明。推荐的可信度概念为：
 
-目标默认命令：
+- `fresh`：所有目录都成功过，子树最旧成功时间在策略阈值内，且没有需要单独提示的近期错误。
+- `stale`：所有目录都成功过，但 freshness 下界超过阈值。
+- `unknown`：至少一个当前目录从未成功完整枚举。
+- `warning`：存在历史成功数据，但之后的 attempt 出现 partial、failed 或 cancelled；已知汇总仍可显示，但需要错误提示。
 
-```text
-flatlas du [PATH ...]
-```
+## `du` 规划
 
-默认行为等价于隐式 `--summarize`：
+### 深度展开、top-N 与条目数
 
-目前无 PATH 时汇总当前目录；表格状态列使用与 `ls` 相同的 `S` 标记（`ok`、`new`、`part`）。`du` 依赖持久化索引，不实时枚举目录，因此不提供 `ls` 的现场缺失标记 `gone`。
+这是当前阶段优先级最高的 `du` 能力（见 [backlog](../backlog.md)）：
 
-1. 没有 PATH 时汇总当前目录 `.`，不再默认跨全部 registered namespace。
-2. 每个参数仅输出一行递归总量，保持参数顺序。
-3. 多路径参数继续支持 shell 或启动器已经展开的结果。
-4. 默认不输出每个后代；这与 `du -s` 一致。
-5. 全局 namespace 汇总改由明确的 flatlas 参数 `--all-roots` 请求。
-6. 表格默认同时明确 logical、allocated 和文件数；allocated 不完整时显示 `-`，不回退成 0。
-7. JSON/CSV 使用完整字段名和原始整数，不受 `-h`、表头缩写或 block 显示影响。
+- `-d N` / `--max-depth=N`：输出不超过指定深度的目录，`-d 0` 与 `-s` 等价；配合 top-N 与排序，定位大目录无需逐层执行 `ls`。
+- top-N 与排序：按 logical、allocated 或文件数排序并截取前 N 项，使“文件过多的目录”与“占用最大的目录”都能直接列出。
+- 目录条目数（inode 归因）：当前目录汇总只统计普通文件数；需要在 `directory_summary` 中增加包含目录、symlink 与特殊条目的条目总数，用于定位 inode 配额压力。这需要新的向前 migration 与回填。
 
-推荐默认表格：
+### 目标默认表格
 
 ```text
 USED(K)  APPARENT(B)      N  PATH
@@ -189,6 +108,7 @@ USED(K)  APPARENT(B)      N  PATH
 - `USED(K)` 对应可可靠聚合的 allocated size，并以 1024-byte block 显示，接近 GNU `du` 默认心智模型。
 - `APPARENT(B)` 对应 logical/apparent size，避免 Windows 或某些文件系统没有 allocated 数据时命令失去用途。
 - 两列并存是 flatlas 的透明性扩展；不能宣称 USED 是真实物理可回收空间。
+- 全局 namespace 汇总由明确的 flatlas 参数 `--all-roots` 请求。
 
 hardlink 的默认计数应尽量对齐 GNU `du`：同一可靠对象身份在同一次聚合中只计一次；`--count-links` 才按每条路径重复计数。由于 `(device, inode)` 不是跨历史永久 ID，只能在身份与观测依据仍可靠时去重，否则必须保守计数并在机器输出中暴露 completeness/limitations。
 
@@ -197,7 +117,6 @@ hardlink 的默认计数应尽量对齐 GNU `du`：同一可靠对象身份在�
 | 优先级 | 参数 | 规划语义 |
 |---|---|---|
 | P0 | `-s`, `--summarize` | 每个参数只输出一个总量；目标默认已启用，保留参数作为显式兼容写法。 |
-| 已实现 | `-h`, `--human-readable` | 与 ls 共用 1024 进制的 K/M/G/T 缩放与舍入；仅影响表格中的 logical/allocated 大小，文件数、未知值和 JSON/CSV 不变。 |
 | P0 | `--si` | 1000 进制单位。 |
 | P0 | `-b`, `--bytes` | 等价于 apparent size 且 block size 为 1；表格可只显示 apparent 列。 |
 | P0 | `--apparent-size` | 以 logical/apparent size 作为筛选、排序和主显示指标。 |
@@ -226,26 +145,7 @@ hardlink 的默认计数应尽量对齐 GNU `du`：同一可靠对象身份在�
 | `--columns=LIST` | 为交互表格选择列，不改变 JSON/CSV schema。 |
 | `--format=table|json|csv` | 保留现有稳定机器输出能力；未来可增加 `jsonl`，不复用 GNU 的 `--format` 含义。 |
 
-## `roots` / `df` 的行为与规划
-
-### 当前默认行为
-
-`df` 是 `roots` 的等价别名，两者读取同一批 registered namespace，并以 GNU `df` 熟悉的列顺序输出：
-
-```text
-FILESYSTEM  1K-BLOCKS       USED  AVAILABLE  USE%  MOUNTED ON
-C:\         997482492  391581348  605901144   40%  C:\
-```
-
-- `FILESYSTEM` 当前使用 registered namespace 路径；在可靠的 device/source 名称采集落地后可显示设备名。
-- `1K-BLOCKS`、`USED`、`AVAILABLE` 来自本次实时文件系统容量查询，不来自路径索引，也不等同于 indexed logical/allocated 汇总。
-- block 单位固定为 1024 bytes，非整数向上取整，接近 GNU 默认行为。
-- `USE%` 由 used/total 向上取整并限制在 0–100%；不得用 indexed 文件大小推导。
-- `MOUNTED ON` 是 namespace 挂载路径。
-- 实时容量不可访问时，表格显示 `-`；JSON/CSV 使用 `null` 并提供 `status=unavailable`，不能显示 0。
-- `--format json|csv` 保留既有 root 身份字段并追加完整容量字段；默认表格只展示 GNU 风格核心列。
-
-与 GNU `df` 不同，无参数只列 registered namespace，不枚举全部系统 mount。这样 `roots` 与 `df` 始终等价，也让用户明确看到 flatlas 的扫描边界。未来系统全量 mount 视图必须通过显式参数请求。
+## `roots` / `df` 规划
 
 ### GNU 兼容参数规划
 
@@ -284,9 +184,9 @@ C:\         997482492  391581348  605901144   40%  C:\
 - 同一 namespace 的 `roots` 与 `df` 表格、JSON 和错误行为必须逐项一致。
 - Windows/Linux 测试应 mock 固定容量验证单位和舍入，并各自增加真实文件系统 smoke test。
 
-## largest 已实现显示选项
+## `largest` 规划
 
-`flatlas largest [PATH] -h` / `--human-readable` 与 `ls`、`du` 共用 1024 进制 K/M/G/T 格式和舍入规则，仅缩放表格中的 logical 大小。表格只显示 `SIZE(B)`（使用 `-h` 时为 `SIZE`）和 `PATH`，不显示 allocated 列，未知值为 `-`；JSON/CSV（含 `--output`）仍保留 logical/allocated 原始字节值。PATH scope、默认 10 项、`-n` / `--limit`、相对路径、当前普通文件过滤与稳定大小排序保持不变。
+- 增加 metric（logical / allocated）、排序、阈值和结果数量控制。
 
 ## 后续查询子命令规划
 
@@ -294,15 +194,7 @@ C:\         997482492  391581348  605901144   40%  C:\
 
 ### 产品价值优先级
 
-File Atlas 的首要用途是定位大文件、大目录和重复内容候选，为用户清理存储提供指导；名称/路径查找只是持久化索引带来的附加能力。0.1 不以复刻 ncdu 的交互式空间浏览为目标，而以“在空间分析工作流中补充持久化重复候选与局部子树更新”为核心差异。实际去重由 jdupes 重新扫描、独立验证并显式执行。
-
-按实际使用价值，后续工作顺序应是：
-
-1. 强化 `dupes`：在已有 PATH 范围查询、理论可节省量排序和汇总之上，增加 root、最小文件大小、组内对象数、hardlink 保守去重、hash/coverage completeness，以及稳定导出。
-2. 强化 `du` 与 `largest`：同时覆盖大目录和大文件，支持 metric、top N、排序、深度、阈值和 human-readable，并明确 logical、allocated 与理论可回收量的差别。
-3. 完善局部更新：让新增子树只扫描必要范围，仍能与旧索引形成重复组；partial/error/cancelled 不产生假删除，stale hash 能被保守重算。
-4. 提供最低限度的可信度诊断：`coverage`、`errors`、scan 摘要及必要的 `verify`，服务于解释“为何这个目录总量或重复结果不完整”，而不是扩张成通用文件管理器。
-5. 在上述能力稳定后再增加 `stat`、`find`、`locate` 等通用查询便利功能。
+名称/路径查找只是持久化索引带来的附加能力，不优先于空间回收主线；产品优先级见 [路线图](../roadmap.md#产品优先级)，当前阶段排序见 [backlog](../backlog.md)。
 
 ### 候选命令与优先级
 
@@ -310,17 +202,16 @@ File Atlas 的首要用途是定位大文件、大目录和重复内容候选，
 |---|---|---|---|
 | P0 | `coverage [PATH]` | flatlas 原生命令 | 按目录展示 completed、partial、failed、cancelled 与 unscanned，定位索引盲区和不完整统计的来源。 |
 | P0 | `errors [PATH]` | flatlas 原生命令 | 汇总遍历、权限、I/O 和 hash 错误，支持按 scan、目录、operation 与错误码筛选和聚合。 |
-| 已实现 | `scans [PATH]` / `scan-info ID` | 审计日志 | `scans` 查询全部或与 PATH 互相覆盖的扫描 scope，输出状态、时间和计数；`scan-info` 以 JSON 展示单次 scan、scope 与 error 明细。 |
 | P1 | `hash PATH...` | `b2sum` 等 checksum 工具 | 仅把 `full_ready` digest 当作可用内容 hash，同时展示 algorithm、state 与 basis；实时校验和是否回写索引必须由独立参数明确控制。 |
 | P1 | `verify [PATH...]` | flatlas 原生命令 | 只读比较索引与当前文件系统，报告新增、metadata 改变、stale hash 和未确认缺失；读取失败或 coverage 不完整不得把路径判为 deleted。 |
 | P2 | `tree [PATH]` | `tree` | 以索引生成目录层级，附带 logical/allocated 总量、文件数、coverage 和错误标记；与 `du --max-depth` 重叠，只有确有层级浏览需求时实现。 |
 | P2 | `stat PATH...` | GNU `stat` | 展示索引 metadata、路径状态、最后观测 scan、coverage、hash 状态与 digest；可规划只读 `--live` 比较，但不得隐式更新索引。 |
-| P3 | `find [PATH] [EXPR...]` | GNU `find` | 在 SQLite 中查询而非实时遍历；可考虑 `-name`、`-iname`、`-type`、`-size`、`-mtime`、`-uid`、`-gid`、`-links`，并增加索引状态条件。MVP 不提供 `-delete`、`-exec` 等动作。 |
+| P3 | `find [PATH] [EXPR...]` | GNU `find` | 在 SQLite 中查询而非实时遍历；可考虑 `-name`、`-iname`、`-type`、`-size`、`-mtime`、`-uid`、`-gid`、`-links`，并增加索引状态条件。不提供 `-delete`、`-exec` 等动作。 |
 | P3 | `locate PATTERN...` | GNU `locate` | 直接复用全局路径索引，不另设 `updatedb`；除匹配路径外显示 root、present/deleted 状态、最后扫描时间和 coverage。 |
 | P3 | `readlink PATH...` | GNU `readlink` | 显示索引中的 symlink target、Windows reparse 类型和最后观测状态，不跟随目标。 |
 | P3 | `findmnt` | `findmnt` | 展示 registered namespace、mount 与扫描边界；只有可靠的跨平台 mount/source/type metadata 落地后实现。 |
 
-这里的 P0 是对空间回收主线的支撑优先级，不表示要先于 `dupes`、`du`、`largest` 和局部扫描本身。`coverage`、`errors`、`scans` 应采用满足可信度诊断所需的最小设计，避免审计界面反过来延迟核心查询能力。
+`scans` / `scan-info` 已提供最小扫描审计（见 [查询命令](../../design/queries.md#scans-path-与-scan-info-id)）。这里的 P0 是对空间回收主线的支撑优先级，不表示要先于 `dupes`、`du`、`largest` 和局部扫描本身。`coverage`、`errors` 应采用满足可信度诊断所需的最小设计，避免审计界面反过来延迟核心查询能力。
 
 ### 命令分组与默认数据源
 
@@ -340,32 +231,28 @@ GNU `find` 默认遍历实时目录树，而 `flatlas find` 应默认查询 SQLi
 | `grep` | 当前不索引文件内容。 |
 | scan 间 `diff` | 数据库保存当前路径状态而非不可变历史快照，无法可靠重建任意两次扫描。 |
 | `getfacl`、`lsattr` | schema 尚未保存 ACL、xattr 或完整平台属性。 |
-| `rm`、`mv`、`ln`、`touch`、`chmod`、`chown` | 超出只读 MVP（0.1）；不得借查询子命令引入文件修改。 |
+| 修改文件系统的 `mv`、`ln`、`touch`、`chmod`、`chown` | 超出只读边界；不得借查询子命令引入文件修改（现有 `flatlas rm` 只维护索引）。 |
 | 精确兼容 checksum `--check` | 需先设计实时内容读取、digest 算法选择、stale 判断及是否回写索引。 |
 | `ncdu` / TUI | 需要独立交互与性能设计，不作为查询 CLI 的近期兼容目标。 |
 
-## 当前行为到目标行为的迁移
+## 默认行为迁移
 
-| 命令 | 当前实现 | 目标默认 | 兼容迁移 |
+| 命令 | 当前实现 | 目标 | 兼容迁移 |
 |---|---|---|---|
-| `ls` 条目范围 | 仅实时直接子目录，并合并 coverage | 像 `ls -Al` 一样列出全部直接文件与目录、包含真实隐藏条目但不合成 `.` / `..` | 先扩展核心查询与测试，再增加 `--dirs-only` 保留当前视图 |
-| `ls` 名称 | 只显示名称 | 保持只显示名称 | `--absolute` 显式请求完整路径 |
-| `ls` 长格式 | 状态、目录递归大小、文件数及子树扫描时间下界 | 稳定核心列为 `T`、`S`、`LOGICAL(B)`、`N`、可用 `ALLOC(B)`、`SCANNED-THROUGH`、`NAME`；文件用自身大小，目录用递归聚合和扫描时间下界，再逐步增加 mode/nlink/owner/group/mtime | part/gone 保留状态和最后已知值；未知显示 `-`，不得伪造 Unix 权限或目录对象 `st_size` |
-| `du` 无参数 | 聚合所有 registered namespace | 汇总当前目录 `.` | 旧行为迁移到 `--all-roots` |
-| `du` 参数 | 每个参数一条汇总 | 保持，等价隐式 `-s` | 接受显式 `-s` |
-| `du` size | logical bytes、文件数、可用 allocated bytes | used block、apparent bytes、文件数并列且语义清晰 | `-b`、`--apparent-size`、`-B`、`-h` 控制表格 |
+| `ls` 长格式 | `T`、`S`、`LOGICAL(B)`、`N`、可用 `ALLOC(B)`、`SCANNED-THROUGH`、`NAME` | 逐步增加 mode/nlink/owner/group/mtime | 未知显示 `-`，不得伪造 Unix 权限或目录对象 `st_size` |
+| `ls` 名称 | 只显示名称 | 保持 | `--absolute` 显式请求完整路径 |
+| `du` 全局汇总 | 无参数汇总当前目录，无跨 namespace 汇总 | 保持默认 | 增加 `--all-roots` |
+| `du` size | logical bytes、文件数、可用 allocated bytes | used block、apparent bytes、文件数并列且语义清晰 | `-b`、`--apparent-size`、`-B` 控制表格 |
 | 机器输出 | JSON/CSV 完整字段 | 保持稳定字段；新增 completeness/status 字段 | schema 变更须测试列名、类型和顺序 |
-| `roots` / `df` | `roots` 为 df 风格表格，`df` 是等价别名；只列 registered namespace | 保持默认范围，逐步增加 GNU 缩放、类型、字段选择和 FILE 参数 | 系统全部 mount 只能由 `--all-mounted` 显式请求 |
+| `roots` / `df` | 只列 registered namespace | 保持默认范围，逐步增加 GNU 缩放、类型、字段选择和 FILE 参数 | 系统全部 mount 只能由 `--all-mounted` 显式请求 |
 
 默认行为变更应在同一功能提交中更新 README、`--help`、JSON/CSV 回归测试和 Windows/Linux 专项测试。若后续已有正式发布版本，必须提供 release note；CLI 参数兼容与机器输出 schema 兼容分开管理。
 
 ## 实现顺序与验收
 
-`dupes` 第 1 批筛选已实现：`--min-size` / `--max-size` 在 hash 前限定 logical bytes；`--min-count`、`--min-savings` 在完整内容分组后筛选；`--limit` / `-n` 在原有稳定排序后限制完整组数。`export dupes` 使用同一实现，默认行为与 JSON/CSV schema 保持不变。具体边界、hash 摘要口径和后续过滤见 [惰性 Hash 规划](lazy-hash.md)。多 PATH、hardlink alias、include/exclude 和 coverage completeness 仍未实现。
-
 ### 空间回收主线
 
-1. `dupes` 先提供可节省量、排序、范围/阈值筛选和 completeness，使结果可以直接指导清理决策。
+1. `dupes` 在已有可节省量排序与范围/阈值筛选之上补齐 hardlink alias 与 completeness，使结果可以直接指导清理决策。
 2. `du` / `largest` 补齐大目录与大文件的 top、depth、metric 和 human-readable 查询，形成非交互式空间定位闭环。
 3. 验证局部 scan 与旧索引的重复组交互、stale hash 重算以及 partial/error/cancelled 不产生假删除。
 4. 增加最小的 `coverage` / `errors` / scan 摘要，能够解释上述结果何时精确、何时不完整。
@@ -375,15 +262,14 @@ GNU `find` 默认遍历实时目录树，而 `flatlas find` 应默认查询 SQLi
 
 ### 兼容第一批：默认心智模型
 
-- `ls` 默认列出文件和目录，包含隐藏条目，维持长表与 coverage 状态。
-- `du` 无参数改为当前目录；新增 `--all-roots`。
+- `du` 新增 `--all-roots`，显式请求跨全部 registered namespace 的汇总。
 - 接受 `ls -A -l` 与 `du -s` 作为显式但幂等的兼容写法；`ls -a` 另行增加 `.` 与 `..`。
 - `roots` / `df` 增加 `-h`、`-k`、`-T`，并固定 registered-only 默认范围。
 - 为 partial/stale/unknown allocated size 增加机器可读 completeness 字段。
 
 ### 兼容第二批：最常用显示参数
 
-- 两个命令实现 `-h`、`--si`、`--block-size` 的一致缩放层。
+- 在已有 `-h` 之上实现 `--si`、`--block-size` 的一致缩放层。
 - `du` 实现 `-b`、`--apparent-size`、`-c`、`-d`。
 - `ls` 实现 `-1`、`-S`、`-t`、`-r`、`--sort`。
 
