@@ -946,7 +946,17 @@ def du(
     if files0_from is not None:
         if paths:
             raise FlatlasError("--files0-from cannot be combined with PATH arguments")
-        scopes = _read_files0(files0_from)
+        scopes = []
+        for number, name in enumerate(_read_files0(files0_from), start=1):
+            # Like GNU du: report a bad name with its position and keep going.
+            if not name:
+                typer.echo(f"error: {files0_from}:{number}: invalid zero-length file name", err=True)
+                failed = True
+            elif files0_from == "-" and name == "-":
+                typer.echo("error: when reading file names from stdin, no file name of '-' allowed", err=True)
+                failed = True
+            else:
+                scopes.append(name)
     else:
         scopes = paths or ["."]
     with _connection(db, write=False) as connection:
@@ -981,13 +991,14 @@ def du(
 
 
 def _read_files0(source: str) -> list[str]:
-    """NUL-separated names as GNU ``du --files0-from`` reads them."""
+    """NUL-separated names as GNU ``du --files0-from`` reads them; the final NUL is optional.
+
+    Empty names are kept so the caller can report them by position.
+    """
     data = sys.stdin.buffer.read() if source == "-" else Path(source).read_bytes()
     names = data.split(b"\0")
     if names and names[-1] == b"":
         names.pop()
-    if any(not name for name in names):
-        raise FlatlasError("--files0-from: invalid zero-length file name")
     return [os.fsdecode(name) for name in names]
 
 

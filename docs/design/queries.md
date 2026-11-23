@@ -87,7 +87,7 @@ PATH 默认为当前目录，必须位于已登记的 namespace。命令实时�
 - `--sort size|alloc|files|entries|freed`：按 logical size、allocated size、文件数、条目数或 `FREED`（需 `--freed`）降序排列全部行，未知值排在最后。
 - `-n N`/`--limit N`：排序后保留前 N 行，例如 `du -d 3 --sort entries -n 20 ~/data` 列出条目最多的 20 个目录。
 
-`--files0-from FILE` 从 FILE（`-` 为 stdin）读取以 NUL 分隔的 PATH，与 GNU `du` 相同：不能再同时给 PATH 参数，空文件名报错。用于汇总 `find ... -print0` 给出的大量路径，例如 `flatlas find projects -type d -name build -prune -print0 | flatlas du --files0-from=- -c --freed`；`-c` 与 `--freed` 的并集合计因此不会被 xargs 分批拆开。
+`--files0-from FILE` 从 FILE（`-` 为 stdin）读取以 NUL 分隔的 PATH（末尾 NUL 可省略），与 GNU `du` 相同：不能再同时给 PATH 参数；空文件名按 `FILE:序号` 报错、从 stdin 读时名为 `-` 的项报错，均跳过该项、其余照常输出，最后退出码 1。用于汇总 `find ... -print0` 给出的大量路径，例如 `flatlas find projects -type d -name build -prune -print0 | flatlas du --files0-from=- -c --freed`；`-c` 与 `--freed` 的并集合计因此不会被 xargs 分批拆开。
 
 `-c`/`--total` 在最后加一行 `total`：`SIZE`、`N`、`E`、`ALLOC` 是各 PATH 行（不含 `-d` 展开的子目录）按路径的和（任一行未知则未知，参数重叠时会重复计数）；与 `--freed` 同用时，`UNIQ`、`FREED` 按全部参数的并集计算，重叠部分只计一次，回答“这些路径一起删能腾出多少”。
 

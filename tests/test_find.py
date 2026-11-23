@@ -124,13 +124,24 @@ def test_print0_feeds_du_files0_from(tree, monkeypatch) -> None:
     assert piped.exit_code == 0 and "total" in piped.stdout
 
 
-def test_files0_from_rejects_operands_and_empty_names(tree, tmp_path: Path) -> None:
+def test_files0_from_reports_bad_names_and_keeps_going(tree, tmp_path: Path) -> None:
     db, source = tree
     listing = tmp_path / "bad.lst"
-    listing.write_bytes(str(source).encode() + b"\0\0")
-    for args in (["--files0-from", str(listing)], ["--files0-from", str(listing), str(source)]):
-        result = CliRunner().invoke(app, ["du", "--db", str(db), *args])
-        assert result.exit_code != 0
+    a, b = str(source / "a"), str(source / "b")
+    listing.write_bytes(f"{a}\0\0{b}".encode())  # an empty second name, no final NUL
+    result = CliRunner().invoke(app, ["du", "--db", str(db), "--files0-from", str(listing), "-c", "--format", "json"])
+    assert result.exit_code == 1
+    assert f"{listing}:2: invalid zero-length file name" in result.stderr
+    rows = json.loads(result.stdout)
+    assert [Path(row["path"]).name for row in rows] == ["a", "b", "total"]
+    assert rows[-1]["logical_size"] == 130 + 1000
+
+    piped = CliRunner().invoke(app, ["du", "--db", str(db), "--files0-from=-"], input=f"-\0{b}\0".encode())
+    assert piped.exit_code == 1 and "no file name of '-' allowed" in piped.stderr
+    assert "build" not in piped.stderr and piped.stdout.strip()
+
+    combined = CliRunner().invoke(app, ["du", "--db", str(db), "--files0-from", str(listing), str(source)])
+    assert combined.exit_code != 0 and "cannot be combined" in str(combined.exception)
 
 
 def test_errors_are_reported_and_other_start_points_still_print(tree) -> None:
