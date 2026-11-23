@@ -198,9 +198,9 @@ def _duplicate_hash_candidates(
     rows = connection.execute(
         """WITH RECURSIVE descendants(id) AS (
             SELECT id FROM path WHERE id=? UNION ALL
-            SELECT p.id FROM path p JOIN descendants d ON p.parent_path_id=d.id
+            SELECT p.id FROM descendants d CROSS JOIN path p ON p.parent_path_id=d.id
         ), duplicate_sizes(logical_size) AS (
-            SELECT p.logical_size FROM path p JOIN descendants d ON d.id=p.id
+            SELECT p.logical_size FROM descendants d CROSS JOIN path p ON d.id=p.id
             WHERE p.state='present' AND p.entry_kind='file' AND p.logical_size > 0
               AND (p.allocated_size IS NULL OR p.allocated_size > 0)
               AND p.logical_size BETWEEN ? AND ?
@@ -216,7 +216,7 @@ def _duplicate_hash_candidates(
                h.basis_size AS hash_size, h.basis_mtime_ns AS hash_mtime_ns,
                h.basis_change_time_ns AS hash_change_time_ns,
                h.basis_birth_time_ns AS hash_birth_time_ns
-        FROM path p JOIN descendants d ON d.id=p.id
+        FROM descendants d CROSS JOIN path p ON d.id=p.id
         JOIN duplicate_sizes s ON s.logical_size=p.logical_size
         JOIN root r ON r.id=p.root_id
         LEFT JOIN file_hash h ON h.path_id=p.id

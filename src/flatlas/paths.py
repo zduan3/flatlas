@@ -163,7 +163,7 @@ def remove_indexed_subtree(connection: sqlite3.Connection, value: Path) -> dict[
             """WITH RECURSIVE descendants(id) AS (
                 SELECT id FROM path WHERE id=?
                 UNION ALL
-                SELECT p.id FROM path p JOIN descendants d ON p.parent_path_id=d.id
+                SELECT p.id FROM descendants d CROSS JOIN path p ON p.parent_path_id=d.id
             )
             SELECT DISTINCT po.plan_id FROM plan_operation po
             WHERE po.canonical_path_id IN descendants OR po.replacement_path_id IN descendants""",
@@ -178,7 +178,7 @@ def remove_indexed_subtree(connection: sqlite3.Connection, value: Path) -> dict[
             """WITH RECURSIVE descendants(id) AS (
                 SELECT id FROM path WHERE id=?
                 UNION ALL
-                SELECT p.id FROM path p JOIN descendants d ON p.parent_path_id=d.id
+                SELECT p.id FROM descendants d CROSS JOIN path p ON p.parent_path_id=d.id
             )
             DELETE FROM path WHERE id IN descendants""",
             (path_id,),

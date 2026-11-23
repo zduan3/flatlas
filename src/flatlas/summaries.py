@@ -42,22 +42,22 @@ def _directory_rows(
         descendants(id, depth) AS (
             SELECT id, 0 FROM path WHERE id=?
             UNION ALL
-            SELECT p.id, d.depth + 1 FROM path p JOIN descendants d ON p.parent_path_id=d.id
+            SELECT p.id, d.depth + 1 FROM descendants d CROSS JOIN path p ON p.parent_path_id=d.id
             WHERE p.state='present' AND p.entry_kind='directory' AND (? IS NULL OR d.depth < ?)
         ),
         ancestors(id) AS (
             SELECT id FROM path WHERE id=?
             UNION ALL
-            SELECT p.parent_path_id FROM path p JOIN ancestors a ON p.id=a.id
+            SELECT p.parent_path_id FROM ancestors a CROSS JOIN path p ON p.id=a.id
             WHERE p.parent_path_id IS NOT NULL
         )
-        SELECT DISTINCT p.id, p.parent_path_id, p.path_key,
+        SELECT p.id, p.parent_path_id, p.path_key,
                ds.self_completed_at_ns, ds.last_completed_scan_id
-        FROM path p
+        FROM (SELECT id FROM descendants UNION SELECT id FROM ancestors) s
+        CROSS JOIN path p ON p.id=s.id
         LEFT JOIN directory_summary ds ON ds.path_id=p.id
         WHERE p.root_id=? AND p.state='present'
-          AND p.entry_kind IN ('root', 'directory')
-          AND (p.id IN (SELECT id FROM descendants) OR p.id IN ancestors)""",
+          AND p.entry_kind IN ('root', 'directory')""",
         (scope_path_id, max_depth, max_depth, scope_path_id, root_id),
     ).fetchall()
 

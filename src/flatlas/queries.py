@@ -137,7 +137,7 @@ def query_paths(connection: sqlite3.Connection, *, scope: Path | None = None, li
         rows = connection.execute(
             """WITH RECURSIVE descendants(id) AS (
                 SELECT id FROM path WHERE id=? UNION ALL
-                SELECT p.id FROM path p JOIN descendants d ON p.parent_path_id=d.id
+                SELECT p.id FROM descendants d CROSS JOIN path p ON p.parent_path_id=d.id
             ) SELECT root_id, path_display, entry_kind, logical_size, allocated_size, mtime_ns
             FROM path WHERE state='present' AND id IN descendants ORDER BY path_display LIMIT ?""",
             (selected["id"], limit),
@@ -423,7 +423,7 @@ def _subtree_completed_in_scan(connection: sqlite3.Connection, path_id: int, sca
         """WITH RECURSIVE directories(id) AS (
             SELECT id FROM path WHERE id=? AND state='present' AND entry_kind IN ('root', 'directory')
             UNION ALL
-            SELECT child.id FROM path child JOIN directories parent ON child.parent_path_id=parent.id
+            SELECT child.id FROM directories parent CROSS JOIN path child ON child.parent_path_id=parent.id
             WHERE child.state='present' AND child.entry_kind='directory'
         )
         SELECT 1 FROM directories d LEFT JOIN directory_summary ds ON ds.path_id=d.id
@@ -508,11 +508,11 @@ def hardlink_usage(connection: sqlite3.Connection, path_ids: list[int]) -> dict[
     row = connection.execute(
         f"""WITH RECURSIVE descendants(id) AS (
             SELECT id FROM path WHERE id IN ({placeholders})
-            UNION SELECT p.id FROM path p JOIN descendants d ON p.parent_path_id=d.id
+            UNION SELECT p.id FROM descendants d CROSS JOIN path p ON p.parent_path_id=d.id
         ), inodes AS (
             SELECT count(*) AS links_in_scope, max(p.nlink) AS nlink,
                    max(p.logical_size) AS logical_size, max(p.allocated_size) AS allocated_size
-            FROM path p JOIN descendants d ON p.id=d.id
+            FROM descendants d CROSS JOIN path p ON p.id=d.id
             WHERE p.state='present' AND p.entry_kind='file'
             GROUP BY p.root_id, coalesce(p.device, -p.id), coalesce(p.inode, -p.id)
         )
@@ -544,7 +544,7 @@ def _descendant_directories(
         f"""WITH RECURSIVE tree(id, depth) AS (
             SELECT ?, 0
             UNION ALL
-            SELECT p.id, t.depth + 1 FROM path p JOIN tree t ON p.parent_path_id=t.id
+            SELECT p.id, t.depth + 1 FROM tree t CROSS JOIN path p ON p.parent_path_id=t.id
             WHERE p.state='present' AND p.entry_kind='directory' AND t.depth < ?
         )
         SELECT t.depth, {_SCOPE_COLUMNS}
@@ -686,7 +686,7 @@ def largest_files(
     rows = connection.execute(
         """WITH RECURSIVE descendants(id) AS (
             SELECT id FROM path WHERE id=? UNION ALL
-            SELECT p.id FROM path p JOIN descendants d ON p.parent_path_id=d.id
+            SELECT p.id FROM descendants d CROSS JOIN path p ON p.parent_path_id=d.id
         )
         SELECT p.root_id, p.path_display, p.logical_size, p.allocated_size
         FROM path p
@@ -723,7 +723,7 @@ def duplicate_groups(
         rows = connection.execute(
             """WITH RECURSIVE descendants(id) AS (
                 SELECT id FROM path WHERE id=? UNION ALL
-                SELECT p.id FROM path p JOIN descendants d ON p.parent_path_id=d.id
+                SELECT p.id FROM descendants d CROSS JOIN path p ON p.parent_path_id=d.id
             ) SELECT h.full_algorithm, h.full_digest, p.logical_size, p.id, p.root_id, p.path_display,
                    p.device, p.inode, p.nlink
             FROM file_hash h JOIN path p ON p.id=h.path_id

@@ -239,10 +239,11 @@ def _mark_missing(connection: sqlite3.Connection, root_id: int, scan_id: int, sc
         """WITH RECURSIVE descendants(id) AS (
              SELECT id FROM path WHERE id=?
              UNION ALL
-             SELECT p.id FROM path p JOIN descendants d ON p.parent_path_id=d.id
+             SELECT p.id FROM descendants d CROSS JOIN path p ON p.parent_path_id=d.id
            )
+           -- Unary + keeps the planner on the rowid list instead of a root-wide index scan.
            UPDATE path SET state='deleted', deleted_by_scope_id=?, deleted_at_ns=?
-           WHERE root_id=? AND state='present' AND last_seen_scan_id <> ? AND id IN descendants""",
+           WHERE id IN descendants AND +root_id=? AND +state='present' AND last_seen_scan_id <> ?""",
         (scope_path_id, scope_id, now_ns(), root_id, scan_id),
     )
 
@@ -262,7 +263,7 @@ def _mark_missing_direct_children(
              WHERE root_id=? AND parent_path_id=? AND state='present'
                AND last_seen_scan_id <> ?
              UNION ALL
-             SELECT p.id FROM path p JOIN missing m ON p.parent_path_id=m.id
+             SELECT p.id FROM missing m CROSS JOIN path p ON p.parent_path_id=m.id
              WHERE p.root_id=? AND p.state='present'
            )
            UPDATE path SET state='deleted', deleted_by_scope_id=?, deleted_at_ns=?
