@@ -939,7 +939,7 @@ def test_database_migration_is_idempotent_and_keeps_existing_data(tmp_path: Path
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
         assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
-        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 6
+        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 7
         assert connection.execute("SELECT root_path_display FROM root").fetchone()[0] == str(discover_namespace(source).path)
         assert connection.execute("SELECT count(*) FROM path").fetchone()[0] == preserved_path_count
         summary = connection.execute(
@@ -1082,7 +1082,7 @@ def test_refresh_cutoff_migration_keeps_existing_scans(tmp_path: Path) -> None:
         columns = {row["name"] for row in connection.execute("PRAGMA table_info('scan')")}
         assert "refresh_before_ns" in columns
         assert connection.execute("SELECT count(*) FROM scan").fetchone()[0] == scan_count
-        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 6
+        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 7
         assert [(event.version, event.phase) for event in progress] == [(3, "started"), (3, "completed")]
     finally:
         connection.close()
@@ -1781,7 +1781,7 @@ def test_scan_audit_cli_outputs_table_and_json(tmp_path: Path) -> None:
 
 @pytest.mark.scan
 @pytest.mark.safety
-def test_second_interrupt_during_cancel_save_rolls_back_scan(tmp_path: Path) -> None:
+def test_second_interrupt_during_cancel_save_keeps_only_checkpoints(tmp_path: Path) -> None:
     connection, source = make_connection(tmp_path)
     payload = source / "payload.bin"
     payload.write_bytes(b"discarded")
@@ -1805,9 +1805,15 @@ def test_second_interrupt_during_cancel_save_rolls_back_scan(tmp_path: Path) -> 
             raise AssertionError("second interrupt should abort saving")
 
         assert interruptions == 2
-        assert connection.execute("SELECT count(*) FROM scan").fetchone()[0] == 0
-        assert connection.execute("SELECT count(*) FROM path").fetchone()[0] == 0
-        assert connection.execute("SELECT count(*) FROM directory_summary").fetchone()[0] == 0
+        # The uncommitted batch (payload) is discarded; the scan ends as cancelled
+        # with the counts of its last checkpoint and confirms no deletion.
+        scan = connection.execute("SELECT status, files_seen, finished_at_ns FROM scan").fetchone()
+        assert (scan["status"], scan["files_seen"]) == ("cancelled", 0)
+        assert scan["finished_at_ns"] is not None
+        assert connection.execute(
+            "SELECT count(*) FROM path WHERE path_display=?", (str(payload),)
+        ).fetchone()[0] == 0
+        assert connection.execute("SELECT count(*) FROM path WHERE state='deleted'").fetchone()[0] == 0
     finally:
         connection.close()
 

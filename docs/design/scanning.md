@@ -6,7 +6,7 @@
 
 `flatlas scan PATH` 在 PATH 所属的已登记 namespace 内扫描一个目录 scope：PATH 即 namespace 根时 `scan.kind='full'`，否则为 `subtree`。已经不存在的目标不能直接扫描，必须扫描覆盖它的现存父目录。扫描只采集 metadata，不读取普通文件内容，也不创建新的 `file_hash`；已有 hash 的依据随 metadata 变化时标为 `stale`。
 
-一次扫描在单个 SQLite 事务中完成：创建 running 的 `scan` 与 `scan_scope`，补齐 scope 的祖先路径，递归枚举目录并 upsert 每个观测到的条目，最后按结果写入 scope/scan 状态、确认删除（仅 completed）并批量刷新目录汇总。scope 祖先无法 stat 时 scan 记为 `failed`；任一枚举或 stat 错误写入 `scan_error` 并使 scope 成为 `partial`；用户中断成为 `cancelled`；否则为 `completed`。
+一次扫描先提交 running 的 `scan` 与 `scan_scope` 及 scope 的祖先路径，再递归枚举目录并 upsert 每个观测到的条目，遍历中按时间间隔提交 checkpoint（见「中断与续扫」），最后在一个事务中写入 scope/scan 状态、确认删除（仅 completed）并批量刷新目录汇总。scope 祖先无法 stat 时 scan 记为 `failed`；任一枚举或 stat 错误写入 `scan_error` 并使 scope 成为 `partial`；用户中断成为 `cancelled`；否则为 `completed`。
 
 默认不跟随 symlink、junction 或其他 Windows reparse point；symlink 只读取并保存目标（readlink 失败时目标为空）。普通文件同时采集 allocated size，采集失败按 `stat` 错误记录并令 scope partial，见 [平台差异](platform.md)。
 
@@ -23,9 +23,10 @@
 每次扫描把各阶段耗时写入 `scan.stats_json`（migration 5），`scan` 输出与 `scan-info ID` 的 `stats` 字段展示：
 
 - `wall_s`、`entries_per_s`：本次扫描的总耗时与条目速率（文件 + 目录）。
-- `phases`：`readdir`（枚举目录）、`observe`（每个条目的 stat，含 lazy 回退）、`db_write`（path upsert）、`refresh_query`（`--refresh-before`/续扫的逐目录查询）、`progress`（进度回调）、`mark_missing`、`summaries`，各含秒数与调用次数；`unaccounted_s` 为未归入任何阶段的时间。阶段在单个操作外计时，递归不会重复计入。
+- `phases`：`readdir`（枚举目录）、`observe`（每个条目的 stat，含 lazy 回退）、`db_write`（path upsert）、`refresh_query`（`--refresh-before`/续扫的逐目录查询）、`progress`（进度回调）、`checkpoint`（批次的目录汇总与计数更新）、`commit`（checkpoint 提交）、`mark_missing`、`summaries`，各含秒数与调用次数；`unaccounted_s` 为未归入任何阶段的时间。阶段在单个操作外计时，递归不会重复计入。
 - `exact_stat_fallbacks`、`exact_stat_fallback_s`：lazy root 上因 `blocks×512 < size` 回退到精确 `lstat` 的次数与耗时（包含在 `observe` 内）。
-- 只有扫描正常走到收尾（completed、partial、cancelled）才写入；early-fail 与被回滚的扫描没有记录，migration 5 之前的扫描为 `null`。
+- `checkpoints`：本次提交的 checkpoint 数（含收尾前的最后一个）。
+- 扫描走到收尾（completed、partial、cancelled，含收尾被中断的 cancelled）时写入；early-fail 与被杀后接管的扫描没有记录，migration 5 之前的扫描为 `null`。
 
 ### Lustre 上的 lazy 元数据
 
@@ -88,19 +89,40 @@ VALUE 支持带时区或使用本地时区的 ISO 8601 时间，以及 `30s`、`
 
 ## 中断与续扫
 
-扫描使用单个事务，并实现两段式用户取消：
+### Checkpoint
 
-- 遍历阶段第一次 `KeyboardInterrupt` 停止继续枚举，转入批量汇总收尾，将 scan/scope 记为 `cancelled`，保留已观测 path、metadata 和缓存，同时绝不运行缺失删除。
-- 收尾阶段再次中断则回滚本次扫描事务并放弃保存。
-- 进程崩溃同样丢失整个未提交事务；这些情况下本次观察和 scan 记录均不存在，不能从该调用恢复。
+扫描创建 running 的 `scan`/`scan_scope` 并补齐 scope 祖先后立即提交，遍历中至少每 `CHECKPOINT_INTERVAL_S`（5 s）提交一次 checkpoint，在单个短事务内写入：
 
-CLI 在 POSIX 上把 `SIGTERM`（批处理调度器终止作业前发送）和 `SIGHUP`（终端关闭或远程会话断开）转为同一 `KeyboardInterrupt` 路径，因此它们与 Ctrl-C 一样保存已观测数据；父进程已忽略的信号（如 `nohup` 下的 `SIGHUP`）保持忽略。调度器在 `SIGTERM` 后的宽限期内若收尾未完成即 `SIGKILL`，本次扫描仍整体回滚。同一信号路由也作用于 `dupes`：hash 阶段中断时提交已完成的 hash 批次，见 [惰性 Hash 与重复候选](hashing.md)。
+- 自上次 checkpoint 以来 upsert 的 path、metadata 与 `scan_error`；
+- `scan.files_seen`、`dirs_seen`、`logical_bytes_seen`（migration 7）、`scan_scope.paths_seen` 与心跳 `scan.heartbeat_at_ns`；
+- 这一批中遍历结束的目录的汇总，完整枚举的目录同时推进 `self_completed_at_ns`/`last_completed_scan_id`。遍历是后序的，目录结束时它访问过的子目录都已结束，汇总可以从子目录已提交的汇总自底向上算出；仍在遍历中的祖先保留旧汇总，直到它们结束或最终刷新。
 
-`flatlas scan PATH --resume` 只匹配 root 与规范化 scope 完全相同的最近 scan。最近状态必须是 `cancelled`、`partial` 或 `failed`；`completed` 不可恢复，`running` 不会被自动接管。恢复调用创建新的独立 scan，不保存 `resumed_from_scan_id`：若上次 scan 已有 `refresh_before_ns` 则原值继承，否则使用上次 scan 的 `started_at_ns`。因此多次用户中断始终使用最初的固定 cutoff，目录仍记录各自实际完成时间，失败目录的成功时间不推进并会在下次恢复时重试。
+删除确认只在最终事务中进行，与 completed 状态和整个 scope 的汇总刷新一起提交，因此任何中断、崩溃或被杀都只留下 checkpoint，不会删除任何旧路径。其他连接可以在扫描期间读到已提交的 checkpoint：已结束的目录按当前 scan 显示为已完成，未结束的部分按之前的覆盖判断（running 的处理与 cancelled 相同）。checkpoint 期间扫描进程持有写锁，其它写入者只能在两次 checkpoint 之间的空隙获得锁。
+
+不另外持久化工作队列：目录完成时间就是队列。续扫用原 cutoff 做 `--refresh-before`，已在 checkpoint 中完成的子树按 `subtree_complete_through_ns` 整体剪枝，只重新枚举崩溃点到 scope 路径上未完成的目录。
+
+### 用户取消与信号
+
+- 遍历阶段第一次 `KeyboardInterrupt` 停止继续枚举，先把已观测数据作为最后一个 checkpoint 提交，再在独立事务中批量刷新汇总，将 scan/scope 记为 `cancelled`，绝不运行缺失删除。
+- 收尾阶段（含上述最后一个 checkpoint 和 completed 扫描的收尾）再次中断，回滚未提交的部分，用一条短事务把 scan/scope 记为 `cancelled`，计数取最后一个已提交 checkpoint 的值。
+- 遍历中出现意外异常时同样回滚未提交批次，并把 scan/scope 记为 `failed` 后重新抛出。
+
+CLI 在 POSIX 上把 `SIGTERM`（批处理调度器终止作业前发送）和 `SIGHUP`（终端关闭或远程会话断开）转为同一 `KeyboardInterrupt` 路径，因此它们与 Ctrl-C 一样保存已观测数据；父进程已忽略的信号（如 `nohup` 下的 `SIGHUP`）保持忽略。同一信号路由也作用于 `dupes`：hash 阶段中断时提交已完成的 hash 批次，见 [惰性 Hash 与重复候选](hashing.md)。
+
+### 崩溃与 owner
+
+`SIGKILL`、断电或进程崩溃会留下 status 仍为 `running` 的 scan 及其已提交的 checkpoint。scan 记录 owner（`scan.owner_json`：主机名、PID 命名空间、PID）与心跳，用于判断 owner 是否已死：
+
+- 心跳超过 30 分钟（`ABANDONED_AFTER_NS`）视为已死；
+- 否则只在 owner 与当前进程同一主机、同一 PID 命名空间且平台提供命名空间（Linux `/proc/self/ns/pid`）时探测 PID，进程不存在即已死；容器、agent 沙箱等不同 PID 命名空间互相看不到进程，不能探测，其他主机与不支持的平台同样只按心跳判断。
+
+`--resume` / `--resume-from` 遇到 running 的 scan 时，owner 已死则把它记为 `cancelled`（`finished_at_ns` 取最后心跳，`note` 记录原 owner 与接管者）后照常续扫；owner 可能仍活着则报错并显示 owner 与最后 checkpoint 的时间。仍在运行的扫描在每次 checkpoint 与最终提交时都要求自己的 scan 仍为 running；若已被其它进程终结，回滚未提交部分并以 `ScanTakenOverError` 停止，不覆盖对方写入的状态。
+
+### 续扫
+
+`flatlas scan PATH --resume` 只匹配 root 与规范化 scope 完全相同的最近 scan。最近状态必须是 `cancelled`、`partial` 或 `failed`（或按上节接管的 running）；`completed` 不可恢复。恢复调用创建新的独立 scan，不保存 `resumed_from_scan_id`：若上次 scan 已有 `refresh_before_ns` 则原值继承，否则使用上次 scan 的 `started_at_ns`。因此多次中断始终使用最初的固定 cutoff，目录仍记录各自实际完成时间，失败目录的成功时间不推进并会在下次恢复时重试。
 
 `flatlas scan --resume-from ID` 使用相同规则显式选择历史 scan，并从其唯一 `scan_scope` 读取 `scan-info ID` 所展示的 PATH；ID 必须存在、状态未完成且只有一个 scope。显式选择允许在存在更新的扫描记录时仍从指定的旧 cutoff 刷新，但不会修改或关联原 scan。`--full`、`--refresh-before`、`--resume`、`--resume-from` 互斥，使用 `--resume-from` 时不得再传 PATH。
-
-当前恢复只适用于已经成功保存 `cancelled`/`partial`/`failed` 记录的调用，并且不持久化工作队列：续扫依据目录成功时间重新选择工作，不是崩溃后可恢复任务。
 
 ## 浅扫描：`--shallow`
 
@@ -119,4 +141,4 @@ CLI 在 POSIX 上把 `SIGTERM`（批处理调度器终止作业前发送）和 `
 - deleted 行保留在 SQLite，不参与 `paths`、`du`、`largest` 或 `dupes` 的当前状态结果；同一路径重新出现并被扫描时恢复为 present，旧 hash 在 metadata basis 不匹配时变为 stale。
 - `ls` 现场发现缺失只显示 `gone`，不写数据库。
 
-相关提案：[扫描短事务 checkpoint 与崩溃恢复](../plan/proposals/scan-checkpoint.md)、[按目录 mtime 的增量刷新](../plan/proposals/incremental-refresh.md)。
+相关提案：[按目录 mtime 的增量刷新](../plan/proposals/incremental-refresh.md)。

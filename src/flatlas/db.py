@@ -10,7 +10,7 @@ from pathlib import Path
 
 from flatlas.errors import FlatlasError
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 CACHE_SIZE_KIB = 256 * 1024
 
 DDL = """
@@ -142,6 +142,7 @@ REFRESH_SCAN_MIGRATION_DESCRIPTION = "record directory refresh cutoff"
 ENTRY_COUNT_MIGRATION_DESCRIPTION = "count directory entries of every kind"
 SCAN_STATS_MIGRATION_DESCRIPTION = "record per-phase scan timing and index path parents"
 SHALLOW_SCAN_MIGRATION_DESCRIPTION = "record scan depth limit"
+CHECKPOINT_MIGRATION_DESCRIPTION = "checkpoint running scans with owner and heartbeat"
 
 
 @dataclass(frozen=True)
@@ -371,3 +372,18 @@ def _apply_migrations(
         )
         if existing_database and on_migration is not None:
             completed.append(MigrationProgress(6, SHALLOW_SCAN_MIGRATION_DESCRIPTION, "completed"))
+    if connection.execute("SELECT 1 FROM schema_migration WHERE version = 7").fetchone() is None:
+        scan_columns = {row["name"] for row in connection.execute("PRAGMA table_info('scan')")}
+        for column, ddl in (
+            ("logical_bytes_seen", "INTEGER NOT NULL DEFAULT 0"),
+            ("heartbeat_at_ns", "INTEGER"),
+            ("owner_json", "TEXT"),
+        ):
+            if column not in scan_columns:
+                connection.execute(f"ALTER TABLE scan ADD COLUMN {column} {ddl}")
+        connection.execute(
+            "INSERT INTO schema_migration(version, applied_at_ns, description) VALUES (?, ?, ?)",
+            (7, now_ns(), CHECKPOINT_MIGRATION_DESCRIPTION),
+        )
+        if existing_database and on_migration is not None:
+            completed.append(MigrationProgress(7, CHECKPOINT_MIGRATION_DESCRIPTION, "completed"))

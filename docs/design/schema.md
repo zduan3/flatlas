@@ -19,7 +19,7 @@ PRAGMA cache_size = -262144;  -- 页缓存上限 256 MiB，按需分配
 
 默认 2 MiB 页缓存在索引变大后会让逐条 `path_key` 查找反复读取 B-tree 页，在网络文件系统上每次未命中都是远程读取；缓存按需分配，小索引不承担该上限。
 
-所有时间均为 UTC Unix 纳秒（`*_ns`，`INTEGER`）。文件路径以 root-relative 原始字节存为 `BLOB`；Windows 将原生 Unicode 以固定 UTF-8 编码存入 BLOB，Linux 直接存 `os.fsencode()` 的结果。显示字符串只用于 UI/导出，不参与唯一性或路径比较；SQLite TEXT 必须是合法 UTF-8，因此显示字符串、错误消息中不可解码的字节分别写作 `\xNN`、`\udcNN`（`paths.display_path` / `display_text`），否则一个这样的文件名会让整次扫描事务回滚。已验收范围只覆盖当前平台可正常表示的常规 Unicode 路径；Linux 非 UTF-8 round-trip 尚未验收，但 schema 的 BLOB 身份设计不得退化。
+所有时间均为 UTC Unix 纳秒（`*_ns`，`INTEGER`）。文件路径以 root-relative 原始字节存为 `BLOB`；Windows 将原生 Unicode 以固定 UTF-8 编码存入 BLOB，Linux 直接存 `os.fsencode()` 的结果。显示字符串只用于 UI/导出，不参与唯一性或路径比较；SQLite TEXT 必须是合法 UTF-8，因此显示字符串、错误消息中不可解码的字节分别写作 `\xNN`、`\udcNN`（`paths.display_path` / `display_text`），否则一个这样的文件名会让扫描写入失败并以 `failed` 中止。已验收范围只覆盖当前平台可正常表示的常规 Unicode 路径；Linux 非 UTF-8 round-trip 尚未验收，但 schema 的 BLOB 身份设计不得退化。
 
 ## 路径编码与对象身份
 
@@ -91,7 +91,10 @@ CREATE TABLE scan (
     note               TEXT,
     refresh_before_ns  INTEGER, -- migration 3；--refresh-before 的固定 cutoff，普通扫描为 NULL
     stats_json         TEXT,    -- migration 5；分阶段计时 JSON，见 scanning.md「分阶段计时」
-    max_depth          INTEGER  -- migration 6；NULL 为不限深度，0 为 --shallow
+    max_depth          INTEGER, -- migration 6；NULL 为不限深度，0 为 --shallow
+    logical_bytes_seen INTEGER NOT NULL DEFAULT 0, -- migration 7；已提交的普通文件 logical bytes
+    heartbeat_at_ns    INTEGER, -- migration 7；最后一次 checkpoint 时间
+    owner_json         TEXT     -- migration 7；运行进程 {host, pid_ns, pid}，用于判断 running scan 是否已被遗弃
 );
 
 CREATE TABLE path (
@@ -252,7 +255,7 @@ CREATE INDEX idx_directory_summary_freshness
 
 ## 扫描与删除语义
 
-每个扫描在一个事务中按下列规则写入（完整流程、刷新扫描与中断语义见 [扫描与目录汇总](scanning.md)）：
+每个扫描按下列规则写入；遍历中的观测以短事务 checkpoint 提交，删除确认只在最终事务中进行（完整流程、刷新扫描、中断与崩溃恢复见 [扫描与目录汇总](scanning.md)）：
 
 1. 创建 `scan(status='running')`，并为请求的 namespace root 或子树创建一个 `scan_scope(status='running')`；目标即 namespace 根时 `scan.kind='full'`，否则为 `subtree`。
 2. 枚举到路径时，以 `(root_id, path_key)` upsert `path`，更新 metadata、`state='present'` 和 `last_seen_scan_id`。Windows 使用 UTF-8 编码的原生 Unicode path；Linux 保留原始字节。任何已用于 hash 的 identity、size、mtime、change/birth time 变化或不可可靠比较时，将对应 `file_hash.state` 标记为 `stale`。
@@ -315,6 +318,7 @@ HAVING count(*) > 1;
 | 4 | `count directory entries of every kind` | 为 `directory_summary` 增加 `direct_entries`、`subtree_entries`，并为全部 root 重算目录汇总 |
 | 5 | `record per-phase scan timing and index path parents` | 为 `scan` 增加可空 `stats_json`，并建 `idx_path_parent`（均可重复执行）|
 | 6 | `record scan depth limit` | 为 `scan` 增加可空 `max_depth`（`CHECK max_depth >= 0`）；既有扫描为 NULL |
+| 7 | `checkpoint running scans with owner and heartbeat` | 为 `scan` 增加 `logical_bytes_seen`（默认 0）、可空 `heartbeat_at_ns` 与 `owner_json`；既有扫描保持原值 |
 
 migration 2 回填既有索引时，历史完成时间只从覆盖相应目录的 completed `scan_scope` 保守恢复；partial、failed 或 cancelled scope 不用于推断完整时间。migration 不重建或清空现有 root、path、scan、error、hash 或 plan 数据。
 

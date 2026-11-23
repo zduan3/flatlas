@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sqlite3
 import stat as stat_module
 import sys
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,10 +30,18 @@ from flatlas.paths import (
     parent_key,
     path_key,
 )
-from flatlas.summaries import refresh_directory_summaries
+from flatlas.summaries import refresh_directory_summaries, refresh_finished_directories
 
 SCANNER_VERSION = "flatlas-python-0.2"
 LAZY_SCANNER_SUFFIX = "+lazy-statx"
+# A running scan commits its observations at least this often.
+CHECKPOINT_INTERVAL_S = 5.0
+# A running scan whose heartbeat is older than this is treated as abandoned.
+ABANDONED_AFTER_NS = 30 * 60 * 1_000_000_000
+
+
+class ScanTakenOverError(FlatlasError):
+    """Another process finalized this running scan as abandoned."""
 
 
 @dataclass(frozen=True)
@@ -302,6 +311,66 @@ def _indexed_directories(
     ).fetchall()
 
 
+def _pid_namespace() -> str:
+    try:
+        return os.readlink("/proc/self/ns/pid")
+    except OSError:
+        return ""
+
+
+def scan_owner() -> dict[str, Any]:
+    """Identity of this process as recorded on the scans it runs."""
+    return {"host": socket.gethostname(), "pid_ns": _pid_namespace(), "pid": os.getpid()}
+
+
+def owner_is_alive(owner_json: str | None, heartbeat_at_ns: int, *, now: int | None = None) -> bool:
+    """Whether the process running a scan may still be writing it.
+
+    A heartbeat older than ``ABANDONED_AFTER_NS`` means abandoned. Otherwise
+    the process is probed only when it ran on this host in this PID namespace
+    (containers and sandboxes on one host do not see each other's PIDs) and
+    the platform exposes namespaces; anything else is presumed alive.
+    """
+    current_time = now_ns() if now is None else now
+    if current_time - heartbeat_at_ns >= ABANDONED_AFTER_NS:
+        return False
+    owner = json.loads(owner_json) if owner_json else {}
+    current = scan_owner()
+    if not current["pid_ns"] or owner.get("host") != current["host"] or owner.get("pid_ns") != current["pid_ns"]:
+        return True
+    try:
+        os.kill(int(owner["pid"]), 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _claim_running_scan(connection: sqlite3.Connection, scan_id: int, assignments: str, values: tuple[Any, ...]) -> None:
+    """Update this process's running scan, failing if another process finalized it."""
+    cursor = connection.execute(f"UPDATE scan SET {assignments} WHERE id=? AND status='running'", (*values, scan_id))
+    if cursor.rowcount != 1:
+        raise ScanTakenOverError(f"scan {scan_id} was finalized by another process; stopping without saving")
+
+
+def _finalize_abandoned(connection: sqlite3.Connection, row: sqlite3.Row) -> None:
+    """Mark a running scan whose owner is gone as cancelled, keeping its checkpoints."""
+    finished = int(row["heartbeat_at_ns"] or row["started_at_ns"])
+    note = f"abandoned by {row['owner_json'] or 'unknown owner'}; finalized on resume by {json.dumps(scan_owner(), sort_keys=True)}"
+    with connection:
+        connection.execute(
+            "UPDATE scan_scope SET status='cancelled', finished_at_ns=? WHERE scan_id=? AND status='running'",
+            (finished, row["id"]),
+        )
+        connection.execute(
+            """UPDATE scan SET status='cancelled', finished_at_ns=?, note=?,
+                      errors_seen=(SELECT coalesce(sum(error_count), 0) FROM scan_scope WHERE scan_id=?)
+               WHERE id=? AND status='running'""",
+            (finished, note, row["id"], row["id"]),
+        )
+
+
 def resume_selection(
     connection: sqlite3.Connection,
     value: Path,
@@ -317,7 +386,7 @@ def resume_selection(
         raise FlatlasError(f"scan path must be a directory: {scope}")
     scope_key = path_key(namespace, scope)
     row = connection.execute(
-        """SELECT s.id, s.status, s.started_at_ns, s.refresh_before_ns
+        """SELECT s.id, s.status, s.started_at_ns, s.refresh_before_ns, s.heartbeat_at_ns, s.owner_json
            FROM scan s JOIN scan_scope ss ON ss.scan_id=s.id
            WHERE ss.root_id=? AND ss.scope_path_key=? AND s.max_depth IS NULL
            ORDER BY s.id DESC LIMIT 1""",
@@ -325,7 +394,7 @@ def resume_selection(
     ).fetchone()
     if row is None:
         raise FlatlasError(f"no previous scan found for {scope}; run without --resume")
-    return _resume_selection_from_row(row, scope)
+    return _resume_selection_from_row(connection, row, scope)
 
 
 def resume_selection_from_scan(connection: sqlite3.Connection, scan_id: int) -> ResumeSelection:
@@ -333,7 +402,7 @@ def resume_selection_from_scan(connection: sqlite3.Connection, scan_id: int) -> 
 
     rows = connection.execute(
         """SELECT s.id, s.status, s.started_at_ns, s.refresh_before_ns, s.max_depth,
-                  p.path_display AS scope
+                  s.heartbeat_at_ns, s.owner_json, p.path_display AS scope
            FROM scan s JOIN scan_scope ss ON ss.scan_id=s.id
            LEFT JOIN path p
              ON p.root_id=ss.root_id AND p.path_key=ss.scope_path_key
@@ -349,15 +418,23 @@ def resume_selection_from_scan(connection: sqlite3.Connection, scan_id: int) -> 
         raise FlatlasError(f"scan {scan_id} is a shallow scan; rerun it instead of resuming")
     if row["scope"] is None:
         raise FlatlasError(f"scan {scan_id} scope path is unavailable")
-    return _resume_selection_from_row(row, Path(str(row["scope"])))
+    return _resume_selection_from_row(connection, row, Path(str(row["scope"])))
 
 
-def _resume_selection_from_row(row: sqlite3.Row, scope: Path) -> ResumeSelection:
+def _resume_selection_from_row(connection: sqlite3.Connection, row: sqlite3.Row, scope: Path) -> ResumeSelection:
     status = str(row["status"])
     if status == "completed":
         raise FlatlasError(f"scan {row['id']} for {scope} is completed; run without resume options")
     if status == "running":
-        raise FlatlasError(f"scan {row['id']} for {scope} is still running; cannot resume it")
+        heartbeat = int(row["heartbeat_at_ns"] or row["started_at_ns"])
+        if owner_is_alive(row["owner_json"], heartbeat):
+            age = max(now_ns() - heartbeat, 0) // 1_000_000_000
+            raise FlatlasError(
+                f"scan {row['id']} for {scope} is still running "
+                f"(owner {row['owner_json'] or 'unknown'}, last checkpoint {age}s ago); cannot resume it"
+            )
+        # The owner crashed or was killed: keep its checkpoints and resume from them.
+        _finalize_abandoned(connection, row)
     refresh_before = row["refresh_before_ns"]
     return ResumeSelection(
         scan_id=int(row["id"]),
@@ -417,6 +494,11 @@ def scan_directory(
 
     A complete shallow scan confirms missing direct entries (with their indexed
     descendants) but neither enters nor refreshes subdirectories.
+
+    The running scan is committed first and its observations are checkpointed
+    every ``CHECKPOINT_INTERVAL_S``; only the final transaction confirms
+    deletions, so an interrupted or killed scan keeps its checkpoints but never
+    deletes anything.
     """
     if shallow and refresh_before_ns is not None:
         raise ValueError("a shallow scan cannot use refresh_before_ns")
@@ -437,11 +519,12 @@ def scan_directory(
     scope_key = path_key(namespace, scope)
     with connection:
         scan_id = _last_insert_id(connection.execute(
-            """INSERT INTO scan(root_id, kind, status, started_at_ns, scanner_version, refresh_before_ns, max_depth)
-               VALUES (?, ?, 'running', ?, ?, ?, ?)""",
+            """INSERT INTO scan(root_id, kind, status, started_at_ns, scanner_version, refresh_before_ns, max_depth,
+                                heartbeat_at_ns, owner_json)
+               VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?)""",
             (
                 root_id, kind, started, SCANNER_VERSION + (LAZY_SCANNER_SUFFIX if lazy else ""),
-                refresh_before_ns, 0 if shallow else None,
+                refresh_before_ns, 0 if shallow else None, started, json.dumps(scan_owner(), sort_keys=True),
             ),
         ))
         scope_id = _last_insert_id(connection.execute(
@@ -463,163 +546,244 @@ def scan_directory(
                 "refresh_before_ns": refresh_before_ns,
                 "errors_seen": 1,
             }
-        files_seen = 0
-        dirs_seen = 1
-        logical_bytes_seen = 0
-        failed = False
-        completed_directories: dict[int, tuple[int, int]] = {}
+    files_seen = 0
+    dirs_seen = 1
+    logical_bytes_seen = 0
+    failed = False
+    # Directories whose traversal finished and the subset that completed,
+    # split into committed state and the batch since the last checkpoint.
+    completed_directories: dict[int, tuple[int, int]] = {}
+    pending_completed: dict[int, tuple[int, int]] = {}
+    pending_finished: list[int] = []
+    committed_counts = (files_seen, dirs_seen, logical_bytes_seen)
+    checkpoints = 0
+    next_checkpoint = time.monotonic() + CHECKPOINT_INTERVAL_S
 
-        def report(phase: str, directory: Path | None = None) -> None:
-            if on_progress is not None:
-                with timer.phase("progress"):
-                    _report(phase, directory)
+    def report(phase: str, directory: Path | None = None) -> None:
+        if on_progress is not None:
+            with timer.phase("progress"):
+                _report(phase, directory)
 
-        # Files of one directory report it repeatedly; formatting its relative
-        # path once per directory keeps progress cheap (~80 us per entry before).
-        displayed_directory: Path | None = None
-        displayed_text: str | None = None
+    # Files of one directory report it repeatedly; formatting its relative
+    # path once per directory keeps progress cheap (~80 us per entry before).
+    displayed_directory: Path | None = None
+    displayed_text: str | None = None
 
-        def _report(phase: str, directory: Path | None) -> None:
-            nonlocal displayed_directory, displayed_text
-            if on_progress is not None:
-                current_directory = None
-                if directory is not None:
-                    if displayed_directory != directory:
-                        relative_directory = directory.relative_to(scope)
-                        displayed_directory = directory
-                        displayed_text = display_path(relative_directory) if relative_directory.parts else "."
-                    current_directory = displayed_text
-                on_progress(
-                    ScanProgress(phase, files_seen, dirs_seen, logical_bytes_seen, current_directory)
-                )
-
-        def visit(
-            directory: Path,
-            directory_id: int,
-        ) -> None:
-            nonlocal files_seen, dirs_seen, logical_bytes_seen, failed
-            scan_self = refresh_before_ns is None
-            if refresh_before_ns is not None:
-                report("scanning", directory)
-                with timer.phase("refresh_query"):
-                    refresh_state = _directory_refresh_state(connection, root_id, directory_id)
-                scan_self = (
-                    refresh_state is None
-                    or refresh_state["self_completed_at_ns"] is None
-                    or int(refresh_state["self_completed_at_ns"]) < refresh_before_ns
-                )
-                if not scan_self:
-                    assert refresh_state is not None
-                    subtree_time = refresh_state["subtree_complete_through_ns"]
-                    if subtree_time is not None and int(subtree_time) >= refresh_before_ns:
-                        return
-                    with timer.phase("refresh_query"):
-                        indexed_children = _indexed_directories(connection, root_id, directory_id)
-                    observed_children: list[tuple[Path, Observation]] = []
-                    refresh_parent = False
-                    for child in indexed_children:
-                        child_subtree_time = child["subtree_complete_through_ns"]
-                        if child_subtree_time is not None and int(child_subtree_time) >= refresh_before_ns:
-                            continue
-                        child_path = Path(str(child["path_display"]))
-                        try:
-                            with timer.phase("observe"):
-                                child_observed = _observation(namespace, child_path, lazy=lazy)
-                        except FileNotFoundError:
-                            # The child was known when the parent was last
-                            # enumerated. Re-enumerate the parent before
-                            # confirming that the child was deleted.
-                            refresh_parent = True
-                            break
-                        except OSError as exc:
-                            _record_error(connection, scope_id, bytes(child["path_key"]), "stat", exc)
-                            failed = True
-                            continue
-                        if child_observed.kind != "directory":
-                            refresh_parent = True
-                            break
-                        observed_children.append((child_path, child_observed))
-                    if not refresh_parent:
-                        for child_path, child_observed in observed_children:
-                            with timer.phase("db_write"):
-                                child_id = upsert_path(
-                                    connection, root_id, scan_id, child_observed, parent_id=directory_id
-                                )
-                            dirs_seen += 1
-                            visit(child_path, child_id)
-                        return
-            report("scanning", directory)
-            try:
-                with timer.phase("readdir"):
-                    entries = list(os.scandir(directory))
-            except OSError as exc:
-                _record_error(connection, scope_id, path_key(namespace, directory), "enumerate", exc)
-                failed = True
-                return
-            directory_complete = True
-            for entry in entries:
-                entry_path = Path(entry.path)
-                try:
-                    with timer.phase("observe"):
-                        observed = _observation(namespace, entry_path, lazy=lazy)
-                except OSError as exc:
-                    _record_error(connection, scope_id, path_key(namespace, entry_path), "stat", exc)
-                    failed = True
-                    directory_complete = False
-                    continue
-                with timer.phase("db_write"):
-                    path_id = upsert_path(connection, root_id, scan_id, observed, parent_id=directory_id)
-                if observed.allocation_error is not None:
-                    _record_error(connection, scope_id, observed.key, "stat", observed.allocation_error)
-                    failed = True
-                    directory_complete = False
-                if observed.kind == "directory":
-                    dirs_seen += 1
-                    if not shallow:
-                        visit(entry_path, path_id)
-                elif observed.kind == "file":
-                    files_seen += 1
-                    logical_bytes_seen += observed.logical_size or 0
-                    report("scanning", directory)
-            if directory_complete:
-                completed_directories[directory_id] = (now_ns(), scan_id)
-
-        cancelled = False
-        try:
-            visit(scope, scope_path_id)
-        except KeyboardInterrupt:
-            cancelled = True
-
-        scope_status = "cancelled" if cancelled else "partial" if failed else "completed"
-        report("saving")
-        connection.execute(
-            "UPDATE scan_scope SET status=?, finished_at_ns=?, paths_seen=? WHERE id=?",
-            (scope_status, now_ns(), files_seen + dirs_seen, scope_id),
-        )
-        if scope_status == "completed":
-            with timer.phase("mark_missing"):
-                if shallow:
-                    _mark_missing_direct_children(connection, root_id, scan_id, scope_id, scope_path_id)
-                elif refresh_before_ns is None:
-                    _mark_missing(connection, root_id, scan_id, scope_id, scope_path_id)
-                else:
-                    for directory_id in completed_directories:
-                        _mark_missing_direct_children(connection, root_id, scan_id, scope_id, directory_id)
-        with timer.phase("summaries"):
-            refresh_directory_summaries(
-                connection,
-                root_id,
-                scope_path_id,
-                completed_directories=completed_directories,
-                max_depth=1 if shallow else None,
+    def _report(phase: str, directory: Path | None) -> None:
+        nonlocal displayed_directory, displayed_text
+        if on_progress is not None:
+            current_directory = None
+            if directory is not None:
+                if displayed_directory != directory:
+                    relative_directory = directory.relative_to(scope)
+                    displayed_directory = directory
+                    displayed_text = display_path(relative_directory) if relative_directory.parts else "."
+                current_directory = displayed_text
+            on_progress(
+                ScanProgress(phase, files_seen, dirs_seen, logical_bytes_seen, current_directory)
             )
-        errors = int(connection.execute("SELECT error_count FROM scan_scope WHERE id=?", (scope_id,)).fetchone()["error_count"])
-        stats = timer.as_dict(files_seen + dirs_seen)
-        connection.execute(
-            """UPDATE scan SET status=?, finished_at_ns=?, files_seen=?, dirs_seen=?, errors_seen=?, stats_json=?
-               WHERE id=?""",
-            (scope_status, now_ns(), files_seen, dirs_seen, errors, json.dumps(stats), scan_id),
-        )
+
+    def checkpoint() -> None:
+        """Commit the batch: paths, errors, finished directory summaries and counters."""
+        nonlocal committed_counts, checkpoints, next_checkpoint
+        with timer.phase("checkpoint"):
+            if pending_finished:
+                refresh_finished_directories(connection, pending_finished, pending_completed)
+            _claim_running_scan(
+                connection, scan_id,
+                "files_seen=?, dirs_seen=?, logical_bytes_seen=?, heartbeat_at_ns=?",
+                (files_seen, dirs_seen, logical_bytes_seen, now_ns()),
+            )
+            connection.execute(
+                "UPDATE scan_scope SET paths_seen=? WHERE id=?", (files_seen + dirs_seen, scope_id)
+            )
+        with timer.phase("commit"):
+            connection.commit()
+        completed_directories.update(pending_completed)
+        pending_completed.clear()
+        pending_finished.clear()
+        committed_counts = (files_seen, dirs_seen, logical_bytes_seen)
+        checkpoints += 1
+        next_checkpoint = time.monotonic() + CHECKPOINT_INTERVAL_S
+
+    def maybe_checkpoint() -> None:
+        if time.monotonic() >= next_checkpoint:
+            checkpoint()
+
+    def visit(
+        directory: Path,
+        directory_id: int,
+    ) -> None:
+        nonlocal files_seen, dirs_seen, logical_bytes_seen, failed
+        maybe_checkpoint()
+        scan_self = refresh_before_ns is None
+        if refresh_before_ns is not None:
+            report("scanning", directory)
+            with timer.phase("refresh_query"):
+                refresh_state = _directory_refresh_state(connection, root_id, directory_id)
+            scan_self = (
+                refresh_state is None
+                or refresh_state["self_completed_at_ns"] is None
+                or int(refresh_state["self_completed_at_ns"]) < refresh_before_ns
+            )
+            if not scan_self:
+                assert refresh_state is not None
+                subtree_time = refresh_state["subtree_complete_through_ns"]
+                if subtree_time is not None and int(subtree_time) >= refresh_before_ns:
+                    return
+                with timer.phase("refresh_query"):
+                    indexed_children = _indexed_directories(connection, root_id, directory_id)
+                observed_children: list[tuple[Path, Observation]] = []
+                refresh_parent = False
+                for child in indexed_children:
+                    child_subtree_time = child["subtree_complete_through_ns"]
+                    if child_subtree_time is not None and int(child_subtree_time) >= refresh_before_ns:
+                        continue
+                    child_path = Path(str(child["path_display"]))
+                    try:
+                        with timer.phase("observe"):
+                            child_observed = _observation(namespace, child_path, lazy=lazy)
+                    except FileNotFoundError:
+                        # The child was known when the parent was last
+                        # enumerated. Re-enumerate the parent before
+                        # confirming that the child was deleted.
+                        refresh_parent = True
+                        break
+                    except OSError as exc:
+                        _record_error(connection, scope_id, bytes(child["path_key"]), "stat", exc)
+                        failed = True
+                        continue
+                    if child_observed.kind != "directory":
+                        refresh_parent = True
+                        break
+                    observed_children.append((child_path, child_observed))
+                if not refresh_parent:
+                    for child_path, child_observed in observed_children:
+                        with timer.phase("db_write"):
+                            child_id = upsert_path(
+                                connection, root_id, scan_id, child_observed, parent_id=directory_id
+                            )
+                        dirs_seen += 1
+                        visit(child_path, child_id)
+                    pending_finished.append(directory_id)
+                    return
+        report("scanning", directory)
+        try:
+            with timer.phase("readdir"):
+                entries = list(os.scandir(directory))
+        except OSError as exc:
+            _record_error(connection, scope_id, path_key(namespace, directory), "enumerate", exc)
+            failed = True
+            return
+        directory_complete = True
+        for entry in entries:
+            maybe_checkpoint()
+            entry_path = Path(entry.path)
+            try:
+                with timer.phase("observe"):
+                    observed = _observation(namespace, entry_path, lazy=lazy)
+            except OSError as exc:
+                _record_error(connection, scope_id, path_key(namespace, entry_path), "stat", exc)
+                failed = True
+                directory_complete = False
+                continue
+            with timer.phase("db_write"):
+                path_id = upsert_path(connection, root_id, scan_id, observed, parent_id=directory_id)
+            if observed.allocation_error is not None:
+                _record_error(connection, scope_id, observed.key, "stat", observed.allocation_error)
+                failed = True
+                directory_complete = False
+            if observed.kind == "directory":
+                dirs_seen += 1
+                if not shallow:
+                    visit(entry_path, path_id)
+            elif observed.kind == "file":
+                files_seen += 1
+                logical_bytes_seen += observed.logical_size or 0
+                report("scanning", directory)
+        if directory_complete:
+            pending_completed[directory_id] = (now_ns(), scan_id)
+        pending_finished.append(directory_id)
+
+    def abandon(status: str) -> None:
+        """Discard the uncommitted batch and end the scan with its checkpointed counts."""
+        connection.rollback()
+        files, dirs, logical_bytes = committed_counts
+        with connection:
+            connection.execute(
+                "UPDATE scan_scope SET status=?, finished_at_ns=? WHERE id=? AND status='running'",
+                (status, now_ns(), scope_id),
+            )
+            connection.execute(
+                """UPDATE scan SET status=?, finished_at_ns=?, files_seen=?, dirs_seen=?, logical_bytes_seen=?,
+                          errors_seen=(SELECT error_count FROM scan_scope WHERE id=?), stats_json=?
+                   WHERE id=? AND status='running'""",
+                (status, now_ns(), files, dirs, logical_bytes, scope_id,
+                 json.dumps(timer.as_dict(files + dirs) | {"checkpoints": checkpoints}), scan_id),
+            )
+
+    cancelled = False
+    try:
+        visit(scope, scope_path_id)
+    except KeyboardInterrupt:
+        cancelled = True
+    except ScanTakenOverError:
+        connection.rollback()
+        raise
+    except Exception:
+        with suppress(sqlite3.Error):
+            abandon("failed")
+        raise
+
+    scope_status = "cancelled" if cancelled else "partial" if failed else "completed"
+    try:
+        report("saving")
+        # The first interrupt keeps everything observed so far, as before checkpoints.
+        checkpoint()
+        with connection:
+            connection.execute(
+                "UPDATE scan_scope SET status=?, finished_at_ns=?, paths_seen=? WHERE id=?",
+                (scope_status, now_ns(), files_seen + dirs_seen, scope_id),
+            )
+            if scope_status == "completed":
+                with timer.phase("mark_missing"):
+                    if shallow:
+                        _mark_missing_direct_children(connection, root_id, scan_id, scope_id, scope_path_id)
+                    elif refresh_before_ns is None:
+                        _mark_missing(connection, root_id, scan_id, scope_id, scope_path_id)
+                    else:
+                        for directory_id in completed_directories:
+                            _mark_missing_direct_children(connection, root_id, scan_id, scope_id, directory_id)
+            with timer.phase("summaries"):
+                refresh_directory_summaries(
+                    connection,
+                    root_id,
+                    scope_path_id,
+                    completed_directories=completed_directories,
+                    max_depth=1 if shallow else None,
+                )
+            errors = int(
+                connection.execute("SELECT error_count FROM scan_scope WHERE id=?", (scope_id,)).fetchone()["error_count"]
+            )
+            stats = timer.as_dict(files_seen + dirs_seen) | {"checkpoints": checkpoints}
+            _claim_running_scan(
+                connection, scan_id,
+                "status=?, finished_at_ns=?, files_seen=?, dirs_seen=?, logical_bytes_seen=?, errors_seen=?, "
+                "stats_json=?, heartbeat_at_ns=?",
+                (scope_status, now_ns(), files_seen, dirs_seen, logical_bytes_seen, errors, json.dumps(stats), now_ns()),
+            )
+    except KeyboardInterrupt:
+        # Interrupted while saving: keep the checkpoints and end the scan cheaply.
+        abandon("cancelled")
+        report("cancelled")
+        raise
+    except ScanTakenOverError:
+        connection.rollback()
+        raise
+    except Exception:
+        with suppress(sqlite3.Error):
+            abandon("failed")
+        raise
     report(scope_status)
     if cancelled:
         raise KeyboardInterrupt
@@ -630,8 +794,6 @@ def scan_directory(
         "dirs_seen": dirs_seen,
         "logical_bytes_seen": logical_bytes_seen,
         "refresh_before_ns": refresh_before_ns,
-        "errors_seen": int(
-            connection.execute("SELECT error_count FROM scan_scope WHERE id=?", (scope_id,)).fetchone()["error_count"]
-        ),
+        "errors_seen": errors,
         "stats": stats,
     }

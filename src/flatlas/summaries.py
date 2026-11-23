@@ -84,12 +84,49 @@ def refresh_directory_summaries(
     scan audit tables.
     """
 
-    completed = {} if completed_directories is None else completed_directories
-    rows = sorted(
+    _refresh_rows(
+        connection,
         _directory_rows(connection, root_id, scope_path_id, max_depth),
-        key=lambda row: bytes(row["path_key"]).count(b"\0"),
-        reverse=True,
+        {} if completed_directories is None else completed_directories,
+        on_progress,
     )
+
+
+def refresh_finished_directories(
+    connection: sqlite3.Connection,
+    path_ids: list[int],
+    completed_directories: Mapping[int, tuple[int, int]],
+) -> None:
+    """Refresh the summaries of directories whose traversal has finished.
+
+    A scan checkpoint calls this for the directories it finished since the
+    previous checkpoint. Traversal is post-order, so every visited child of a
+    finished directory was finished earlier: in this batch (computed here) or
+    in an earlier checkpoint (read from its committed summary). Ancestors that
+    are still being traversed keep their previous totals until a later batch
+    or the final scope refresh.
+    """
+    rows: list[sqlite3.Row] = []
+    for batch in _id_batches(path_ids):
+        placeholders = ", ".join("?" for _ in batch)
+        rows.extend(connection.execute(
+            f"""SELECT p.id, p.parent_path_id, p.path_key,
+                       ds.self_completed_at_ns, ds.last_completed_scan_id
+                FROM path p LEFT JOIN directory_summary ds ON ds.path_id=p.id
+                WHERE p.id IN ({placeholders}) AND p.state='present'
+                  AND p.entry_kind IN ('root', 'directory')""",
+            batch,
+        ).fetchall())
+    _refresh_rows(connection, rows, completed_directories, None)
+
+
+def _refresh_rows(
+    connection: sqlite3.Connection,
+    directory_rows: list[sqlite3.Row],
+    completed: Mapping[int, tuple[int, int]],
+    on_progress: Callable[[int, int], None] | None,
+) -> None:
+    rows = sorted(directory_rows, key=lambda row: bytes(row["path_key"]).count(b"\0"), reverse=True)
     total = len(rows)
     if on_progress is not None:
         on_progress(0, total)

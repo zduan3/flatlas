@@ -96,7 +96,7 @@ flatlas config unset scan.refresh-before
 
 ## 中断扫描
 
-扫描过程中按 Ctrl-C 会停止遍历并保存已观测的数据，scan 记为 `cancelled`，不确认任何删除；保存阶段再按一次则放弃本次扫描。在 Linux 等 POSIX 系统上，`SIGTERM`（如批处理调度器终止作业）和 `SIGHUP`（如终端关闭或远程会话断开）按同样方式处理；在 `nohup` 下被忽略的 `SIGHUP` 仍保持忽略。之后可用 `flatlas scan PATH --resume` 或 `flatlas scan --resume-from ID` 继续，用 `flatlas scans` / `flatlas scan-info ID` 查看历史记录。进程被强制杀死（如 `SIGKILL`）时本次扫描整体回滚。行为细节见 [扫描与目录汇总](docs/design/scanning.md#中断与续扫)。
+扫描过程中按 Ctrl-C 会停止遍历并保存已观测的数据，scan 记为 `cancelled`，不确认任何删除；保存阶段再按一次则跳过收尾，只保留已提交的 checkpoint。在 Linux 等 POSIX 系统上，`SIGTERM`（如批处理调度器终止作业）和 `SIGHUP`（如终端关闭或远程会话断开）按同样方式处理；在 `nohup` 下被忽略的 `SIGHUP` 仍保持忽略。之后可用 `flatlas scan PATH --resume` 或 `flatlas scan --resume-from ID` 继续，用 `flatlas scans` / `flatlas scan-info ID` 查看历史记录。扫描每 5 秒提交一次 checkpoint；进程被强制杀死（如 `SIGKILL`）时保留已提交的部分，`--resume` 判定原进程已退出后接管该扫描并从 checkpoint 继续。行为细节见 [扫描与目录汇总](docs/design/scanning.md#中断与续扫)。
 
 `config` 可以在 `init` 前使用；读取或移除未设置的参数时无输出，读取返回退出码 0。配置命令不打开索引数据库，修改配置时保留已有数据库路径、其他字段和注释。配置默认值同样适用于显式指定 `--db` 的扫描。
 

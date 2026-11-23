@@ -206,8 +206,9 @@ def scan_info(connection: sqlite3.Connection, scan_id: int) -> dict[str, Any]:
                   s.kind, s.status, s.started_at_ns, s.finished_at_ns,
                   CASE WHEN s.finished_at_ns IS NULL THEN NULL
                        ELSE s.finished_at_ns-s.started_at_ns END AS duration_ns,
-                  s.files_seen, s.dirs_seen, s.errors_seen,
-                  s.refresh_before_ns, s.max_depth, s.scanner_version, s.note, s.stats_json
+                  s.files_seen, s.dirs_seen, s.errors_seen, s.logical_bytes_seen,
+                  s.refresh_before_ns, s.max_depth, s.scanner_version, s.note,
+                  s.heartbeat_at_ns, s.owner_json, s.stats_json
            FROM scan s JOIN root r ON r.id=s.root_id
            WHERE s.id=?""",
         (scan_id,),
@@ -238,8 +239,10 @@ def scan_info(connection: sqlite3.Connection, scan_id: int) -> dict[str, Any]:
     ).fetchall()
     details = dict(scan)
     stats_json = details.pop("stats_json")
+    owner_json = details.pop("owner_json")
     return {
         **details,
+        "owner": None if owner_json is None else json.loads(owner_json),
         "stats": None if stats_json is None else json.loads(stats_json),
         "scopes": [dict(row) for row in scopes],
         "errors": [dict(row) for row in errors],
