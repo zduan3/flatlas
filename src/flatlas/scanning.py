@@ -610,6 +610,7 @@ def scan_directory(
                 root_id,
                 scope_path_id,
                 completed_directories=completed_directories,
+                max_depth=1 if shallow else None,
             )
         errors = int(connection.execute("SELECT error_count FROM scan_scope WHERE id=?", (scope_id,)).fetchone()["error_count"])
         stats = timer.as_dict(files_seen + dirs_seen)

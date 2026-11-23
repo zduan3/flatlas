@@ -35,14 +35,15 @@ def _directory_rows(
     connection: sqlite3.Connection,
     root_id: int,
     scope_path_id: int,
+    max_depth: int | None = None,
 ) -> list[sqlite3.Row]:
     return connection.execute(
         """WITH RECURSIVE
-        descendants(id) AS (
-            SELECT id FROM path WHERE id=?
+        descendants(id, depth) AS (
+            SELECT id, 0 FROM path WHERE id=?
             UNION ALL
-            SELECT p.id FROM path p JOIN descendants d ON p.parent_path_id=d.id
-            WHERE p.state='present' AND p.entry_kind='directory'
+            SELECT p.id, d.depth + 1 FROM path p JOIN descendants d ON p.parent_path_id=d.id
+            WHERE p.state='present' AND p.entry_kind='directory' AND (? IS NULL OR d.depth < ?)
         ),
         ancestors(id) AS (
             SELECT id FROM path WHERE id=?
@@ -56,8 +57,8 @@ def _directory_rows(
         LEFT JOIN directory_summary ds ON ds.path_id=p.id
         WHERE p.root_id=? AND p.state='present'
           AND p.entry_kind IN ('root', 'directory')
-          AND (p.id IN descendants OR p.id IN ancestors)""",
-        (scope_path_id, scope_path_id, root_id),
+          AND (p.id IN (SELECT id FROM descendants) OR p.id IN ancestors)""",
+        (scope_path_id, max_depth, max_depth, scope_path_id, root_id),
     ).fetchall()
 
 
@@ -68,8 +69,13 @@ def refresh_directory_summaries(
     *,
     completed_directories: Mapping[int, tuple[int, int]] | None = None,
     on_progress: Callable[[int, int], None] | None = None,
+    max_depth: int | None = None,
 ) -> None:
     """Refresh cached totals for one subtree and every affected ancestor.
+
+    ``max_depth`` limits the recomputed subtree (1 after a shallow scan: the
+    scope and its direct subdirectories); deeper directories keep their cached
+    totals, which their parents read.
 
     ``completed_directories`` maps path id to ``(completed_at_ns, scan_id)``.
     A directory's completion timestamp advances only after all of its direct
@@ -80,7 +86,7 @@ def refresh_directory_summaries(
 
     completed = {} if completed_directories is None else completed_directories
     rows = sorted(
-        _directory_rows(connection, root_id, scope_path_id),
+        _directory_rows(connection, root_id, scope_path_id, max_depth),
         key=lambda row: bytes(row["path_key"]).count(b"\0"),
         reverse=True,
     )
