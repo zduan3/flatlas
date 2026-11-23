@@ -1,6 +1,6 @@
 # 浅扫描与按目录 mtime 的增量刷新
 
-> 状态：提案，未实现。当前完整扫描与 `--refresh-before` 的语义见 [扫描与目录汇总](../../design/scanning.md)。
+> 状态：(a) 浅扫描已实现（`scan --shallow`，见 [扫描与目录汇总](../../design/scanning.md#浅扫描--shallow)）；(b) 提案，未实现。当前完整扫描与 `--refresh-before` 的语义见 [扫描与目录汇总](../../design/scanning.md)。
 
 ## 背景
 

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from flatlas.errors import FlatlasError
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 CACHE_SIZE_KIB = 256 * 1024
 
 DDL = """
@@ -141,6 +141,7 @@ CREATE INDEX IF NOT EXISTS idx_directory_summary_freshness
 REFRESH_SCAN_MIGRATION_DESCRIPTION = "record directory refresh cutoff"
 ENTRY_COUNT_MIGRATION_DESCRIPTION = "count directory entries of every kind"
 SCAN_STATS_MIGRATION_DESCRIPTION = "record per-phase scan timing and index path parents"
+SHALLOW_SCAN_MIGRATION_DESCRIPTION = "record scan depth limit"
 
 
 @dataclass(frozen=True)
@@ -360,3 +361,13 @@ def _apply_migrations(
         )
         if existing_database and on_migration is not None:
             completed.append(MigrationProgress(5, SCAN_STATS_MIGRATION_DESCRIPTION, "completed"))
+    if connection.execute("SELECT 1 FROM schema_migration WHERE version = 6").fetchone() is None:
+        scan_columns = {row["name"] for row in connection.execute("PRAGMA table_info('scan')")}
+        if "max_depth" not in scan_columns:
+            connection.execute("ALTER TABLE scan ADD COLUMN max_depth INTEGER CHECK (max_depth IS NULL OR max_depth >= 0)")
+        connection.execute(
+            "INSERT INTO schema_migration(version, applied_at_ns, description) VALUES (?, ?, ?)",
+            (6, now_ns(), SHALLOW_SCAN_MIGRATION_DESCRIPTION),
+        )
+        if existing_database and on_migration is not None:
+            completed.append(MigrationProgress(6, SHALLOW_SCAN_MIGRATION_DESCRIPTION, "completed"))

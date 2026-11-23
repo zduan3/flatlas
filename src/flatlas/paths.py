@@ -127,7 +127,7 @@ def _scope_row(connection: sqlite3.Connection, value: Path | str, *, follow: boo
     display = display_path(scope_path(value, follow=follow))
     row = connection.execute(
         """SELECT p.id, p.root_id, p.path_key, p.parent_path_id, p.state,
-                  p.last_seen_scan_id, p.path_display, p.entry_kind,
+                  p.last_seen_scan_id, p.first_seen_scan_id, p.path_display, p.entry_kind,
                   p.logical_size, p.allocated_size,
                   r.root_path_display
         FROM path p JOIN root r ON r.id=p.root_id

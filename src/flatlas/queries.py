@@ -19,6 +19,7 @@ from flatlas.paths import (
     discover_namespace,
     display_path,
     get_root,
+    parent_key,
     path_key,
     scope_path,
 )
@@ -181,7 +182,7 @@ def list_scans(
                    CASE WHEN s.finished_at_ns IS NULL THEN NULL
                         ELSE s.finished_at_ns-s.started_at_ns END AS duration_ns,
                    s.files_seen, s.dirs_seen, s.errors_seen,
-                   s.refresh_before_ns, s.scanner_version, s.note,
+                   s.refresh_before_ns, s.max_depth, s.scanner_version, s.note,
                    ss.id AS scope_id, ss.status AS scope_status,
                    ss.paths_seen, ss.error_count,
                    p.path_display AS scope,
@@ -206,7 +207,7 @@ def scan_info(connection: sqlite3.Connection, scan_id: int) -> dict[str, Any]:
                   CASE WHEN s.finished_at_ns IS NULL THEN NULL
                        ELSE s.finished_at_ns-s.started_at_ns END AS duration_ns,
                   s.files_seen, s.dirs_seen, s.errors_seen,
-                  s.refresh_before_ns, s.scanner_version, s.note, s.stats_json
+                  s.refresh_before_ns, s.max_depth, s.scanner_version, s.note, s.stats_json
            FROM scan s JOIN root r ON r.id=s.root_id
            WHERE s.id=?""",
         (scan_id,),
@@ -276,7 +277,7 @@ def list_child_directories(
     ).fetchone()
     indexed_rows = [] if parent is None else connection.execute(
         """SELECT id, path_key, path_display, entry_kind, state, logical_size, allocated_size,
-                  last_seen_scan_id
+                  last_seen_scan_id, first_seen_scan_id
         FROM path WHERE parent_path_id=? AND state='present'""",
         (parent["id"],),
     ).fetchall()
@@ -300,7 +301,7 @@ def list_child_directories(
     ).fetchone()
     scopes = connection.execute(
         """SELECT ss.scope_path_key, ss.status, ss.scan_id,
-                  s.started_at_ns, s.refresh_before_ns
+                  s.started_at_ns, s.refresh_before_ns, s.max_depth
            FROM scan_scope ss
         JOIN scan s ON s.id=ss.scan_id
         WHERE ss.root_id=?
@@ -341,6 +342,20 @@ def _normalized_display(path_display: str) -> str:
     return os.path.normcase(os.path.normpath(path_display))
 
 
+def _scope_covers(scope: sqlite3.Row, entry_key: bytes, entry_kind: str) -> bool:
+    """Whether a scan scope observed ``entry`` (and, for directories, its subtree).
+
+    A shallow scope (``max_depth`` 0) enumerated only its direct entries, so it
+    covers direct non-directory children; directory status describes a subtree.
+    """
+    scope_key = bytes(scope["scope_path_key"])
+    if not entry_key.startswith(scope_key):
+        return False
+    if scope["max_depth"] is None:
+        return True
+    return entry_kind not in {"root", "directory"} and parent_key(entry_key) == scope_key
+
+
 def _entry_scan_status(
     connection: sqlite3.Connection,
     indexed: sqlite3.Row | None,
@@ -358,10 +373,13 @@ def _entry_scan_status(
         or indexed["entry_kind"] != entry_kind
     ):
         return "unscanned"
-    covering = [scope for scope in scopes if entry_key.startswith(scope["scope_path_key"])]
+    covering = [scope for scope in scopes if _scope_covers(scope, entry_key, entry_kind)]
     if not covering:
         return "unscanned"
     latest = covering[0]
+    if entry_kind in {"root", "directory"} and int(indexed["first_seen_scan_id"]) > int(latest["scan_id"]):
+        # First seen by a later shallow scan that did not enumerate it.
+        return "unscanned"
     if latest["status"] == "completed":
         return "scanned"
 
@@ -514,7 +532,7 @@ def hardlink_usage(connection: sqlite3.Connection, path_ids: list[int]) -> dict[
 
 
 _SCOPE_COLUMNS = """p.id, p.root_id, p.path_key, p.parent_path_id, p.state,
-                  p.last_seen_scan_id, p.path_display, p.entry_kind,
+                  p.last_seen_scan_id, p.first_seen_scan_id, p.path_display, p.entry_kind,
                   p.logical_size, p.allocated_size, r.root_path_display"""
 
 
@@ -631,7 +649,7 @@ def disk_usage(
         }]
     scopes = connection.execute(
         """SELECT ss.scope_path_key, ss.status, ss.scan_id,
-                  s.started_at_ns, s.refresh_before_ns
+                  s.started_at_ns, s.refresh_before_ns, s.max_depth
            FROM scan_scope ss JOIN scan s ON s.id=ss.scan_id
            WHERE ss.root_id=? ORDER BY s.id DESC, ss.id DESC""",
         (selected["root_id"],),

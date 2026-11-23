@@ -939,7 +939,7 @@ def test_database_migration_is_idempotent_and_keeps_existing_data(tmp_path: Path
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
         assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
-        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 5
+        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 6
         assert connection.execute("SELECT root_path_display FROM root").fetchone()[0] == str(discover_namespace(source).path)
         assert connection.execute("SELECT count(*) FROM path").fetchone()[0] == preserved_path_count
         summary = connection.execute(
@@ -1082,7 +1082,7 @@ def test_refresh_cutoff_migration_keeps_existing_scans(tmp_path: Path) -> None:
         columns = {row["name"] for row in connection.execute("PRAGMA table_info('scan')")}
         assert "refresh_before_ns" in columns
         assert connection.execute("SELECT count(*) FROM scan").fetchone()[0] == scan_count
-        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 5
+        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 6
         assert [(event.version, event.phase) for event in progress] == [(3, "started"), (3, "completed")]
     finally:
         connection.close()

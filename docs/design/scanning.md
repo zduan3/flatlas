@@ -101,11 +101,21 @@ CLI 在 POSIX 上把 `SIGTERM`（批处理调度器终止作业前发送）和 `
 
 当前恢复只适用于已经成功保存 `cancelled`/`partial`/`failed` 记录的调用，并且不持久化工作队列：续扫依据目录成功时间重新选择工作，不是崩溃后可恢复任务。
 
+## 浅扫描：`--shallow`
+
+`flatlas scan PATH --shallow` 只重新枚举 PATH 的直接条目：对每个条目 stat 并 upsert，不进入子目录。用于外部删除了若干条目后确认这一层的删除，例如删掉某目录下几个顶层子目录后，不必全量重扫整棵树。
+
+- 枚举完整时，确认 PATH 的直接缺失条目及其已索引后代为 deleted（与 `--refresh-before` 对单个完整目录的规则相同）；有错误时不确认。
+- 扫描记录 `scan.max_depth = 0`（migration 6），`scans` 表格在 scope 后标 `(shallow)`。
+- 覆盖语义：浅扫描 scope 只算观测了 PATH 的直接非目录条目。PATH 自身和子目录的状态描述整棵子树，仍取自之前覆盖它们的完整扫描；PATH 的目录汇总按新的直接条目重算，子目录汇总不变。
+- 浅扫描新发现的子目录没有被枚举过，状态为 `new`（判据：目录的 `first_seen_scan_id` 晚于覆盖它的最近一次扫描），之后对它做普通扫描才变为 `ok`。
+- 与 `--full`、`--refresh-before`、`--resume`、`--resume-from` 互斥，也不使用 `scan.refresh-before` 默认值；`--resume` 跳过浅扫描记录，`--resume-from` 拒绝浅扫描 ID。
+
 ## 删除确认规则
 
 - 只有 completed `scan_scope` 才能确认缺失路径为 `deleted`；partial、failed、cancelled、枚举错误、stat 错误或 allocated size 采集失败均不确认删除。
-- 普通扫描 completed 时，scope 后代中 `last_seen_scan_id` 不是本次 scan 的 present 路径标记为 deleted；`--refresh-before` 扫描只对完整枚举的目录确认其直接缺失条目及其已索引后代。
+- 普通扫描 completed 时，scope 后代中 `last_seen_scan_id` 不是本次 scan 的 present 路径标记为 deleted；`--refresh-before` 扫描只对完整枚举的目录、`--shallow` 只对 PATH 确认其直接缺失条目及其已索引后代。
 - deleted 行保留在 SQLite，不参与 `paths`、`du`、`largest` 或 `dupes` 的当前状态结果；同一路径重新出现并被扫描时恢复为 present，旧 hash 在 metadata basis 不匹配时变为 stale。
 - `ls` 现场发现缺失只显示 `gone`，不写数据库。
 
-相关提案：[扫描短事务 checkpoint 与崩溃恢复](../plan/proposals/scan-checkpoint.md)、[浅扫描与增量刷新](../plan/proposals/incremental-refresh.md)。
+相关提案：[扫描短事务 checkpoint 与崩溃恢复](../plan/proposals/scan-checkpoint.md)、[按目录 mtime 的增量刷新](../plan/proposals/incremental-refresh.md)。

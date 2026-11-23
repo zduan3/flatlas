@@ -90,7 +90,8 @@ CREATE TABLE scan (
     errors_seen        INTEGER NOT NULL DEFAULT 0,
     note               TEXT,
     refresh_before_ns  INTEGER, -- migration 3；--refresh-before 的固定 cutoff，普通扫描为 NULL
-    stats_json         TEXT     -- migration 5；分阶段计时 JSON，见 scanning.md「分阶段计时」
+    stats_json         TEXT,    -- migration 5；分阶段计时 JSON，见 scanning.md「分阶段计时」
+    max_depth          INTEGER  -- migration 6；NULL 为不限深度，0 为 --shallow
 );
 
 CREATE TABLE path (
@@ -313,6 +314,7 @@ HAVING count(*) > 1;
 | 3 | `record directory refresh cutoff` | 为 `scan` 增加可空 `refresh_before_ns`（列已存在时只写版本记录） |
 | 4 | `count directory entries of every kind` | 为 `directory_summary` 增加 `direct_entries`、`subtree_entries`，并为全部 root 重算目录汇总 |
 | 5 | `record per-phase scan timing and index path parents` | 为 `scan` 增加可空 `stats_json`，并建 `idx_path_parent`（均可重复执行）|
+| 6 | `record scan depth limit` | 为 `scan` 增加可空 `max_depth`（`CHECK max_depth >= 0`）；既有扫描为 NULL |
 
 migration 2 回填既有索引时，历史完成时间只从覆盖相应目录的 completed `scan_scope` 保守恢复；partial、failed 或 cancelled scope 不用于推断完整时间。migration 不重建或清空现有 root、path、scan、error、hash 或 plan 数据。
 

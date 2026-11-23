@@ -495,7 +495,8 @@ def _print_scans(rows: list[dict[str, Any]], fmt: str) -> None:
             str(row["files_seen"]),
             str(row["dirs_seen"]),
             str(row["errors_seen"]),
-            str(row["scope"] or f"key:{row['scope_path_key_hex']}"),
+            str(row["scope"] or f"key:{row['scope_path_key_hex']}")
+            + (" (shallow)" if row.get("max_depth") == 0 else ""),
         ]
         for row in rows
     ]
@@ -805,9 +806,18 @@ def scan(
     full: Annotated[
         bool, typer.Option("--full", help="Fully scan the scope, overriding the configured refresh default."),
     ] = False,
+    shallow: Annotated[
+        bool,
+        typer.Option(
+            "--shallow",
+            help="Re-list only PATH's direct entries and confirm the missing ones; subdirectories are not entered.",
+        ),
+    ] = False,
     db: db_option = None,
 ) -> None:
     """Scan metadata for a complete namespace or one subtree and update the persistent index."""
+    if shallow and (full or resume or resume_from is not None or refresh_before is not None):
+        raise typer.BadParameter("--shallow is mutually exclusive with --full, --resume, --resume-from, and --refresh-before")
     if sum((resume, resume_from is not None, refresh_before is not None)) > 1:
         raise typer.BadParameter("--resume, --resume-from, and --refresh-before are mutually exclusive")
     if full and (resume or resume_from is not None or refresh_before is not None):
@@ -817,7 +827,7 @@ def scan(
     if resume_from is None and path is None:
         raise typer.BadParameter("PATH is required unless --resume-from is used")
     cutoff = None
-    if not (resume or resume_from is not None or full):
+    if not (resume or resume_from is not None or full or shallow):
         value = refresh_before if refresh_before is not None else get_default("scan.refresh-before")
         cutoff = _parse_refresh_before(value) if value is not None else None
     with _connection(db) as connection, _ScanProgressDisplay(enabled=_stderr_is_tty()) as progress:
@@ -830,7 +840,9 @@ def scan(
             assert path is not None
             cutoff = resume_selection(connection, path).refresh_before_ns
         assert scan_path is not None
-        result = scan_directory(connection, scan_path, refresh_before_ns=cutoff, on_progress=progress.update)
+        result = scan_directory(
+            connection, scan_path, refresh_before_ns=cutoff, on_progress=progress.update, shallow=shallow,
+        )
     _print(result)
 
 

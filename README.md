@@ -52,7 +52,7 @@ flatlas config unset scan.refresh-before
 flatlas config list [-a|--all]
 flatlas roots [-h]
 flatlas df [-h] [-T] [FILE ...]
-flatlas scan PATH [--refresh-before VALUE | --full | --resume]
+flatlas scan PATH [--refresh-before VALUE | --full | --resume | --shallow]
 flatlas scan --resume-from ID
 flatlas scans [PATH] [--limit N] [--format table|json|csv]
 flatlas scan-info ID

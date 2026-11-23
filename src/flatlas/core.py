@@ -90,6 +90,7 @@ def scan_directory(
     *,
     refresh_before_ns: int | None = None,
     on_progress: Callable[[ScanProgress], None] | None = None,
+    shallow: bool = False,
 ) -> dict[str, Any]:
     """Delegate scanning while preserving the legacy fault-injection seam."""
     _scanning._observation = _observation
@@ -98,4 +99,5 @@ def scan_directory(
         value,
         refresh_before_ns=refresh_before_ns,
         on_progress=on_progress,
+        shallow=shallow,
     )

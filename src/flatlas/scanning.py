@@ -318,7 +318,7 @@ def resume_selection(
     row = connection.execute(
         """SELECT s.id, s.status, s.started_at_ns, s.refresh_before_ns
            FROM scan s JOIN scan_scope ss ON ss.scan_id=s.id
-           WHERE ss.root_id=? AND ss.scope_path_key=?
+           WHERE ss.root_id=? AND ss.scope_path_key=? AND s.max_depth IS NULL
            ORDER BY s.id DESC LIMIT 1""",
         (int(root["id"]), scope_key),
     ).fetchone()
@@ -331,7 +331,7 @@ def resume_selection_from_scan(connection: sqlite3.Connection, scan_id: int) -> 
     """Resolve one incomplete scan ID and infer its unique scope path."""
 
     rows = connection.execute(
-        """SELECT s.id, s.status, s.started_at_ns, s.refresh_before_ns,
+        """SELECT s.id, s.status, s.started_at_ns, s.refresh_before_ns, s.max_depth,
                   p.path_display AS scope
            FROM scan s JOIN scan_scope ss ON ss.scan_id=s.id
            LEFT JOIN path p
@@ -344,6 +344,8 @@ def resume_selection_from_scan(connection: sqlite3.Connection, scan_id: int) -> 
     if len(rows) != 1:
         raise FlatlasError(f"scan {scan_id} has multiple scopes; --resume-from cannot infer a unique PATH")
     row = rows[0]
+    if row["max_depth"] is not None:
+        raise FlatlasError(f"scan {scan_id} is a shallow scan; rerun it instead of resuming")
     if row["scope"] is None:
         raise FlatlasError(f"scan {scan_id} scope path is unavailable")
     return _resume_selection_from_row(row, Path(str(row["scope"])))
@@ -408,7 +410,15 @@ def scan_directory(
     *,
     refresh_before_ns: int | None = None,
     on_progress: Callable[[ScanProgress], None] | None = None,
+    shallow: bool = False,
 ) -> dict[str, Any]:
+    """Scan ``value``; ``shallow`` re-lists only its direct entries.
+
+    A complete shallow scan confirms missing direct entries (with their indexed
+    descendants) but neither enters nor refreshes subdirectories.
+    """
+    if shallow and refresh_before_ns is not None:
+        raise ValueError("a shallow scan cannot use refresh_before_ns")
     namespace = discover_namespace(value)
     root = get_root(connection, namespace)
     if root is None:
@@ -426,9 +436,12 @@ def scan_directory(
     scope_key = path_key(namespace, scope)
     with connection:
         scan_id = _last_insert_id(connection.execute(
-            """INSERT INTO scan(root_id, kind, status, started_at_ns, scanner_version, refresh_before_ns)
-               VALUES (?, ?, 'running', ?, ?, ?)""",
-            (root_id, kind, started, SCANNER_VERSION + (LAZY_SCANNER_SUFFIX if lazy else ""), refresh_before_ns),
+            """INSERT INTO scan(root_id, kind, status, started_at_ns, scanner_version, refresh_before_ns, max_depth)
+               VALUES (?, ?, 'running', ?, ?, ?, ?)""",
+            (
+                root_id, kind, started, SCANNER_VERSION + (LAZY_SCANNER_SUFFIX if lazy else ""),
+                refresh_before_ns, 0 if shallow else None,
+            ),
         ))
         scope_id = _last_insert_id(connection.execute(
             "INSERT INTO scan_scope(scan_id, root_id, scope_path_key, status, started_at_ns) VALUES (?, ?, ?, 'running', ?)",
@@ -561,7 +574,8 @@ def scan_directory(
                     directory_complete = False
                 if observed.kind == "directory":
                     dirs_seen += 1
-                    visit(entry_path, path_id)
+                    if not shallow:
+                        visit(entry_path, path_id)
                 elif observed.kind == "file":
                     files_seen += 1
                     logical_bytes_seen += observed.logical_size or 0
@@ -583,7 +597,9 @@ def scan_directory(
         )
         if scope_status == "completed":
             with timer.phase("mark_missing"):
-                if refresh_before_ns is None:
+                if shallow:
+                    _mark_missing_direct_children(connection, root_id, scan_id, scope_id, scope_path_id)
+                elif refresh_before_ns is None:
                     _mark_missing(connection, root_id, scan_id, scope_id, scope_path_id)
                 else:
                     for directory_id in completed_directories:

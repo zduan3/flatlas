@@ -15,9 +15,9 @@
    原因：当前单事务扫描在收尾阶段中断、崩溃或调度器宽限期后被杀时整体回滚，长扫描的全部观测丢失。
    → [proposals/scan-checkpoint.md](proposals/scan-checkpoint.md)
 
-2. **浅扫描与按目录 mtime 的增量刷新**
-   目标：只重列一层以确认删除；目录未变化时跳过 readdir。
-   原因：`--refresh-before` 无法只重列一层（父目录完成时间总晚于子目录）；大树上刷新仍需完整 readdir。
+2. **按目录 mtime 的增量刷新**
+   目标：目录未变化时跳过 readdir（浅扫描 `--shallow` 已实现，见 [扫描](../design/scanning.md#浅扫描--shallow)）。
+   原因：大树上刷新仍需完整 readdir；分阶段计时显示 Lustre 上 readdir 约 1 ms/目录。
    → [proposals/incremental-refresh.md](proposals/incremental-refresh.md)
 
 3. **lazy-hash 后续能力**
