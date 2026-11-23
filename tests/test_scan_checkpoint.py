@@ -104,7 +104,7 @@ KILLED_SCAN = textwrap.dedent(
 )
 
 
-def test_killed_scan_keeps_checkpoints_and_resumes_from_them(tmp_path: Path) -> None:
+def test_killed_scan_keeps_checkpoints_and_resumes_from_them(tmp_path: Path, monkeypatch) -> None:
     source, database = _tree(tmp_path, directories=5)
     connection = open_database(database)
     try:
@@ -118,11 +118,19 @@ def test_killed_scan_keeps_checkpoints_and_resumes_from_them(tmp_path: Path) -> 
 
     connection = open_database(database)
     try:
-        killed_scan = connection.execute("SELECT id, status, files_seen FROM scan ORDER BY id DESC").fetchone()
+        killed_scan = connection.execute(
+            "SELECT id, status, files_seen, heartbeat_at_ns FROM scan ORDER BY id DESC"
+        ).fetchone()
         assert killed_scan["status"] == "running" and killed_scan["files_seen"] >= 2
         assert connection.execute("SELECT count(*) FROM path WHERE state='deleted'").fetchone()[0] == 0
 
-        selection = resume_selection(connection, source)  # the owner is gone: finalize and resume
+        with monkeypatch.context() as clock:
+            if not scanning.scan_owner()["pid_ns"]:
+                with pytest.raises(FlatlasError, match="still running"):
+                    resume_selection(connection, source)
+                expired_at = killed_scan["heartbeat_at_ns"] + scanning.ABANDONED_AFTER_NS
+                clock.setattr(scanning, "now_ns", lambda: expired_at)
+            selection = resume_selection(connection, source)
         assert selection.scan_id == killed_scan["id"]
         info = scan_info(connection, killed_scan["id"])
         assert info["status"] == "cancelled" and "abandoned" in info["note"]

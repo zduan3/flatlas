@@ -69,7 +69,7 @@ def test_scan_indexes_non_utf8_names_and_completes(tmp_path: Path) -> None:
         connection.close()
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root can enumerate a mode-000 directory")
+@pytest.mark.skipif(sys.platform == "linux" and os.geteuid() == 0, reason="root can enumerate a mode-000 directory")
 def test_error_message_with_non_utf8_name_is_recorded(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()

@@ -3,6 +3,7 @@
 import json
 import os
 import sqlite3
+import sys
 from pathlib import Path
 
 import pytest
@@ -120,8 +121,9 @@ def test_migration_backfills_entries_and_keeps_completion(tree) -> None:
         connection.close()
 
 
-@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs a POSIX FIFO")
 def test_rescan_updates_entries(tree) -> None:
+    if sys.platform == "win32" or not hasattr(os, "mkfifo"):
+        pytest.skip("needs a POSIX FIFO")
     db, source = tree
     os.mkfifo(source / "many" / "pipe")
     (source / "many" / "0").unlink()

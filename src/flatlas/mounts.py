@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 
 PROC_MOUNTS = Path("/proc/self/mounts")
 
@@ -28,7 +28,7 @@ def _unescape(value: str) -> str:
     return "".join(out)
 
 
-def mount_entry(mount_point: Path, mounts: Path = PROC_MOUNTS) -> MountEntry | None:
+def mount_entry(mount_point: PurePath, mounts: Path = PROC_MOUNTS) -> MountEntry | None:
     """Return the entry mounted exactly at ``mount_point``.
 
     The last matching line wins because later mounts shadow earlier ones.
@@ -49,6 +49,6 @@ def mount_entry(mount_point: Path, mounts: Path = PROC_MOUNTS) -> MountEntry | N
     return found
 
 
-def filesystem_type(mount_point: Path, mounts: Path = PROC_MOUNTS) -> str | None:
+def filesystem_type(mount_point: PurePath, mounts: Path = PROC_MOUNTS) -> str | None:
     entry = mount_entry(mount_point, mounts)
     return None if entry is None else entry.fstype

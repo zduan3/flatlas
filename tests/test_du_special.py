@@ -20,8 +20,9 @@ from flatlas.scanning import scan_directory
 pytestmark = [pytest.mark.query, pytest.mark.safety]
 
 
-@pytest.mark.skipif(sys.platform == "win32" or not hasattr(os, "mkfifo"), reason="needs a POSIX FIFO")
 def test_du_reports_special_entries_as_unknown(tmp_path: Path) -> None:
+    if sys.platform == "win32" or not hasattr(os, "mkfifo"):
+        pytest.skip("needs a POSIX FIFO")
     source = tmp_path / "source"
     source.mkdir()
     (source / "file.bin").write_bytes(b"data")

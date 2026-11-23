@@ -2,7 +2,7 @@
 
 import os
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -33,13 +33,14 @@ def test_filesystem_type_matches_exact_mount_point_and_last_entry_wins(tmp_path:
         "tmpfs /lustre/fs1/sub tmpfs rw 0 0",
         r"tmpfs /mnt/with\040space ext4 rw 0 0",
     )
-    assert mounts.filesystem_type(Path("/lustre/fs1"), table) == "lustre"
-    assert mounts.filesystem_type(Path("/lustre"), table) is None
-    assert mounts.filesystem_type(Path("/mnt/with space"), table) == "ext4"
-    assert mounts.filesystem_type(Path("/x"), tmp_path / "missing") is None
+    assert mounts.filesystem_type(PurePosixPath("/lustre/fs1"), table) == "lustre"
+    assert mounts.filesystem_type(PurePosixPath("/lustre"), table) is None
+    assert mounts.filesystem_type(PurePosixPath("/mnt/with space"), table) == "ext4"
+    assert mounts.filesystem_type(PurePosixPath("/x"), tmp_path / "missing") is None
 
 
 @pytest.mark.db
+@pytest.mark.skipif(os.name != "posix", reason="filesystem type detection requires a POSIX mount namespace")
 def test_registration_records_and_refreshes_filesystem_type(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -96,9 +97,10 @@ def test_scan_uses_lazy_metadata_only_for_lustre_roots(tmp_path: Path, monkeypat
     source = tmp_path / "source"
     (source / "nested").mkdir(parents=True)
     (source / "nested" / "file.bin").write_bytes(b"data")
-    monkeypatch.setattr(paths, "filesystem_type", lambda _mount: fs_type)
     connection = open_database(tmp_path / "index.sqlite")
-    register_namespace(connection, discover_namespace(source))
+    root_id = register_namespace(connection, discover_namespace(source))
+    with connection:
+        connection.execute("UPDATE root SET filesystem_type=? WHERE id=?", (fs_type, root_id))
     lazy_calls: list[Path] = []
     real_lazy = lazystat.lazy_lstat
 
@@ -151,8 +153,7 @@ def test_lazy_lstat_rechecks_regular_files_with_fewer_blocks_than_bytes(
         return result
 
     monkeypatch.setattr(lazystat, "_statx", placeholder_statx)
-    observed = lazystat.lazy_lstat(file)
-    assert (observed.st_size, observed.st_blocks) == (exact.st_size, exact.st_blocks)
+    assert lazystat.lazy_lstat(file) == exact
 
 
 @linux_statx

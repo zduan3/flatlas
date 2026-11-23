@@ -25,15 +25,16 @@ def _records(text: str) -> list[dict]:
 
 
 @pytest.fixture
-def indexed(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
-    monkeypatch.setattr(paths, "filesystem_type", lambda _mount: "lustre")
+def indexed(tmp_path: Path) -> tuple[Path, Path]:
     source = tmp_path / "source"
     source.mkdir()
     (source / "file.bin").write_bytes(b"data")
     database = tmp_path / "index.sqlite"
     connection = open_database(database)
     try:
-        register_namespace(connection, discover_namespace(source))
+        root_id = register_namespace(connection, discover_namespace(source))
+        with connection:
+            connection.execute("UPDATE root SET filesystem_type='lustre' WHERE id=?", (root_id,))
         scan_directory(connection, source)
     finally:
         connection.close()

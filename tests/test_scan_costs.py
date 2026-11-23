@@ -151,9 +151,10 @@ def test_open_database_raises_page_cache_ceiling(tmp_path: Path) -> None:
         connection.close()
 
 
-@posix_signals
 @pytest.mark.cli
 def test_termination_signals_raise_keyboard_interrupt(restore_signals) -> None:
+    if sys.platform == "win32" or not hasattr(signal, "SIGHUP"):
+        pytest.skip("needs POSIX SIGHUP")
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
     signal.signal(signal.SIGHUP, signal.SIG_DFL)
     cli._route_termination_signals()
@@ -162,9 +163,10 @@ def test_termination_signals_raise_keyboard_interrupt(restore_signals) -> None:
             os.kill(os.getpid(), signum)  # the handler runs before the next bytecode
 
 
-@posix_signals
 @pytest.mark.cli
 def test_ignored_hangup_stays_ignored(restore_signals) -> None:
+    if sys.platform == "win32" or not hasattr(signal, "SIGHUP"):
+        pytest.skip("needs POSIX SIGHUP")
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     cli._route_termination_signals()
     assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN

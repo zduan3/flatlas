@@ -123,7 +123,7 @@ def lazy_lstat(path: Path) -> os.stat_result | LazyStat:
 
     Falls back to ``Path.lstat`` when ``statx`` is unavailable.
     """
-    if _statx is None:
+    if sys.platform == "win32" or _statx is None:
         return path.lstat()
     buffer = _Statx()
     encoded = os.fsencode(path)

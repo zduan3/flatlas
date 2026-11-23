@@ -285,7 +285,7 @@ def test_index_dir_must_be_absolute(locations: config.UserPaths, value: str) -> 
 
 
 def test_index_dir_accepts_home_relative_paths(locations: config.UserPaths, tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE" if sys.platform == "win32" else "HOME", str(tmp_path))
     config.set_default("index.dir", "~/indexes")
     assert config.get_default("index.dir") == "~/indexes"
     assert config.resolve_database(require_existing=False) == tmp_path / "indexes" / "index.sqlite"
