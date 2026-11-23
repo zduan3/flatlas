@@ -58,7 +58,8 @@ flatlas scans [PATH] [--limit N] [--format table|json|csv]
 flatlas scan-info ID
 flatlas paths [PATH] [--limit N] [--format json|csv]
 flatlas rm PATH
-flatlas du [PATH ...] [-D] [-d N] [--sort KEY] [-n N] [--freed] [-c] [--format table|json|csv]
+flatlas du [PATH ... | --files0-from FILE] [-D] [-d N] [--sort KEY] [-n N] [--freed] [-c] [--format table|json|csv]
+flatlas find [--db DB] [-H] [PATH ...] [-name|-iname|-path|-ipath|-type|-maxdepth|-mindepth|-prune|-print|-print0|! -o -a ( )]
 flatlas ls [PATH] [--format table|json|csv]
 flatlas largest [PATH] [-n N|--limit N] [--format table|json|csv]
 flatlas dupes [PATH] [--absolute] [--min-size B] [--max-size B] [--min-count N] [--min-savings B] [-n N] [--format table|json|csv]

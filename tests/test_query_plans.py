@@ -19,6 +19,7 @@ from flatlas.core import (
     disk_usage,
     duplicate_groups,
     ensure_duplicate_hashes,
+    find_paths,
     largest_files,
     open_database,
     query_paths,
@@ -26,6 +27,7 @@ from flatlas.core import (
     remove_indexed_subtree,
     scan_directory,
 )
+from flatlas.findexpr import parse_find_expression
 
 pytestmark = [pytest.mark.scan, pytest.mark.query]
 
@@ -79,6 +81,7 @@ def test_every_recursive_cte_iterates_from_the_cte(tmp_path: Path) -> None:
         disk_usage(connection, scope=source, freed=True, max_depth=2)
         query_paths(connection, scope=source)
         largest_files(connection, scope=source)
+        list(find_paths(connection, str(source), parse_find_expression(["-maxdepth", "3", "-name", "*"])))
         shutil.rmtree(source / "gone")
         scan_directory(connection, source, shallow=True)
         (source / "keep" / "deep" / "b").unlink()

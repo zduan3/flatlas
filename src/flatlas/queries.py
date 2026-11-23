@@ -7,11 +7,13 @@ import os
 import shutil
 import sqlite3
 from collections import defaultdict
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError
+from flatlas.findexpr import FindContext, FindEntry, FindExpression
 from flatlas.lazystat import uses_lazy_metadata
 from flatlas.mounts import mount_entry
 from flatlas.paths import (
@@ -19,6 +21,7 @@ from flatlas.paths import (
     discover_namespace,
     display_path,
     get_root,
+    indexed_key,
     parent_key,
     path_key,
     scope_path,
@@ -155,11 +158,17 @@ def list_scans(
     where = ""
     if scope is not None:
         selected_path = scope.expanduser().resolve()
-        indexed = connection.execute(
-            """SELECT root_id, path_key FROM path
-               WHERE path_display=? ORDER BY state='present' DESC LIMIT 1""",
-            (display_path(selected_path),),
+        key = indexed_key(connection, selected_path)
+        indexed = None if key is None else connection.execute(
+            "SELECT root_id, path_key FROM path WHERE root_id=? AND path_key=? AND path_display=?",
+            (*key, display_path(selected_path)),
         ).fetchone()
+        if indexed is None:
+            indexed = connection.execute(
+                """SELECT root_id, path_key FROM path
+                   WHERE path_display=? ORDER BY state='present' DESC LIMIT 1""",
+                (display_path(selected_path),),
+            ).fetchone()
         if indexed is None:
             namespace = discover_namespace(selected_path)
             root = get_root(connection, namespace)
@@ -789,3 +798,58 @@ def duplicate_groups(
             group["digest"],
         ),
     )[:filters.limit]
+
+
+def find_paths(
+    connection: sqlite3.Connection,
+    start: str,
+    expression: FindExpression,
+    *,
+    follow_symlink: bool = False,
+) -> Iterator[tuple[str, str]]:
+    """Evaluate a GNU ``find`` expression over the present indexed tree under ``start``.
+
+    Yields ``(printed path, terminator)`` for each print action, in GNU order:
+    a directory before its entries. Printed paths are ``start`` as given plus
+    the relative components, like GNU find. Only the index is read; ``start``
+    must be indexed and present. A final symlink in ``start`` is examined
+    itself unless ``follow_symlink`` or a trailing ``/``.
+    """
+    selected = _scope_row(connection, start, follow=follow_symlink)
+    start_key = bytes(selected["path_key"])
+    base = start
+    base_name = os.path.basename(start.rstrip("/")) or start
+    max_depth = expression.max_depth
+    rows = connection.execute(
+        """WITH RECURSIVE tree(id, depth) AS (
+            SELECT ?, 0
+            UNION ALL
+            SELECT p.id, t.depth + 1 FROM tree t CROSS JOIN path p ON p.parent_path_id=t.id
+            WHERE p.state='present' AND (? IS NULL OR t.depth < ?)
+        )
+        SELECT p.path_key, p.name_raw, p.entry_kind, p.mode, t.depth
+        FROM tree t CROSS JOIN path p ON p.id=t.id
+        ORDER BY p.path_key""",
+        (int(selected["id"]), max_depth, max_depth),
+    )
+    pruned: bytes | None = None
+    for row in rows:
+        key = bytes(row["path_key"])
+        if pruned is not None and key.startswith(pruned):
+            continue
+        pruned = None
+        depth = int(row["depth"])
+        if depth == 0:
+            path, name = base, base_name
+        else:
+            relative = "/".join(os.fsdecode(part) for part in key[len(start_key):].rstrip(b"\0").split(b"\0"))
+            path = (base if base.endswith("/") else base + "/") + relative
+            name = os.fsdecode(bytes(row["name_raw"]))
+        context = FindContext()
+        if depth >= expression.min_depth:
+            expression.evaluate(FindEntry(path, name, str(row["entry_kind"]), row["mode"], depth), context)
+        yield from context.output
+        if context.prune and depth > 0:
+            pruned = key
+        elif context.prune:
+            return

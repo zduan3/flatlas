@@ -10,6 +10,7 @@
 - 用户可预期错误（未初始化、路径未索引、namespace 未登记、参数非法等）输出 `error: ...` 并返回退出码 2，不输出 traceback。
 - JSON/CSV 字段稳定、可解析；二进制 digest 以 hex 输出；`--output PATH` 写入文件（自动创建父目录）。
 - `--db PATH` 只是全局索引位置的显式覆盖。
+- 按路径定位条目（`du`、`find`、`ls` 等的 PATH，`scans PATH`、`rm PATH`）时，由已登记 root 的路径算出 `(root_id, path_key)` 走唯一索引；`path_display` 没有索引，只在这样查不到时（如非 UTF-8 名字）回退按显示路径全表查找。
 - `flatlas --version` 输出正在运行的包版本；可访问源码仓库时附加 Git 提交、提交日期和 `dirty` 状态，否则回退为纯包版本。该命令无需初始化或打开索引数据库。
 
 ### 大小显示
@@ -86,9 +87,24 @@ PATH 默认为当前目录，必须位于已登记的 namespace。命令实时�
 - `--sort size|alloc|files|entries|freed`：按 logical size、allocated size、文件数、条目数或 `FREED`（需 `--freed`）降序排列全部行，未知值排在最后。
 - `-n N`/`--limit N`：排序后保留前 N 行，例如 `du -d 3 --sort entries -n 20 ~/data` 列出条目最多的 20 个目录。
 
+`--files0-from FILE` 从 FILE（`-` 为 stdin）读取以 NUL 分隔的 PATH，与 GNU `du` 相同：不能再同时给 PATH 参数，空文件名报错。用于汇总 `find ... -print0` 给出的大量路径，例如 `flatlas find projects -type d -name build -prune -print0 | flatlas du --files0-from=- -c --freed`；`-c` 与 `--freed` 的并集合计因此不会被 xargs 分批拆开。
+
 `-c`/`--total` 在最后加一行 `total`：`SIZE`、`N`、`E`、`ALLOC` 是各 PATH 行（不含 `-d` 展开的子目录）按路径的和（任一行未知则未知，参数重叠时会重复计数）；与 `--freed` 同用时，`UNIQ`、`FREED` 按全部参数的并集计算，重叠部分只计一次，回答“这些路径一起删能腾出多少”。
 
 状态列与 `ls` 一样使用 `ok` / `new` / `part`，JSON/CSV 的 `status` 字段对应 `scanned` / `unscanned` / `incomplete`；`du` 不提供 `ls` 现场枚举得出的 `gone`。最近覆盖目标的 scope 为 completed 时显示 `ok`；最近覆盖它的 scan 未完成时，目录及其全部当前子目录都已在该 scan 中完整枚举才显示 `ok`（`--refresh-before` 扫描中改用子树 freshness 与 cutoff 比较）。目录的 `part` 状态可以附带最后已知聚合，但该值可能不完整或过期。
+
+## `find [PATH ...] [EXPRESSION]`
+
+用 GNU `find` 表达式查询索引中 PATH 下的 present 条目，只读 SQLite，不访问文件系统；未知 expression 报错（退出码 2），不静默忽略。命令自身的选项（`--db`、`-H`）必须写在 PATH 之前，第一个以 `-` 开头或为 `!`、`(`、`)` 的参数开始表达式。
+
+- 起点：省略时为 `.`；按 GNU 规则打印为给定形式加相对分量（`.` → `./a`，`a/` → `a/b`）。最后一级 symlink 默认作为条目本身处理，`-H` 或末尾 `/` 时跟随，规则与 `du` 相同。某个起点出错时写 stderr，其余照常输出，最后退出码 1。
+- 顺序：父目录在前的路径顺序（同一目录内按原始名字节排序），不是 `readdir` 顺序。
+- 测试：`-name`/`-iname`（basename）、`-path`/`-ipath`（别名 `-wholename`/`-iwholename`，匹配打印出的路径，`*` 也匹配 `/`）、`-type f|d|l|p|s|c|b`（可用逗号列出多个），以及 `-true`、`-false`。模式为 shell 通配（`fnmatch`），不对开头的 `.` 特殊处理。
+- 动作：`-print`、`-print0`、`-prune`（匹配的目录不再展开）；没有 `-print`/`-print0` 时与 GNU 一样对整个表达式隐式 `-print`。不提供 `-delete`、`-exec` 等修改或执行动作。
+- 运算符：`( )`、`!`/`-not`、`-a`/`-and`（可省略）、`-o`/`-or`，优先级同 GNU；全局选项 `-maxdepth N`、`-mindepth N`。
+- 结果是索引状态：未扫描或不完整的区域不会出现，扫描后的增删要重新扫描才反映。
+
+典型用法是找出最外层的可重建目录再汇总：`flatlas find projects -type d \( -name build -o -name __pycache__ \) -prune -print0 | flatlas du --files0-from=- -c --freed`。
 
 ## `largest [PATH]`
 

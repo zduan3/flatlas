@@ -37,6 +37,7 @@ from flatlas.core import (
     ensure_duplicate_hashes,
     export_rows,
     filesystem_usage,
+    find_paths,
     get_root,
     hardlink_usage,
     indexed_scope_ids,
@@ -58,6 +59,7 @@ from flatlas.core import (
 )
 from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError
+from flatlas.findexpr import is_expression_start, parse_find_expression
 from flatlas.refresh import parse_refresh_before
 from flatlas.version import current_version
 
@@ -918,6 +920,13 @@ def du(
         typer.Option("--sort", help="Sort rows descending by size, alloc, files, entries or freed (needs --freed)."),
     ] = None,
     limit: Annotated[int | None, typer.Option("--limit", "-n", min=1, help="Keep the first N rows after sorting.")] = None,
+    files0_from: Annotated[
+        str | None,
+        typer.Option(
+            "--files0-from", metavar="FILE",
+            help="Read NUL-separated PATHs from FILE ('-' for stdin), e.g. from 'flatlas find ... -print0'.",
+        ),
+    ] = None,
     human_readable: human_readable_option = False,
     format: table_format_option = "table",
     output: output_option = None,
@@ -934,7 +943,12 @@ def du(
         raise FlatlasError("--sort must be size, alloc, files, entries, or freed with --freed")
     rows: list[dict[str, Any]] = []
     failed = False
-    scopes = paths or ["."]
+    if files0_from is not None:
+        if paths:
+            raise FlatlasError("--files0-from cannot be combined with PATH arguments")
+        scopes = _read_files0(files0_from)
+    else:
+        scopes = paths or ["."]
     with _connection(db, write=False) as connection:
         for path in scopes:
             try:
@@ -962,6 +976,56 @@ def du(
                 rows, format, output, include_status=True, include_entries=True,
                 human_readable=human_readable, include_freed=freed,
             )
+    if failed:
+        raise typer.Exit(1)
+
+
+def _read_files0(source: str) -> list[str]:
+    """NUL-separated names as GNU ``du --files0-from`` reads them."""
+    data = sys.stdin.buffer.read() if source == "-" else Path(source).read_bytes()
+    names = data.split(b"\0")
+    if names and names[-1] == b"":
+        names.pop()
+    if any(not name for name in names):
+        raise FlatlasError("--files0-from: invalid zero-length file name")
+    return [os.fsdecode(name) for name in names]
+
+
+@app.command(
+    "find",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "allow_interspersed_args": False},
+)
+def find_command(
+    ctx: typer.Context,
+    dereference_args: Annotated[
+        bool,
+        typer.Option("-H", help="Follow symlinks given as start points (GNU find -H); off by default."),
+    ] = False,
+    db: db_option = None,
+) -> None:
+    """Find indexed entries with a GNU find expression; reads only the index.
+
+    Usage: flatlas find [--db DB] [-H] [PATH...] [EXPRESSION]. Options go before PATH.
+    Supported: -name -iname -path -ipath -type -maxdepth -mindepth -prune -print -print0
+    -true -false ! -not -a -and -o -or ( ). Pipe -print0 into 'flatlas du --files0-from=- -c --freed'
+    for sizes. A start point that fails is reported on stderr; the others are still printed, then exit 1.
+    """
+    arguments = list(ctx.args)
+    split = next((index for index, token in enumerate(arguments) if is_expression_start(token)), len(arguments))
+    starts = arguments[:split] or ["."]
+    expression = parse_find_expression(arguments[split:])
+    stream = sys.stdout.buffer
+    failed = False
+    with _connection(db, write=False) as connection:
+        for start in starts:
+            try:
+                for path, terminator in find_paths(connection, start, expression, follow_symlink=dereference_args):
+                    stream.write(os.fsencode(path) + terminator.encode())
+            except FlatlasError as exc:
+                stream.flush()
+                typer.echo(f"error: {exc}", err=True)
+                failed = True
+    stream.flush()
     if failed:
         raise typer.Exit(1)
 

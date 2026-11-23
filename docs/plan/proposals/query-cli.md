@@ -124,6 +124,7 @@ hardlink 的默认计数应尽量对齐 GNU `du`：同一可靠对象身份在�
 | P1 | `-S`, `--separate-dirs` | 目录总量不包含子目录。 |
 | P1 | `-x`, `--one-file-system` | 限制在参数所在 namespace/filesystem；必须同时遵守扫描时的 mount coverage。 |
 | P1 | `--inodes` | 将文件数/对象数作为主指标，服务“目录中文件过多”场景。现状：`E` 列与 `--sort entries` 已覆盖该场景。 |
+| P1 | ~~`--files0-from=F`~~ | 已实现：读取 NUL 分隔的 PATH，配合 `find -print0` 汇总大量路径。 |
 | P2 | `-t SIZE`, `--threshold=SIZE` | 按当前主指标过滤输出。 |
 | P2 | `--time[=WORD]` | 输出目录树中最近的时间；需定义索引聚合与缺失字段语义。 |
 | P2 | `--exclude=PATTERN`, `-X FILE` | 仅在 include/exclude 语法、非 UTF-8 路径和 coverage 影响完成设计后实现。 |
@@ -198,7 +199,7 @@ hardlink 的默认计数应尽量对齐 GNU `du`：同一可靠对象身份在�
 | P1 | `verify [PATH...]` | flatlas 原生命令 | 只读比较索引与当前文件系统，报告新增、metadata 改变、stale hash 和未确认缺失；读取失败或 coverage 不完整不得把路径判为 deleted。 |
 | P2 | `tree [PATH]` | `tree` | 以索引生成目录层级，附带 logical/allocated 总量、文件数、coverage 和错误标记；与 `du --max-depth` 重叠，只有确有层级浏览需求时实现。 |
 | P2 | `stat PATH...` | GNU `stat` | 展示索引 metadata、路径状态、最后观测 scan、coverage、hash 状态与 digest；可规划只读 `--live` 比较，但不得隐式更新索引。 |
-| P3 | `find [PATH] [EXPR...]` | GNU `find` | 在 SQLite 中查询而非实时遍历；可考虑 `-name`、`-iname`、`-type`、`-size`、`-mtime`、`-uid`、`-gid`、`-links`，并增加索引状态条件。不提供 `-delete`、`-exec` 等动作。 |
+| P3 | `find [PATH] [EXPR...]` | GNU `find` | 在 SQLite 中查询而非实时遍历。现状：已实现 `-name`/`-iname`/`-path`/`-ipath`/`-type`/`-maxdepth`/`-mindepth`/`-prune`/`-print`/`-print0` 与 `! -a -o ( )`，见 [查询命令](../../design/queries.md#find-path--expression)；待补 `-size`、`-mtime`、`-uid`、`-gid`、`-links` 与索引状态条件。不提供 `-delete`、`-exec` 等动作。 |
 | P3 | `locate PATTERN...` | GNU `locate` | 直接复用全局路径索引，不另设 `updatedb`；除匹配路径外显示 root、present/deleted 状态、最后扫描时间和 coverage。 |
 | P3 | `readlink PATH...` | GNU `readlink` | 显示索引中的 symlink target、Windows reparse 类型和最后观测状态，不跟随目标。 |
 | P3 | `findmnt` | `findmnt` | 展示 registered namespace、mount 与扫描边界；只有可靠的跨平台 mount/source/type metadata 落地后实现。 |

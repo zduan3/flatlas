@@ -123,17 +123,46 @@ def scope_path(value: Path | str, *, follow: bool = True) -> Path:
     return absolute.parent.resolve() / absolute.name
 
 
-def _scope_row(connection: sqlite3.Connection, value: Path | str, *, follow: bool = True) -> sqlite3.Row:
-    display = display_path(scope_path(value, follow=follow))
-    row = connection.execute(
-        """SELECT p.id, p.root_id, p.path_key, p.parent_path_id, p.state,
+def indexed_key(connection: sqlite3.Connection, value: Path) -> tuple[int, bytes] | None:
+    """``(root_id, path_key)`` of an absolute path under the deepest registered root.
+
+    Computed from the root table without touching the filesystem, so lookups
+    use the ``(root_id, path_key)`` unique index; ``path_display`` has no index
+    and filtering on it scans every path row. ``None`` when no root contains
+    ``value`` or its root display text is not a plain path (callers fall back).
+    """
+    best: tuple[int, int] | None = None
+    for root in connection.execute("SELECT id, root_path_display FROM root"):
+        root_parts = Path(str(root["root_path_display"])).parts
+        if value.parts[: len(root_parts)] == root_parts and (best is None or len(root_parts) > best[1]):
+            best = (int(root["id"]), len(root_parts))
+    if best is None:
+        return None
+    return best[0], b"".join(os.fsencode(part) + b"\0" for part in value.parts[best[1]:])
+
+
+_SCOPE_ROW_SELECT = """SELECT p.id, p.root_id, p.path_key, p.parent_path_id, p.state,
                   p.last_seen_scan_id, p.first_seen_scan_id, p.path_display, p.entry_kind,
                   p.logical_size, p.allocated_size,
                   r.root_path_display
-        FROM path p JOIN root r ON r.id=p.root_id
-        WHERE p.path_display=? AND p.state='present'""",
-        (display,),
-    ).fetchone()
+        FROM path p JOIN root r ON r.id=p.root_id"""
+
+
+def _scope_row(connection: sqlite3.Connection, value: Path | str, *, follow: bool = True) -> sqlite3.Row:
+    selected = scope_path(value, follow=follow)
+    display = display_path(selected)
+    key = indexed_key(connection, selected)
+    row = None
+    if key is not None:
+        row = connection.execute(
+            f"{_SCOPE_ROW_SELECT} WHERE p.root_id=? AND p.path_key=? AND p.state='present' AND p.path_display=?",
+            (*key, display),
+        ).fetchone()
+    if row is None:
+        # Slow path (full scan) for names whose display text differs from the raw key.
+        row = connection.execute(
+            f"{_SCOPE_ROW_SELECT} WHERE p.path_display=? AND p.state='present'", (display,)
+        ).fetchone()
     if row is None:
         raise FlatlasError(f"path is not currently indexed: {display}")
     return row
@@ -146,11 +175,19 @@ def _lexical_absolute_path(value: Path) -> Path:
 
 def remove_indexed_subtree(connection: sqlite3.Connection, value: Path) -> dict[str, Any]:
     """Remove one indexed path and all indexed descendants without touching the filesystem."""
-    display = display_path(_lexical_absolute_path(value))
-    selected = connection.execute(
-        "SELECT id, root_id, parent_path_id FROM path WHERE path_display=?",
-        (display,),
-    ).fetchone()
+    absolute = _lexical_absolute_path(value)
+    display = display_path(absolute)
+    selected = None
+    if (key := indexed_key(connection, absolute)) is not None:
+        selected = connection.execute(
+            "SELECT id, root_id, parent_path_id FROM path WHERE root_id=? AND path_key=? AND path_display=?",
+            (*key, display),
+        ).fetchone()
+    if selected is None:
+        selected = connection.execute(
+            "SELECT id, root_id, parent_path_id FROM path WHERE path_display=?",
+            (display,),
+        ).fetchone()
     if selected is None:
         raise FlatlasError(f"path is not indexed: {display}")
 
