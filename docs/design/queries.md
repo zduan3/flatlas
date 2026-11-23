@@ -145,7 +145,7 @@ mgs@tcp:/fs1             lustre  325T  284T    42T   88%  /lustre/fs1
 
 - `scans [PATH]` 每个 scope 一行，按 scan ID 降序，默认最多 50 行（`--limit`），格式为表格（默认）、JSON 或 CSV。表格列为 `ID`、`STATUS`、`STARTED`、`FINISHED`（本地时区 ISO 8601）、`FILES`、`DIRS`、`ERRORS`、`SCOPE`；scope 路径不在索引中时显示 `key:<hex>`。JSON/CSV 另含 `kind`、`duration_ns`、`refresh_before_ns`、`scanner_version`、`note`、scope 状态与计数等字段。
 - PATH 过滤同时包含覆盖该路径的祖先 scope 和位于该路径下的子树 scope；PATH 可以尚未索引，但必须位于已登记的 namespace。
-- `scan-info ID` 以 JSON 展示单次 scan 的字段、全部 scope（含状态、时间、计数）以及 `scan_error` 明细（路径、operation、错误码与消息）。
+- `scan-info ID` 以 JSON 展示单次 scan 的字段、分阶段计时 `stats`（见 [分阶段计时](scanning.md#分阶段计时)）、全部 scope（含状态、时间、计数）以及 `scan_error` 明细（路径、operation、错误码与消息）。
 
 ## `export dupes`
 

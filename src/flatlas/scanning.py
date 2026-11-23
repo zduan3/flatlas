@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import stat as stat_module
 import sys
-from collections.abc import Callable
+import time
+from collections import defaultdict
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,7 +18,7 @@ from typing import Any
 from flatlas.allocation import allocated_size
 from flatlas.db import _last_insert_id, now_ns
 from flatlas.errors import FlatlasError
-from flatlas.lazystat import lazy_lstat, uses_lazy_metadata
+from flatlas.lazystat import ExactFallbacks, lazy_lstat, uses_lazy_metadata
 from flatlas.paths import (
     Namespace,
     _sqlite_integer,
@@ -359,6 +363,45 @@ def _resume_selection_from_row(row: sqlite3.Row, scope: Path) -> ResumeSelection
     )
 
 
+class ScanTimer:
+    """Wall time and call counts per scan phase, persisted as ``scan.stats_json``.
+
+    Phases are measured around individual operations, so the recursion in
+    ``visit`` does not double count. ``observe`` includes the exact-``lstat``
+    fallbacks, reported separately as ``exact_stat_fallbacks``.
+    """
+
+    def __init__(self) -> None:
+        self.ns: defaultdict[str, int] = defaultdict(int)
+        self.calls: defaultdict[str, int] = defaultdict(int)
+        self.started = time.perf_counter_ns()
+        self._fallbacks = (ExactFallbacks.count, ExactFallbacks.ns)
+
+    @contextmanager
+    def phase(self, name: str) -> Iterator[None]:
+        started = time.perf_counter_ns()
+        try:
+            yield
+        finally:
+            self.ns[name] += time.perf_counter_ns() - started
+            self.calls[name] += 1
+
+    def as_dict(self, entries: int) -> dict[str, Any]:
+        wall_ns = time.perf_counter_ns() - self.started
+        wall_s = wall_ns / 1e9
+        return {
+            "wall_s": round(wall_s, 3),
+            "entries_per_s": round(entries / wall_s, 1) if wall_s > 0 else None,
+            "phases": {
+                name: {"s": round(self.ns[name] / 1e9, 3), "calls": self.calls[name]}
+                for name in sorted(self.ns, key=lambda key: -self.ns[key])
+            },
+            "unaccounted_s": round((wall_ns - sum(self.ns.values())) / 1e9, 3),
+            "exact_stat_fallbacks": ExactFallbacks.count - self._fallbacks[0],
+            "exact_stat_fallback_s": round((ExactFallbacks.ns - self._fallbacks[1]) / 1e9, 3),
+        }
+
+
 def scan_directory(
     connection: sqlite3.Connection,
     value: Path,
@@ -375,6 +418,7 @@ def scan_directory(
         raise FlatlasError(f"scan path must be a directory: {scope}")
     root_id = int(root["id"])
     lazy = uses_lazy_metadata(root["filesystem_type"])
+    timer = ScanTimer()
     kind = "full" if scope == namespace.path else "subtree"
     started = now_ns()
     if refresh_before_ns is not None and refresh_before_ns > started:
@@ -413,10 +457,24 @@ def scan_directory(
 
         def report(phase: str, directory: Path | None = None) -> None:
             if on_progress is not None:
+                with timer.phase("progress"):
+                    _report(phase, directory)
+
+        # Files of one directory report it repeatedly; formatting its relative
+        # path once per directory keeps progress cheap (~80 us per entry before).
+        displayed_directory: Path | None = None
+        displayed_text: str | None = None
+
+        def _report(phase: str, directory: Path | None) -> None:
+            nonlocal displayed_directory, displayed_text
+            if on_progress is not None:
                 current_directory = None
                 if directory is not None:
-                    relative_directory = directory.relative_to(scope)
-                    current_directory = display_path(relative_directory) if relative_directory.parts else "."
+                    if displayed_directory != directory:
+                        relative_directory = directory.relative_to(scope)
+                        displayed_directory = directory
+                        displayed_text = display_path(relative_directory) if relative_directory.parts else "."
+                    current_directory = displayed_text
                 on_progress(
                     ScanProgress(phase, files_seen, dirs_seen, logical_bytes_seen, current_directory)
                 )
@@ -429,7 +487,8 @@ def scan_directory(
             scan_self = refresh_before_ns is None
             if refresh_before_ns is not None:
                 report("scanning", directory)
-                refresh_state = _directory_refresh_state(connection, root_id, directory_id)
+                with timer.phase("refresh_query"):
+                    refresh_state = _directory_refresh_state(connection, root_id, directory_id)
                 scan_self = (
                     refresh_state is None
                     or refresh_state["self_completed_at_ns"] is None
@@ -440,7 +499,8 @@ def scan_directory(
                     subtree_time = refresh_state["subtree_complete_through_ns"]
                     if subtree_time is not None and int(subtree_time) >= refresh_before_ns:
                         return
-                    indexed_children = _indexed_directories(connection, root_id, directory_id)
+                    with timer.phase("refresh_query"):
+                        indexed_children = _indexed_directories(connection, root_id, directory_id)
                     observed_children: list[tuple[Path, Observation]] = []
                     refresh_parent = False
                     for child in indexed_children:
@@ -449,7 +509,8 @@ def scan_directory(
                             continue
                         child_path = Path(str(child["path_display"]))
                         try:
-                            child_observed = _observation(namespace, child_path, lazy=lazy)
+                            with timer.phase("observe"):
+                                child_observed = _observation(namespace, child_path, lazy=lazy)
                         except FileNotFoundError:
                             # The child was known when the parent was last
                             # enumerated. Re-enumerate the parent before
@@ -466,15 +527,17 @@ def scan_directory(
                         observed_children.append((child_path, child_observed))
                     if not refresh_parent:
                         for child_path, child_observed in observed_children:
-                            child_id = upsert_path(
-                                connection, root_id, scan_id, child_observed, parent_id=directory_id
-                            )
+                            with timer.phase("db_write"):
+                                child_id = upsert_path(
+                                    connection, root_id, scan_id, child_observed, parent_id=directory_id
+                                )
                             dirs_seen += 1
                             visit(child_path, child_id)
                         return
             report("scanning", directory)
             try:
-                entries = list(os.scandir(directory))
+                with timer.phase("readdir"):
+                    entries = list(os.scandir(directory))
             except OSError as exc:
                 _record_error(connection, scope_id, path_key(namespace, directory), "enumerate", exc)
                 failed = True
@@ -483,13 +546,15 @@ def scan_directory(
             for entry in entries:
                 entry_path = Path(entry.path)
                 try:
-                    observed = _observation(namespace, entry_path, lazy=lazy)
+                    with timer.phase("observe"):
+                        observed = _observation(namespace, entry_path, lazy=lazy)
                 except OSError as exc:
                     _record_error(connection, scope_id, path_key(namespace, entry_path), "stat", exc)
                     failed = True
                     directory_complete = False
                     continue
-                path_id = upsert_path(connection, root_id, scan_id, observed, parent_id=directory_id)
+                with timer.phase("db_write"):
+                    path_id = upsert_path(connection, root_id, scan_id, observed, parent_id=directory_id)
                 if observed.allocation_error is not None:
                     _record_error(connection, scope_id, observed.key, "stat", observed.allocation_error)
                     failed = True
@@ -517,21 +582,25 @@ def scan_directory(
             (scope_status, now_ns(), files_seen + dirs_seen, scope_id),
         )
         if scope_status == "completed":
-            if refresh_before_ns is None:
-                _mark_missing(connection, root_id, scan_id, scope_id, scope_path_id)
-            else:
-                for directory_id in completed_directories:
-                    _mark_missing_direct_children(connection, root_id, scan_id, scope_id, directory_id)
-        refresh_directory_summaries(
-            connection,
-            root_id,
-            scope_path_id,
-            completed_directories=completed_directories,
-        )
+            with timer.phase("mark_missing"):
+                if refresh_before_ns is None:
+                    _mark_missing(connection, root_id, scan_id, scope_id, scope_path_id)
+                else:
+                    for directory_id in completed_directories:
+                        _mark_missing_direct_children(connection, root_id, scan_id, scope_id, directory_id)
+        with timer.phase("summaries"):
+            refresh_directory_summaries(
+                connection,
+                root_id,
+                scope_path_id,
+                completed_directories=completed_directories,
+            )
         errors = int(connection.execute("SELECT error_count FROM scan_scope WHERE id=?", (scope_id,)).fetchone()["error_count"])
+        stats = timer.as_dict(files_seen + dirs_seen)
         connection.execute(
-            "UPDATE scan SET status=?, finished_at_ns=?, files_seen=?, dirs_seen=?, errors_seen=? WHERE id=?",
-            (scope_status, now_ns(), files_seen, dirs_seen, errors, scan_id),
+            """UPDATE scan SET status=?, finished_at_ns=?, files_seen=?, dirs_seen=?, errors_seen=?, stats_json=?
+               WHERE id=?""",
+            (scope_status, now_ns(), files_seen, dirs_seen, errors, json.dumps(stats), scan_id),
         )
     report(scope_status)
     if cancelled:
@@ -546,4 +615,5 @@ def scan_directory(
         "errors_seen": int(
             connection.execute("SELECT error_count FROM scan_scope WHERE id=?", (scope_id,)).fetchone()["error_count"]
         ),
+        "stats": stats,
     }

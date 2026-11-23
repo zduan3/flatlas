@@ -26,6 +26,7 @@ import errno
 import os
 import stat as stat_module
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -102,6 +103,13 @@ if sys.platform.startswith("linux"):
         _statx = None
 
 
+class ExactFallbacks:
+    """Process-wide count and time of exact ``lstat`` fallbacks (scan instrumentation)."""
+
+    count = 0
+    ns = 0
+
+
 def available() -> bool:
     return _statx is not None
 
@@ -131,7 +139,12 @@ def lazy_lstat(path: Path) -> os.stat_result | LazyStat:
         # was flushed (TensorRT-LLM checkout: 1 block for a 9020-byte file,
         # 6449 of 14905 files). Pay for an exact lstat on these entries;
         # genuinely sparse files take the same path and only cost the time.
-        return path.lstat()
+        started = time.perf_counter_ns()
+        try:
+            return path.lstat()
+        finally:
+            ExactFallbacks.count += 1
+            ExactFallbacks.ns += time.perf_counter_ns() - started
     return LazyStat(
         st_mode=buffer.stx_mode,
         st_dev=os.makedev(buffer.stx_dev_major, buffer.stx_dev_minor),

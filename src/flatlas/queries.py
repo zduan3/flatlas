@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
@@ -205,7 +206,7 @@ def scan_info(connection: sqlite3.Connection, scan_id: int) -> dict[str, Any]:
                   CASE WHEN s.finished_at_ns IS NULL THEN NULL
                        ELSE s.finished_at_ns-s.started_at_ns END AS duration_ns,
                   s.files_seen, s.dirs_seen, s.errors_seen,
-                  s.refresh_before_ns, s.scanner_version, s.note
+                  s.refresh_before_ns, s.scanner_version, s.note, s.stats_json
            FROM scan s JOIN root r ON r.id=s.root_id
            WHERE s.id=?""",
         (scan_id,),
@@ -234,8 +235,11 @@ def scan_info(connection: sqlite3.Connection, scan_id: int) -> dict[str, Any]:
            WHERE ss.scan_id=? ORDER BY e.id""",
         (scan_id,),
     ).fetchall()
+    details = dict(scan)
+    stats_json = details.pop("stats_json")
     return {
-        **dict(scan),
+        **details,
+        "stats": None if stats_json is None else json.loads(stats_json),
         "scopes": [dict(row) for row in scopes],
         "errors": [dict(row) for row in errors],
     }

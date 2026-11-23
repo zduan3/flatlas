@@ -15,6 +15,16 @@
 - 每个条目只做一次 `lstat`，类型由 `st_mode`（`S_ISLNK` / `S_ISDIR` / `S_ISREG`）与 Windows reparse 属性判定，不再额外调用 `islink` / `is_dir` / `is_file`。`lstat` 不跟随最后一级链接，因此分类与此前的探测结果一致。
 - 扫描器把已知的父目录行 id 直接传给子条目的 upsert，不再逐条按 `path_key` 查找父目录；非目录条目不执行无效的 `directory_summary` 删除，非文件条目不执行无效的 `file_hash` 失效更新。
 - SQLite 页缓存上限为 256 MiB（按需分配），避免大索引在逐条查找时反复读取 B-tree 页。
+- 按父目录查子项（递归遍历子树、目录汇总刷新、删除确认）走 `idx_path_parent`（migration 5）。此前这些查询只能用以 `root_id` 开头的索引，SQLite 每次都为全表临时建自动索引；在 122 万行的索引上，TensorRT-LLM（5.6k 目录）重扫的汇总刷新从 8.1 s 降到 0.7 s。
+
+### 分阶段计时
+
+每次扫描把各阶段耗时写入 `scan.stats_json`（migration 5），`scan` 输出与 `scan-info ID` 的 `stats` 字段展示：
+
+- `wall_s`、`entries_per_s`：本次扫描的总耗时与条目速率（文件 + 目录）。
+- `phases`：`readdir`（枚举目录）、`observe`（每个条目的 stat，含 lazy 回退）、`db_write`（path upsert）、`refresh_query`（`--refresh-before`/续扫的逐目录查询）、`progress`（进度回调）、`mark_missing`、`summaries`，各含秒数与调用次数；`unaccounted_s` 为未归入任何阶段的时间。阶段在单个操作外计时，递归不会重复计入。
+- `exact_stat_fallbacks`、`exact_stat_fallback_s`：lazy root 上因 `blocks×512 < size` 回退到精确 `lstat` 的次数与耗时（包含在 `observe` 内）。
+- 只有扫描正常走到收尾（completed、partial、cancelled）才写入；early-fail 与被回滚的扫描没有记录，migration 5 之前的扫描为 `null`。
 
 ### Lustre 上的 lazy 元数据
 

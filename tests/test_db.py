@@ -104,7 +104,7 @@ def test_concurrent_openers_recheck_versions_after_lock(tmp_path: Path, monkeypa
         progress = []
         connection = db.open_database(database, on_migration=progress.append)
         try:
-            assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 4
+            assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 5
             return [(event.version, event.phase) for event in progress]
         finally:
             connection.close()
@@ -119,7 +119,7 @@ def test_failed_migration_rolls_back_schema_and_preserves_data(tmp_path: Path, m
     connection = db.open_database(database)
     register_namespace(connection, discover_namespace(tmp_path))
     connection.execute("DROP TABLE directory_summary")
-    connection.execute("DELETE FROM schema_migration WHERE version IN (2, 3, 4)")
+    connection.execute("DELETE FROM schema_migration WHERE version IN (2, 3, 4, 5)")
     connection.commit()
     connection.close()
 
@@ -144,7 +144,7 @@ def test_failed_migration_rolls_back_schema_and_preserves_data(tmp_path: Path, m
         connection.close()
     connection = db.open_database(database)
     try:
-        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 4
+        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 5
         assert connection.execute("SELECT count(*) FROM root").fetchone()[0] == 1
     finally:
         connection.close()

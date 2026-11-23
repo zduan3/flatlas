@@ -89,7 +89,8 @@ CREATE TABLE scan (
     dirs_seen          INTEGER NOT NULL DEFAULT 0,
     errors_seen        INTEGER NOT NULL DEFAULT 0,
     note               TEXT,
-    refresh_before_ns  INTEGER  -- migration 3；--refresh-before 的固定 cutoff，普通扫描为 NULL
+    refresh_before_ns  INTEGER, -- migration 3；--refresh-before 的固定 cutoff，普通扫描为 NULL
+    stats_json         TEXT     -- migration 5；分阶段计时 JSON，见 scanning.md「分阶段计时」
 );
 
 CREATE TABLE path (
@@ -233,6 +234,7 @@ CREATE TABLE directory_summary (
 CREATE INDEX idx_scan_root_started ON scan(root_id, started_at_ns DESC);
 CREATE INDEX idx_scope_scan_status ON scan_scope(scan_id, status);
 CREATE INDEX idx_path_root_parent_live ON path(root_id, parent_path_id, state);
+CREATE INDEX idx_path_parent ON path(parent_path_id);  -- migration 5
 CREATE INDEX idx_path_root_kind_size_live ON path(root_id, entry_kind, logical_size)
     WHERE state = 'present' AND entry_kind = 'file';
 CREATE INDEX idx_hash_quick ON file_hash(quick_algorithm, quick_digest)
@@ -310,6 +312,7 @@ HAVING count(*) > 1;
 | 2 | `cache directory usage and scan freshness` | 原地创建 `directory_summary` 与 freshness 索引，并为全部 root 回填当前目录汇总 |
 | 3 | `record directory refresh cutoff` | 为 `scan` 增加可空 `refresh_before_ns`（列已存在时只写版本记录） |
 | 4 | `count directory entries of every kind` | 为 `directory_summary` 增加 `direct_entries`、`subtree_entries`，并为全部 root 重算目录汇总 |
+| 5 | `record per-phase scan timing and index path parents` | 为 `scan` 增加可空 `stats_json`，并建 `idx_path_parent`（均可重复执行）|
 
 migration 2 回填既有索引时，历史完成时间只从覆盖相应目录的 completed `scan_scope` 保守恢复；partial、failed 或 cancelled scope 不用于推断完整时间。migration 不重建或清空现有 root、path、scan、error、hash 或 plan 数据。
 

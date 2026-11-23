@@ -10,7 +10,7 @@ from pathlib import Path
 
 from flatlas.errors import FlatlasError
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 CACHE_SIZE_KIB = 256 * 1024
 
 DDL = """
@@ -140,6 +140,7 @@ CREATE INDEX IF NOT EXISTS idx_directory_summary_freshness
 
 REFRESH_SCAN_MIGRATION_DESCRIPTION = "record directory refresh cutoff"
 ENTRY_COUNT_MIGRATION_DESCRIPTION = "count directory entries of every kind"
+SCAN_STATS_MIGRATION_DESCRIPTION = "record per-phase scan timing and index path parents"
 
 
 @dataclass(frozen=True)
@@ -345,3 +346,17 @@ def _apply_migrations(
         )
         if existing_database and on_migration is not None:
             completed.append(MigrationProgress(4, description, "completed"))
+    if connection.execute("SELECT 1 FROM schema_migration WHERE version = 5").fetchone() is None:
+        scan_columns = {row["name"] for row in connection.execute("PRAGMA table_info('scan')")}
+        if "stats_json" not in scan_columns:
+            connection.execute("ALTER TABLE scan ADD COLUMN stats_json TEXT")
+        # Child lookups (recursive subtree walks, summary refresh) filter on
+        # parent_path_id alone; without this index SQLite rebuilt an automatic
+        # index over every path row for each such query.
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_path_parent ON path(parent_path_id)")
+        connection.execute(
+            "INSERT INTO schema_migration(version, applied_at_ns, description) VALUES (?, ?, ?)",
+            (5, now_ns(), SCAN_STATS_MIGRATION_DESCRIPTION),
+        )
+        if existing_database and on_migration is not None:
+            completed.append(MigrationProgress(5, SCAN_STATS_MIGRATION_DESCRIPTION, "completed"))
