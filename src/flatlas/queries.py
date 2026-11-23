@@ -506,6 +506,7 @@ def _descendant_directories(
     connection: sqlite3.Connection, selected: sqlite3.Row, max_depth: int
 ) -> list[tuple[int, sqlite3.Row]]:
     """Present subdirectories of ``selected`` down to ``max_depth``, in path order."""
+    # Drive the final lookup from the subtree even when SQLite can scan path_key in order.
     rows = connection.execute(
         f"""WITH RECURSIVE tree(id, depth) AS (
             SELECT ?, 0
@@ -514,7 +515,7 @@ def _descendant_directories(
             WHERE p.state='present' AND p.entry_kind='directory' AND t.depth < ?
         )
         SELECT t.depth, {_SCOPE_COLUMNS}
-        FROM tree t JOIN path p ON p.id=t.id JOIN root r ON r.id=p.root_id
+        FROM tree t CROSS JOIN path p ON p.id=t.id JOIN root r ON r.id=p.root_id
         WHERE t.depth > 0 ORDER BY p.path_key""",
         (selected["id"], max_depth),
     ).fetchall()

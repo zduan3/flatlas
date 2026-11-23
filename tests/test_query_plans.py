@@ -4,7 +4,6 @@ Without ``sqlite_stat1`` the planner's choice depends only on SQL and indexes, s
 database reproduces the plan used on a million-entry index.
 """
 
-import os
 import re
 import shutil
 import sqlite3
@@ -62,9 +61,6 @@ def test_every_recursive_cte_iterates_from_the_cte(tmp_path: Path) -> None:
         path = source / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"same bytes")
-    if hasattr(os, "link"):
-        os.link(source / "keep" / "a", source / "keep" / "alias")
-
     connection = open_database(tmp_path / "index.sqlite")
     statements: dict[str, str] = {}
 
@@ -91,7 +87,7 @@ def test_every_recursive_cte_iterates_from_the_cte(tmp_path: Path) -> None:
         remove_indexed_subtree(connection, source / "forget")
         connection.set_trace_callback(None)
 
-        expected = sum(path.read_text().count("WITH RECURSIVE") for path in SOURCE_ROOT.glob("*.py"))
+        expected = sum(path.read_text(encoding="utf-8").count("WITH RECURSIVE") for path in SOURCE_ROOT.glob("*.py"))
         assert len(statements) >= expected, sorted(statements)
         failures = {
             normalized: problems
