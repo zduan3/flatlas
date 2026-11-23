@@ -10,7 +10,7 @@ from pathlib import Path
 
 from flatlas.errors import FlatlasError
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 CACHE_SIZE_KIB = 256 * 1024
 
 DDL = """
@@ -130,13 +130,16 @@ CREATE TABLE IF NOT EXISTS directory_summary (
     self_completed_at_ns INTEGER,
     subtree_complete_through_ns INTEGER,
     last_completed_scan_id INTEGER REFERENCES scan(id),
-    updated_at_ns INTEGER NOT NULL
+    updated_at_ns INTEGER NOT NULL,
+    direct_entries INTEGER NOT NULL DEFAULT 0 CHECK (direct_entries >= 0),
+    subtree_entries INTEGER NOT NULL DEFAULT 0 CHECK (subtree_entries >= 0)
 );
 CREATE INDEX IF NOT EXISTS idx_directory_summary_freshness
     ON directory_summary(self_completed_at_ns, subtree_complete_through_ns);
 """
 
 REFRESH_SCAN_MIGRATION_DESCRIPTION = "record directory refresh cutoff"
+ENTRY_COUNT_MIGRATION_DESCRIPTION = "count directory entries of every kind"
 
 
 @dataclass(frozen=True)
@@ -314,3 +317,31 @@ def _apply_migrations(
         )
     if existing_database and refresh_scan is None and on_migration is not None:
         completed.append(MigrationProgress(3, REFRESH_SCAN_MIGRATION_DESCRIPTION, "completed"))
+    entry_counts = connection.execute("SELECT 1 FROM schema_migration WHERE version = 4").fetchone()
+    if entry_counts is None:
+        description = ENTRY_COUNT_MIGRATION_DESCRIPTION
+        if existing_database and on_migration is not None:
+            on_migration(MigrationProgress(4, description, "started"))
+        summary_columns = {row["name"] for row in connection.execute("PRAGMA table_info('directory_summary')")}
+        for column in ("direct_entries", "subtree_entries"):
+            if column not in summary_columns:
+                connection.execute(
+                    f"ALTER TABLE directory_summary ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0 CHECK ({column} >= 0)"
+                )
+        if existing_database:
+            from flatlas.summaries import refresh_all_directory_summaries
+
+            progress_callback = None
+            if on_migration is not None:
+                def report_entries(done: int, total: int) -> None:
+                    on_migration(MigrationProgress(4, description, "backfill", done, total))
+
+                progress_callback = report_entries
+            # Recomputes totals from path rows; completion timestamps are kept as stored.
+            refresh_all_directory_summaries(connection, on_progress=progress_callback)
+        connection.execute(
+            "INSERT INTO schema_migration(version, applied_at_ns, description) VALUES (?, ?, ?)",
+            (4, now_ns(), description),
+        )
+        if existing_database and on_migration is not None:
+            completed.append(MigrationProgress(4, description, "completed"))

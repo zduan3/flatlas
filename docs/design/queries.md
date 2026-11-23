@@ -71,7 +71,7 @@ PATH 默认为当前目录，必须位于已登记的 namespace。命令实时�
 - 已索引的特殊条目（FIFO、socket、设备文件、未跟随的 symlink 等）：文件数与大小均为未知（表格 `-`，JSON/CSV `null`），与 `ls` 一致。扫描不记录它们自身的大小，不能显示为 0。
 - 已登记 namespace 内实际存在但尚未索引的目录：显示 `new`，文件数和大小为未知值；多路径查询仍保留其他已索引路径的汇总。其他未索引路径报错。
 
-表格列为 `S`、`SIZE(B)`（logical bytes）、`N`（文件数）、可用时的 `ALLOC(B)` 与 `PATH`（相对当前目录）。`SIZE`、`N`、`ALLOC` 按路径计数：同一 inode 的每条 hardlink 路径都计一次（相当于 GNU `du -l`），因为它们直接读取目录汇总缓存。
+表格列为 `S`、`SIZE(B)`（logical bytes）、`N`（普通文件数）、`E`（条目数）、可用时的 `ALLOC(B)` 与 `PATH`（相对当前目录）。`E` 统计全部类型的条目（含目录、symlink、特殊条目）并包含目录自身，与 GNU `du --inodes` 一致，用于定位 inode 配额压力；文件与特殊条目为 1，未索引目录未知。`SIZE`、`N`、`ALLOC` 按路径计数：同一 inode 的每条 hardlink 路径都计一次（相当于 GNU `du -l`），因为它们直接读取目录汇总缓存。
 
 `--freed` 增加两列，需要递归遍历 scope（约 60 万条目时约 10 s）：
 
@@ -80,7 +80,13 @@ PATH 默认为当前目录，必须位于已登记的 namespace。命令实时�
 - 两列有 `ALLOC` 时按 allocated size，否则按 logical size；JSON/CSV 同时给出 `unique_logical_size`、`unique_allocated_size`、`freed_logical_size`、`freed_allocated_size` 和 `freed_files`（释放的 inode 数）。
 - 依据是最近一次扫描记录的 `nlink`；扫描之后在 scope 外新增或删除的链接不会反映出来。
 
-`-c`/`--total` 在最后加一行 `total`：`SIZE`、`N`、`ALLOC` 是各行按路径的和（任一行未知则未知，参数重叠时会重复计数）；与 `--freed` 同用时，`UNIQ`、`FREED` 按全部参数的并集计算，重叠部分只计一次，回答“这些路径一起删能腾出多少”。
+深度展开与排序（都只读目录汇总缓存，不递归遍历文件）：
+
+- `-d N`/`--max-depth N`：每个 PATH 之后按路径顺序（父目录在前）列出 N 层以内的已索引子目录；JSON/CSV 的 `depth` 为相对 PATH 的层数，PATH 自身为 0。与 GNU `du` 的后序输出不同。
+- `--sort size|alloc|files|entries|freed`：按 logical size、allocated size、文件数、条目数或 `FREED`（需 `--freed`）降序排列全部行，未知值排在最后。
+- `-n N`/`--limit N`：排序后保留前 N 行，例如 `du -d 3 --sort entries -n 20 ~/data` 列出条目最多的 20 个目录。
+
+`-c`/`--total` 在最后加一行 `total`：`SIZE`、`N`、`E`、`ALLOC` 是各 PATH 行（不含 `-d` 展开的子目录）按路径的和（任一行未知则未知，参数重叠时会重复计数）；与 `--freed` 同用时，`UNIQ`、`FREED` 按全部参数的并集计算，重叠部分只计一次，回答“这些路径一起删能腾出多少”。
 
 状态列与 `ls` 一样使用 `ok` / `new` / `part`，JSON/CSV 的 `status` 字段对应 `scanned` / `unscanned` / `incomplete`；`du` 不提供 `ls` 现场枚举得出的 `gone`。最近覆盖目标的 scope 为 completed 时显示 `ok`；最近覆盖它的 scan 未完成时，目录及其全部当前子目录都已在该 scan 中完整枚举才显示 `ok`（`--refresh-before` 扫描中改用子树 freshness 与 cutoff 比较）。目录的 `part` 状态可以附带最后已知聚合，但该值可能不完整或过期。
 

@@ -91,11 +91,7 @@ GNU `ls` 和 `du` 主要读取当前文件系统；flatlas 同时使用实时目
 
 ### 深度展开、top-N 与条目数
 
-这是当前阶段优先级最高的 `du` 能力（见 [backlog](../backlog.md)）：
-
-- `-d N` / `--max-depth=N`：输出不超过指定深度的目录，`-d 0` 与 `-s` 等价；配合 top-N 与排序，定位大目录无需逐层执行 `ls`。
-- top-N 与排序：按 logical、allocated 或文件数排序并截取前 N 项，使“文件过多的目录”与“占用最大的目录”都能直接列出。
-- 目录条目数（inode 归因）：当前目录汇总只统计普通文件数；需要在 `directory_summary` 中增加包含目录、symlink 与特殊条目的条目总数，用于定位 inode 配额压力。这需要新的向前 migration 与回填。
+已实现：`-d N`、`--sort`、`-n` 与 `E` 条目数列，见 [查询命令](../../design/queries.md#du-path-)。后续：`-a`（列出文件）、`-s` 兼容写法，以及按阈值过滤（`-t`）。
 
 ### 目标默认表格
 
@@ -123,11 +119,11 @@ hardlink 的默认计数应尽量对齐 GNU `du`：同一可靠对象身份在�
 | P0 | `-B SIZE`, `--block-size=SIZE` | 控制表格的 used/apparent 显示缩放；机器输出仍保留字节整数。 |
 | P0 | ~~`-c`, `--total`~~ | 已实现：按路径加总；与 `--freed` 同用时 `UNIQ`/`FREED` 按参数并集计算。 |
 | P1 | `-a`, `--all` | 输出目录以及普通文件，而非仅目录。 |
-| P1 | `-d N`, `--max-depth=N` | 输出不超过指定深度的目录；`-d 0` 与 `-s` 等价。 |
+| P1 | ~~`-d N`, `--max-depth=N`~~ | 已实现：父目录在前的路径顺序，`-d 0` 为默认。 |
 | P1 | `-l`, `--count-links` | 每条 hardlink 路径均计数；默认尽量按可靠对象身份去重。 |
 | P1 | `-S`, `--separate-dirs` | 目录总量不包含子目录。 |
 | P1 | `-x`, `--one-file-system` | 限制在参数所在 namespace/filesystem；必须同时遵守扫描时的 mount coverage。 |
-| P1 | `--inodes` | 将文件数/对象数作为主指标，服务“目录中文件过多”场景。 |
+| P1 | `--inodes` | 将文件数/对象数作为主指标，服务“目录中文件过多”场景。现状：`E` 列与 `--sort entries` 已覆盖该场景。 |
 | P2 | `-t SIZE`, `--threshold=SIZE` | 按当前主指标过滤输出。 |
 | P2 | `--time[=WORD]` | 输出目录树中最近的时间；需定义索引聚合与缺失字段语义。 |
 | P2 | `--exclude=PATTERN`, `-X FILE` | 仅在 include/exclude 语法、非 UTF-8 路径和 coverage 影响完成设计后实现。 |

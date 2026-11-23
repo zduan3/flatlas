@@ -58,7 +58,7 @@ flatlas scans [PATH] [--limit N] [--format table|json|csv]
 flatlas scan-info ID
 flatlas paths [PATH] [--limit N] [--format json|csv]
 flatlas rm PATH
-flatlas du [PATH ...] [-D] [--freed] [-c] [--format table|json|csv]
+flatlas du [PATH ...] [-D] [-d N] [--sort KEY] [-n N] [--freed] [-c] [--format table|json|csv]
 flatlas ls [PATH] [--format table|json|csv]
 flatlas largest [PATH] [-n N|--limit N] [--format table|json|csv]
 flatlas dupes [PATH] [--absolute] [--min-size B] [--max-size B] [--min-count N] [--min-savings B] [-n N] [--format table|json|csv]
@@ -115,7 +115,7 @@ flatlas config unset scan.refresh-before
 - `roots` 只读索引，显示各 registered namespace 的文件系统类型、元数据方式（Lustre 为 lazy）、已索引文件数与大小和最近一次扫描。
 - `df [FILE ...]` 贴近 GNU `df` 实时显示容量：给出 FILE 时对 FILE 本身查询（Lustre project quota 下即显示项目配额），无参数时列出 registered namespace；支持 `-h`、`-T`，不可访问的容量显示为未知。
 - `du` 默认输出带表头且按列对齐的汇总，包含逻辑字节数、文件数、可用时的实际分配字节数和相对路径；紧凑表头使用 `SIZE(B)`、`N` 和 `ALLOC(B)`。
-- `du` 可同时接受多个文件或目录路径，因此也能处理 shell 或启动器提前展开后的通配结果；某个路径出错时其余照常输出，退出码为 1。与 GNU `du` 一样默认不跟随参数中的 symlink，用 `PATH/` 或 `-D` 跟随。`--freed` 增加按 inode 去重的 `UNIQ` 和“删除后实际腾出”的 `FREED` 两列，`-c` 增加合计行（`--freed` 时按参数并集计算），见 [查询命令](docs/design/queries.md#du-path-)。
+- `du` 可同时接受多个文件或目录路径，因此也能处理 shell 或启动器提前展开后的通配结果；某个路径出错时其余照常输出，退出码为 1。与 GNU `du` 一样默认不跟随参数中的 symlink，用 `PATH/` 或 `-D` 跟随。`--freed` 增加按 inode 去重的 `UNIQ` 和“删除后实际腾出”的 `FREED` 两列，`-c` 增加合计行（`--freed` 时按参数并集计算）；`E` 列是含目录自身的条目数（inode），`-d N` 展开子目录，`--sort` 与 `-n` 取 top-N，见 [查询命令](docs/design/queries.md#du-path-)。
 - `ls -h [PATH]` 和 `du -h [PATH ...]`（长选项 `--human-readable`）按 GNU `-h` 规则显示表格大小（1024 为底、向上取整、小于 10 时保留一位小数，如 `1.0K`）；小于 1024 的值仍显示字节整数，未知值显示 `-`。大小表头省略 `(B)`，文件数不缩放，JSON/CSV 仍输出原始字节整数。
 - `ls [PATH]` 实时枚举目标目录的一层文件、目录和特殊条目，并合并持久化 scan coverage。表格使用 `LOGICAL(B)`：文件显示自身 logical size 和 `N=1`，目录显示已知递归索引 logical size 和文件数；特殊条目的统计为未知；`SCANNED-THROUGH` 显示已索引目录子树的扫描新鲜度下界，未知显示 `-`；`ok`、`new`、`part`、`gone` 表示统计的覆盖和现场状态。
 - `largest [PATH]` 只查询指定的已索引文件或目录 scope，PATH 默认为当前目录；按 logical size 降序、路径升序稳定排序，路径默认相对于 PATH。默认返回 10 项；-n 是 --limit 的短别名。

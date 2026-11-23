@@ -215,7 +215,9 @@ CREATE TABLE directory_summary (
     self_completed_at_ns         INTEGER,
     subtree_complete_through_ns  INTEGER,
     last_completed_scan_id       INTEGER REFERENCES scan(id),
-    updated_at_ns                INTEGER NOT NULL
+    updated_at_ns                INTEGER NOT NULL,
+    direct_entries               INTEGER NOT NULL DEFAULT 0 CHECK (direct_entries >= 0),  -- migration 4
+    subtree_entries              INTEGER NOT NULL DEFAULT 0 CHECK (subtree_entries >= 0)  -- migration 4
 );
 ```
 
@@ -307,10 +309,13 @@ HAVING count(*) > 1;
 | 1 | `initial persistent index schema` | 初始 schema：root、scan、scan_scope、path、scan_error、file_hash、plan、plan_operation 与索引；设置 `application_id` |
 | 2 | `cache directory usage and scan freshness` | 原地创建 `directory_summary` 与 freshness 索引，并为全部 root 回填当前目录汇总 |
 | 3 | `record directory refresh cutoff` | 为 `scan` 增加可空 `refresh_before_ns`（列已存在时只写版本记录） |
+| 4 | `count directory entries of every kind` | 为 `directory_summary` 增加 `direct_entries`、`subtree_entries`，并为全部 root 重算目录汇总 |
 
 migration 2 回填既有索引时，历史完成时间只从覆盖相应目录的 completed `scan_scope` 保守恢复；partial、failed 或 cancelled scope 不用于推断完整时间。migration 不重建或清空现有 root、path、scan、error、hash 或 plan 数据。
 
 migration 3 记录 `--refresh-before` 解析后的固定 UTC Unix 纳秒时间点。既有普通扫描保留为 `NULL`，迁移不修改 scan、scope、path、error、hash 或 plan 的既有数据。
+
+migration 4 的条目数统计 present 的全部类型（普通文件、目录、symlink、特殊条目）：`direct_entries` 是直接子项数，`subtree_entries` 是全部后代加目录自身，与 GNU `du --inodes` 一致，用于把 inode 配额归因到目录。回填按现有 path 行重算各 root 的汇总，完成时间（`self_completed_at_ns`、`subtree_complete_through_ns`、`last_completed_scan_id`）保持原值。`directory_summary` 的建表语句已包含这两列，因此从版本 1 升级时 migration 2 直接建出含条目列的表，migration 4 只补版本记录与重算。约 13 万目录的索引在 Lustre 上回填约 3 分钟。
 
 ### 执行机制
 

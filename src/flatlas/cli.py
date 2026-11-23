@@ -276,6 +276,12 @@ def _format_size(value: object, *, human_readable: bool = False) -> str:
     raise AssertionError("size unit must be selected")
 
 
+_DU_SORT_KEYS = {
+    "size": "logical_size", "alloc": "allocated_size", "files": "files",
+    "entries": "entries", "freed": "freed_allocated_size",
+}
+
+
 def _usage_total(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """GNU ``du -c`` style total: per-path sums; unknown if any row is unknown."""
     def summed(key: str) -> int | None:
@@ -286,9 +292,11 @@ def _usage_total(rows: list[dict[str, Any]]) -> dict[str, Any]:
     status = "scanned" if statuses == {"scanned"} else "unscanned" if statuses == {"unscanned"} else "incomplete"
     return {
         "files": summed("files"),
+        "entries": summed("entries"),
         "logical_size": summed("logical_size"),
         "allocated_size": summed("allocated_size"),
         "status": status,
+        "depth": None,
         "path": "total",
     }
 
@@ -310,6 +318,7 @@ def _print_usage(
     logical_header: bool = False,
     include_scanned_through: bool = False,
     include_freed: bool = False,
+    include_entries: bool = False,
     human_readable: bool = False,
 ) -> None:
     if _print_machine(rows, fmt, output):
@@ -321,6 +330,8 @@ def _print_usage(
         headers.append("S")
     size_header = "LOGICAL" if logical_header else "SIZE"
     headers.extend([size_header if human_readable else f"{size_header}(B)", "N"])
+    if include_entries:
+        headers.append("E")
     if show_allocated:
         headers.append("ALLOC" if human_readable else "ALLOC(B)")
     # UNIQ/FREED follow ALLOC when allocation is known, else logical size.
@@ -341,6 +352,8 @@ def _print_usage(
             _format_size(row["logical_size"], human_readable=human_readable),
             "-" if row["files"] is None or (include_kind and row["entry_kind"] == "file") else str(row["files"]),
         ])
+        if include_entries:
+            fields.append("-" if row.get("entries") is None else str(row["entries"]))
         if show_allocated:
             fields.append(_format_size(row["allocated_size"], human_readable=human_readable))
         if include_freed:
@@ -885,6 +898,14 @@ def du(
         typer.Option("--freed", help="Add UNIQ (each hardlinked inode once) and FREED (released if deleted)."),
     ] = False,
     total: Annotated[bool, typer.Option("--total", "-c", help="Add a total row; with --freed, over the union.")] = False,
+    max_depth: Annotated[
+        int, typer.Option("--max-depth", "-d", min=0, help="Also list subdirectories down to N levels below each PATH.")
+    ] = 0,
+    sort: Annotated[
+        str | None,
+        typer.Option("--sort", help="Sort rows descending by size, alloc, files, entries or freed (needs --freed)."),
+    ] = None,
+    limit: Annotated[int | None, typer.Option("--limit", "-n", min=1, help="Keep the first N rows after sorting.")] = None,
     human_readable: human_readable_option = False,
     format: table_format_option = "table",
     output: output_option = None,
@@ -892,26 +913,43 @@ def du(
 ) -> None:
     """Summarize indexed usage. S: ok=scanned, new=unscanned, part=incomplete.
 
-    SIZE(B)=logical bytes; N=file count; ALLOC(B)=allocated bytes; hardlinks count per path.
+    SIZE(B)=logical bytes; N=file count; E=entries of any kind incl. the directory (inodes);
+    ALLOC(B)=allocated bytes; hardlinks count per path.
     A PATH that fails is reported on stderr; the others are still printed, then exit 1.
     """
+    sort_key = _DU_SORT_KEYS.get(sort) if sort is not None else None
+    if sort is not None and (sort_key is None or (sort == "freed" and not freed)):
+        raise FlatlasError("--sort must be size, alloc, files, entries, or freed with --freed")
     rows: list[dict[str, Any]] = []
     failed = False
     scopes = paths or ["."]
     with _connection(db, write=False) as connection:
         for path in scopes:
             try:
-                rows.extend(disk_usage(connection, scope=path, follow_symlink=dereference_args, freed=freed))
+                rows.extend(disk_usage(
+                    connection, scope=path, follow_symlink=dereference_args, freed=freed, max_depth=max_depth,
+                ))
             except FlatlasError as exc:
                 typer.echo(f"error: {exc}", err=True)
                 failed = True
+        total_row = None
         if total and rows:
-            rows.append(_usage_total(rows))
+            total_row = _usage_total([row for row in rows if row["depth"] == 0])
             if freed:
                 ids = indexed_scope_ids(connection, list(scopes), follow_symlink=dereference_args)
-                rows[-1].update(hardlink_usage(connection, ids))
+                total_row.update(hardlink_usage(connection, ids))
+        if sort_key is not None:
+            # Descending; unknown values last.
+            rows.sort(key=lambda row: (row[sort_key] is None, -(row[sort_key] or 0)))
+        if limit is not None:
+            rows = rows[:limit]
+        if total_row is not None:
+            rows.append(total_row)
         if rows or not failed:
-            _print_usage(rows, format, output, include_status=True, human_readable=human_readable, include_freed=freed)
+            _print_usage(
+                rows, format, output, include_status=True, include_entries=True,
+                human_readable=human_readable, include_freed=freed,
+            )
     if failed:
         raise typer.Exit(1)
 
