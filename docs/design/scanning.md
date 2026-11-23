@@ -99,6 +99,8 @@ VALUE 支持带时区或使用本地时区的 ISO 8601 时间，以及 `30s`、`
 
 删除确认只在最终事务中进行，与 completed 状态和整个 scope 的汇总刷新一起提交，因此任何中断、崩溃或被杀都只留下 checkpoint，不会删除任何旧路径。其他连接可以在扫描期间读到已提交的 checkpoint：已结束的目录按当前 scan 显示为已完成，未结束的部分按之前的覆盖判断（running 的处理与 cancelled 相同）。checkpoint 期间扫描进程持有写锁，其它写入者只能在两次 checkpoint 之间的空隙获得锁。
 
+提交开销（2026-11 在 Lustre 上实测，63.8 万条目子树）：每次提交约 0.35 s，按 5 s 间隔约占扫描 7%。其中约 70% 是提交后顺带的 WAL checkpoint——每批写入 21–37 MiB WAL，远超默认 `wal_autocheckpoint` 1000 页，几乎每次提交都触发；WAL fsync 只占约 0.04 s。扫描期间关闭自动 checkpoint、结束时统一做一次（约 1 s）可把提交降到约 0.11 s（`synchronous=NORMAL` 再降到约 0.07 s），代价是扫描期间 WAL 涨到约 1 GB，NORMAL 还会在掉电时丢最近批次。当前未采用，保持 SQLite 默认；需要压低开销时优先调 `wal_autocheckpoint`，不改 `synchronous`。
+
 不另外持久化工作队列：目录完成时间就是队列。续扫用原 cutoff 做 `--refresh-before`，已在 checkpoint 中完成的子树按 `subtree_complete_through_ns` 整体剪枝，只重新枚举崩溃点到 scope 路径上未完成的目录。
 
 ### 用户取消与信号
