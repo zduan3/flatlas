@@ -26,7 +26,7 @@
 
 ### 空间真实性与安全验证
 
-- 识别同一文件对象的 hardlink alias，分别报告路径冗余、logical 理论节省量、allocated size 与可物理回收空间，不能把它们相加或互换；见 [dupes 识别 hardlink alias](hardlink-alias.md)。
+- 识别同一文件对象的 hardlink alias，分别报告路径冗余、logical 理论节省量、allocated size 与可物理回收空间，不能把它们相加或互换；alias 合并已实现，见 [重复组](../../design/hashing.md#重复组)。
 - 对稀疏、压缩、reflink/shared extent 和索引范围外 alias 明确标记物理节省量未知或估算。
 - `full hash` 适合持久缓存、跨多文件分组和后续增量查询；逐字节比较无需依赖碰撞假设，但不能作为可复用的全局分组键且会重复读取。未来任何修改文件系统的 apply 都必须在执行前重新验证身份与 metadata，并可在安全模式中逐字节比较；不能只凭历史 full hash 修改文件。
 

@@ -29,8 +29,11 @@
 
 重复组由仍为 `present`、普通文件、`file_hash.state='full_ready'` 且 logical size、algorithm 与 full digest 都相同的记录组成，与 [架构不变量](architecture.md#不可破坏的语义) 一致。
 
-- **按路径计数**：`count` 是组内路径数；当前不识别 hardlink alias，同一 `(device, inode)` 的多条路径分别计数、分别读取。
-- **theoretical savings** = `logical_size × (count - 1)`，是理论 logical savings，不是实际物理可回收空间。
+- **hardlink alias 算一份**：`count` 是组内路径数，`inodes` 是组内不同 `(device, inode)` 的数量；同一 inode 的多条路径只算一份副本。只由同一 inode 的 alias 组成的组（`inodes < 2`）不是重复，不显示。`inode` 未记录的路径各自算一份。
+- **theoretical savings** = `logical_size × (inodes - 1)`，是理论 logical savings，不是实际物理可回收空间。
+- **`external_links`**：组内某个 inode 的 `nlink` 大于组内列出的 alias 数，即它还有链接在 PATH 之外或索引之外。此时把组内路径改链或删除不一定释放该 inode，实际回收量需要用 `du --freed` 或在更大的 PATH 上核对。
+- `(device, inode)` 来自最近一次扫描，不是跨历史的永久身份；合并只在本次查询内进行。
+- **候选与读取**：同大小候选要求至少 2 个不同 inode，只有 alias 的大小不读取内容。同一次 `dupes` 中同一 inode 只读一次内容，其余 alias 在索引 metadata 与已校验的 basis 一致时复用该 digest，不计入 `content_files_read`。
 - 组按理论节省量降序、文件大小降序、算法与 digest 升序稳定排序；组内路径按路径升序。路径默认相对于 PATH 显示，`--absolute` 显示绝对路径。
 
 ## 筛选参数
@@ -40,7 +43,7 @@
 | 参数 | 默认 | 语义与应用时机 |
 |---|---|---|
 | `--min-size` / `--max-size` | 0 / 不限 | 文件 logical size 闭区间；在同大小候选分组和 hash 前生效，也约束最终查询。区间外文件不读取，也不显示已有缓存结果 |
-| `--min-count` | 2 | 组内路径数下限（含边界）；full hash 分组后应用 |
+| `--min-count` | 2 | 组内不同 inode 数下限（含边界）；full hash 分组后应用 |
 | `--min-savings` | 0 | 每组理论 logical savings 下限（含边界）；full hash 分组后应用 |
 | `--limit` / `-n` | 不限 | 筛选和稳定排序后最多保留的组数，不截断组内成员 |
 
@@ -48,8 +51,8 @@
 
 ## 输出
 
-- **表格**：首行汇总筛选后显示的组数、冗余文件数与理论节省量，再逐组列出大小 × 路径数、节省量和路径；hash 不完整时末尾提示 changed 与 error 数。
-- **JSON**：`{"hash": {...}, "groups": [...]}`。`hash` 含 `complete`、`candidate_files`、`candidate_bytes`、`content_files_read`、`changed_files`、`errors`，描述大小筛选后的全部候选，不因组数限制截断；每组含 `algorithm`、hex `digest`、`logical_size`、`count`、`theoretical_savings` 与 `paths`。零组时 `groups` 为 `[]`。
+- **表格**：首行汇总筛选后显示的组数、冗余副本数（`inodes - 1` 之和）与理论节省量，再逐组列出大小 × 路径数（与 inode 数不同时附 `(N inodes)`）、节省量、`has links outside this group`（`external_links`）和路径；hash 不完整时末尾提示 changed 与 error 数。
+- **JSON**：`{"hash": {...}, "groups": [...]}`。`hash` 含 `complete`、`candidate_files`、`candidate_bytes`、`content_files_read`、`changed_files`、`errors`，描述大小筛选后的全部候选，不因组数限制截断；每组含 `algorithm`、hex `digest`、`logical_size`、`count`、`inodes`、`theoretical_savings`、`external_links` 与 `paths`（每条含 `id`、`root_id`、`path_display`、`device`、`inode`）。零组时 `groups` 为 `[]`。
 - **CSV**：每组一行，并在行内重复 `hash` 摘要字段；零组时为空文件，没有独立摘要。
 - hash 不完整时 stderr 输出 `warning: duplicate analysis incomplete: ...`。
 
@@ -59,4 +62,4 @@
 
 `dupes` 输出的是基于完整 BLAKE3 的重复内容候选和理论 logical savings，不是删除授权。需要实际去重时，应选择值得处理的较小目录，让 jdupes 重新扫描、独立验证并由用户显式执行；不要把 `export dupes` 的结果直接管道到删除命令。
 
-相关提案：[lazy-hash 后续能力](../plan/proposals/lazy-hash.md)、[hardlink alias 识别](../plan/proposals/hardlink-alias.md)。
+相关提案：[lazy-hash 后续能力](../plan/proposals/lazy-hash.md)。

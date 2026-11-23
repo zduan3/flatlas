@@ -26,7 +26,10 @@ def create_dry_run_plan(connection: sqlite3.Connection, root_id: int) -> str:
         for group in groups:
             ordered = sorted(group["paths"], key=lambda item: item["path_display"])
             canonical = ordered[0]
+            canonical_inode = (canonical["device"], canonical["inode"])
             for replacement in ordered[1:]:
+                if replacement["inode"] is not None and (replacement["device"], replacement["inode"]) == canonical_inode:
+                    continue  # already a hardlink of the canonical file
                 ordinal += 1
                 preconditions = {
                     "same_registered_filesystem": True,

@@ -204,7 +204,8 @@ def _duplicate_hash_candidates(
             WHERE p.state='present' AND p.entry_kind='file' AND p.logical_size > 0
               AND (p.allocated_size IS NULL OR p.allocated_size > 0)
               AND p.logical_size BETWEEN ? AND ?
-            GROUP BY p.logical_size HAVING count(*) > 1
+            GROUP BY p.logical_size
+            HAVING count(DISTINCT coalesce(p.device, '') || ':' || coalesce(p.inode, -p.id)) > 1
         )
         SELECT p.id, p.path_display, p.logical_size, p.device, p.inode, p.mtime_ns,
                p.change_time_ns, p.birth_time_ns, p.last_seen_scan_id,
@@ -249,6 +250,24 @@ def ensure_duplicate_hashes(
     errors = 0
     writes = 0
     content_path_ids: set[int] = set()
+    # Hardlink aliases share content: (device, inode, full) -> (indexed basis, validated basis, digest).
+    alias_digests: dict[tuple[Any, ...], tuple[tuple[int | None, ...], tuple[int | None, ...], bytes]] = {}
+
+    def digest_once(candidate: dict[str, Any], *, full: bool) -> tuple[bytes, bool]:
+        """Return (digest, read) reading each inode at most once per run."""
+        indexed = _candidate_hash_basis(candidate)
+        key = (candidate["device"], candidate["inode"], full) if candidate["inode"] is not None else None
+        cached = alias_digests.get(key) if key is not None else None
+        if cached is not None and indexed in cached[:2]:
+            validated = cached[1]
+            if indexed != validated:
+                candidate["mtime_ns"], candidate["change_time_ns"], candidate["birth_time_ns"] = validated[3:]
+                candidate["times_reconciled"] = True
+            return cached[2], False
+        digest = _validated_digest(candidate, full=full)
+        if key is not None:
+            alias_digests[key] = (indexed, _candidate_hash_basis(candidate), digest)
+        return digest, True
 
     def save_problem(candidate: dict[str, Any], state: str, message: str) -> None:
         nonlocal writes
@@ -310,7 +329,7 @@ def ensure_duplicate_hashes(
         for index, candidate in enumerate(quick_work, start=1):
             size = int(candidate["logical_size"])
             try:
-                quick = _validated_digest(candidate, full=False)
+                quick, read = digest_once(candidate, full=False)
                 _persist_reconciled_times(connection, candidate)
                 is_full = size <= QUICK_SAMPLE_BYTES * 2
                 _save_hash(connection, candidate, quick=quick, full=quick if is_full else None)
@@ -321,7 +340,8 @@ def ensure_duplicate_hashes(
                 candidate["full_algorithm"] = "blake3" if is_full else None
                 candidate["full_digest"] = quick if is_full else None
                 remember_current_basis(candidate)
-                content_path_ids.add(int(candidate["id"]))
+                if read:
+                    content_path_ids.add(int(candidate["id"]))
                 writes += 1
                 if writes % commit_batch == 0:
                     connection.commit()
@@ -375,14 +395,15 @@ def ensure_duplicate_hashes(
         for index, candidate in enumerate(full_work, start=1):
             size = int(candidate["logical_size"])
             try:
-                full = _validated_digest(candidate, full=True)
+                full, read = digest_once(candidate, full=True)
                 _persist_reconciled_times(connection, candidate)
                 _save_hash(connection, candidate, quick=candidate["quick_digest"], full=full)
                 candidate["hash_state"] = "full_ready"
                 candidate["full_algorithm"] = "blake3"
                 candidate["full_digest"] = full
                 remember_current_basis(candidate)
-                content_path_ids.add(int(candidate["id"]))
+                if read:
+                    content_path_ids.add(int(candidate["id"]))
                 writes += 1
                 if writes % commit_batch == 0:
                     connection.commit()

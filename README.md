@@ -58,7 +58,7 @@ flatlas scans [PATH] [--limit N] [--format table|json|csv]
 flatlas scan-info ID
 flatlas paths [PATH] [--limit N] [--format json|csv]
 flatlas rm PATH
-flatlas du [PATH ...] [-D] [--format table|json|csv]
+flatlas du [PATH ...] [-D] [--freed] [-c] [--format table|json|csv]
 flatlas ls [PATH] [--format table|json|csv]
 flatlas largest [PATH] [-n N|--limit N] [--format table|json|csv]
 flatlas dupes [PATH] [--absolute] [--min-size B] [--max-size B] [--min-count N] [--min-savings B] [-n N] [--format table|json|csv]
@@ -115,7 +115,7 @@ flatlas config unset scan.refresh-before
 - `roots` 只读索引，显示各 registered namespace 的文件系统类型、元数据方式（Lustre 为 lazy）、已索引文件数与大小和最近一次扫描。
 - `df [FILE ...]` 贴近 GNU `df` 实时显示容量：给出 FILE 时对 FILE 本身查询（Lustre project quota 下即显示项目配额），无参数时列出 registered namespace；支持 `-h`、`-T`，不可访问的容量显示为未知。
 - `du` 默认输出带表头且按列对齐的汇总，包含逻辑字节数、文件数、可用时的实际分配字节数和相对路径；紧凑表头使用 `SIZE(B)`、`N` 和 `ALLOC(B)`。
-- `du` 可同时接受多个文件或目录路径，因此也能处理 shell 或启动器提前展开后的通配结果；某个路径出错时其余照常输出，退出码为 1。与 GNU `du` 一样默认不跟随参数中的 symlink，用 `PATH/` 或 `-D` 跟随。
+- `du` 可同时接受多个文件或目录路径，因此也能处理 shell 或启动器提前展开后的通配结果；某个路径出错时其余照常输出，退出码为 1。与 GNU `du` 一样默认不跟随参数中的 symlink，用 `PATH/` 或 `-D` 跟随。`--freed` 增加按 inode 去重的 `UNIQ` 和“删除后实际腾出”的 `FREED` 两列，`-c` 增加合计行（`--freed` 时按参数并集计算），见 [查询命令](docs/design/queries.md#du-path-)。
 - `ls -h [PATH]` 和 `du -h [PATH ...]`（长选项 `--human-readable`）按 GNU `-h` 规则显示表格大小（1024 为底、向上取整、小于 10 时保留一位小数，如 `1.0K`）；小于 1024 的值仍显示字节整数，未知值显示 `-`。大小表头省略 `(B)`，文件数不缩放，JSON/CSV 仍输出原始字节整数。
 - `ls [PATH]` 实时枚举目标目录的一层文件、目录和特殊条目，并合并持久化 scan coverage。表格使用 `LOGICAL(B)`：文件显示自身 logical size 和 `N=1`，目录显示已知递归索引 logical size 和文件数；特殊条目的统计为未知；`SCANNED-THROUGH` 显示已索引目录子树的扫描新鲜度下界，未知显示 `-`；`ok`、`new`、`part`、`gone` 表示统计的覆盖和现场状态。
 - `largest [PATH]` 只查询指定的已索引文件或目录 scope，PATH 默认为当前目录；按 logical size 降序、路径升序稳定排序，路径默认相对于 PATH。默认返回 10 项；-n 是 --limit 的短别名。
@@ -153,8 +153,8 @@ flatlas export dupes D:\Archive --min-size 1048576 --limit 20 --format json --ou
 ```
 
 - `--min-size` / `--max-size`：文件 logical size 的闭区间，默认不额外限制大小；在同大小候选选择和 hash 前生效，区间外文件不读取内容，也不显示已有缓存结果。0 B 和已知占用为 0 的文件仍排除。
-- `--min-count`：完整内容重复组至少包含的路径数，默认 2；按路径计数，不识别 hardlink alias（同一文件的多个 hardlink 分别计数）。
-- `--min-savings`：每组最小 theoretical logical savings，包含边界，默认 0；按 `logical_size × (count - 1)` 计算，不是实际物理可回收空间。
+- `--min-count`：完整内容重复组至少包含的副本数，默认 2；同一 inode 的多个 hardlink 算一份，只由 alias 组成的组不显示。组内有 inode 还链接到 PATH 之外时标出 `has links outside this group`，见 [惰性 Hash 与重复候选](docs/design/hashing.md#重复组)。
+- `--min-savings`：每组最小 theoretical logical savings，包含边界，默认 0；按 `logical_size × (inodes - 1)` 计算，不是实际物理可回收空间。
 - `--limit` / `-n`：筛选并排序后最多显示的组数，默认不限；按理论节省量降序、文件大小降序、算法与 digest 升序稳定排序，不截断组内成员。
 
 组成员数、节省量与组数限制在 full hash 分组后应用，不减少候选 hash 读取。表格汇总仅统计筛选后显示的组；JSON/CSV 仍使用现有字段，`hash` 统计描述大小筛选后的全部候选，不因组数限制截断。`hash.complete` 仅描述该候选范围的 hash 处理状态，不保证 scan coverage 完整。过滤不修改路径状态或 scan coverage。空结果保持原有输出约定：JSON 的 `groups` 为 `[]`；CSV 零组时为空文件，没有独立摘要。

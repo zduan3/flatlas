@@ -38,6 +38,8 @@ from flatlas.core import (
     export_rows,
     filesystem_usage,
     get_root,
+    hardlink_usage,
+    indexed_scope_ids,
     largest_files,
     list_child_directories,
     list_plans,
@@ -274,6 +276,29 @@ def _format_size(value: object, *, human_readable: bool = False) -> str:
     raise AssertionError("size unit must be selected")
 
 
+def _usage_total(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """GNU ``du -c`` style total: per-path sums; unknown if any row is unknown."""
+    def summed(key: str) -> int | None:
+        values = [row[key] for row in rows]
+        return None if any(value is None for value in values) else sum(values)
+
+    statuses = {row["status"] for row in rows}
+    status = "scanned" if statuses == {"scanned"} else "unscanned" if statuses == {"unscanned"} else "incomplete"
+    return {
+        "files": summed("files"),
+        "logical_size": summed("logical_size"),
+        "allocated_size": summed("allocated_size"),
+        "status": status,
+        "path": "total",
+    }
+
+
+def _group_copies(group: dict[str, Any]) -> str:
+    """``3 files`` or, with hardlink aliases, ``3 files (2 inodes)``."""
+    files = _counted(int(group["count"]), "file")
+    return files if group["count"] == group["inodes"] else f"{files} ({_counted(int(group['inodes']), 'inode')})"
+
+
 def _print_usage(
     rows: list[dict[str, object]],
     fmt: str,
@@ -284,6 +309,7 @@ def _print_usage(
     name_column: bool = False,
     logical_header: bool = False,
     include_scanned_through: bool = False,
+    include_freed: bool = False,
     human_readable: bool = False,
 ) -> None:
     if _print_machine(rows, fmt, output):
@@ -297,6 +323,10 @@ def _print_usage(
     headers.extend([size_header if human_readable else f"{size_header}(B)", "N"])
     if show_allocated:
         headers.append("ALLOC" if human_readable else "ALLOC(B)")
+    # UNIQ/FREED follow ALLOC when allocation is known, else logical size.
+    freed_basis = "allocated" if show_allocated else "logical"
+    if include_freed:
+        headers.extend(["UNIQ", "FREED"] if human_readable else ["UNIQ(B)", "FREED(B)"])
     if include_scanned_through:
         headers.append("SCANNED-THROUGH")
     listing_time_ns = time.time_ns() if include_scanned_through else None
@@ -313,6 +343,11 @@ def _print_usage(
         ])
         if show_allocated:
             fields.append(_format_size(row["allocated_size"], human_readable=human_readable))
+        if include_freed:
+            fields.extend(
+                _format_size(row.get(f"{kind}_{freed_basis}_size"), human_readable=human_readable)
+                for kind in ("unique", "freed")
+            )
         if include_scanned_through:
             scanned_through = row["subtree_complete_through_ns"]
             fields.append(
@@ -596,7 +631,7 @@ def _print_duplicate_groups(
     if fmt != "table":
         raise FlatlasError("format must be table, json or csv")
 
-    redundant_files = sum(int(group["count"]) - 1 for group in groups)
+    redundant_files = sum(int(group["inodes"]) - 1 for group in groups)
     theoretical_savings = sum(int(group["theoretical_savings"]) for group in groups)
     lines = [
         (
@@ -610,8 +645,9 @@ def _print_duplicate_groups(
             [
                 "",
                 (
-                    f"[{index}] {_format_iec_size(int(group['logical_size']))} × {group['count']} files · "
+                    f"[{index}] {_format_iec_size(int(group['logical_size']))} × {_group_copies(group)} · "
                     f"{_format_iec_size(int(group['theoretical_savings']))} theoretical savings"
+                    + (" · has links outside this group" if group["external_links"] else "")
                 ),
                 *(f"    {path['path_display']}" for path in group["paths"]),
             ]
@@ -844,6 +880,11 @@ def du(
             help="Follow symlinks given as PATH arguments (GNU du -D/-H); off by default.",
         ),
     ] = False,
+    freed: Annotated[
+        bool,
+        typer.Option("--freed", help="Add UNIQ (each hardlinked inode once) and FREED (released if deleted)."),
+    ] = False,
+    total: Annotated[bool, typer.Option("--total", "-c", help="Add a total row; with --freed, over the union.")] = False,
     human_readable: human_readable_option = False,
     format: table_format_option = "table",
     output: output_option = None,
@@ -851,20 +892,26 @@ def du(
 ) -> None:
     """Summarize indexed usage. S: ok=scanned, new=unscanned, part=incomplete.
 
-    SIZE(B)=logical bytes; N=file count; ALLOC(B)=allocated bytes.
+    SIZE(B)=logical bytes; N=file count; ALLOC(B)=allocated bytes; hardlinks count per path.
     A PATH that fails is reported on stderr; the others are still printed, then exit 1.
     """
     rows: list[dict[str, Any]] = []
     failed = False
+    scopes = paths or ["."]
     with _connection(db, write=False) as connection:
-        for path in paths or ["."]:
+        for path in scopes:
             try:
-                rows.extend(disk_usage(connection, scope=path, follow_symlink=dereference_args))
+                rows.extend(disk_usage(connection, scope=path, follow_symlink=dereference_args, freed=freed))
             except FlatlasError as exc:
                 typer.echo(f"error: {exc}", err=True)
                 failed = True
+        if total and rows:
+            rows.append(_usage_total(rows))
+            if freed:
+                ids = indexed_scope_ids(connection, list(scopes), follow_symlink=dereference_args)
+                rows[-1].update(hardlink_usage(connection, ids))
         if rows or not failed:
-            _print_usage(rows, format, output, include_status=True, human_readable=human_readable)
+            _print_usage(rows, format, output, include_status=True, human_readable=human_readable, include_freed=freed)
     if failed:
         raise typer.Exit(1)
 

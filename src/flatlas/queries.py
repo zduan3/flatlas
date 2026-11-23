@@ -466,12 +466,56 @@ def _gone_child_status_row(indexed: sqlite3.Row, usage: sqlite3.Row | None) -> d
     }
 
 
+_FREED_FIELDS = (
+    "unique_logical_size", "unique_allocated_size",
+    "freed_logical_size", "freed_allocated_size", "freed_files", "unknown_link_files",
+)
+
+
+def hardlink_usage(connection: sqlite3.Connection, path_ids: list[int]) -> dict[str, int | None]:
+    """Inode-aware usage of the union of indexed subtrees.
+
+    ``unique_*`` counts each ``(device, inode)`` once, as GNU ``du`` does.
+    ``freed_*`` counts only inodes whose every link (``nlink``) is a present
+    path inside the union, i.e. what deleting the union would release. Files
+    without a recorded ``nlink`` are never counted as freed.
+    """
+    if not path_ids:
+        return dict.fromkeys(_FREED_FIELDS)
+    placeholders = ", ".join("?" for _ in path_ids)
+    row = connection.execute(
+        f"""WITH RECURSIVE descendants(id) AS (
+            SELECT id FROM path WHERE id IN ({placeholders})
+            UNION SELECT p.id FROM path p JOIN descendants d ON p.parent_path_id=d.id
+        ), inodes AS (
+            SELECT count(*) AS links_in_scope, max(p.nlink) AS nlink,
+                   max(p.logical_size) AS logical_size, max(p.allocated_size) AS allocated_size
+            FROM path p JOIN descendants d ON p.id=d.id
+            WHERE p.state='present' AND p.entry_kind='file'
+            GROUP BY p.root_id, coalesce(p.device, -p.id), coalesce(p.inode, -p.id)
+        )
+        SELECT coalesce(sum(logical_size), 0) AS unique_logical_size,
+               CASE WHEN count(allocated_size) = count(*) THEN coalesce(sum(allocated_size), 0) END
+                   AS unique_allocated_size,
+               coalesce(sum(CASE WHEN links_in_scope >= nlink THEN logical_size END), 0) AS freed_logical_size,
+               CASE WHEN count(allocated_size) = count(*)
+                    THEN coalesce(sum(CASE WHEN links_in_scope >= nlink THEN allocated_size END), 0) END
+                   AS freed_allocated_size,
+               count(CASE WHEN links_in_scope >= nlink THEN 1 END) AS freed_files,
+               count(CASE WHEN nlink IS NULL THEN 1 END) AS unknown_link_files
+        FROM inodes""",
+        path_ids,
+    ).fetchone()
+    return {key: row[key] for key in _FREED_FIELDS}
+
+
 def disk_usage(
     connection: sqlite3.Connection,
     *,
     scope: Path | str | None = None,
     relative_to: Path | None = None,
     follow_symlink: bool = False,
+    freed: bool = False,
 ) -> list[dict[str, Any]]:
     display_base = Path.cwd() if relative_to is None else relative_to
     scope = Path(".") if scope is None else scope
@@ -490,8 +534,10 @@ def disk_usage(
             "logical_size": None,
             "allocated_size": None,
             "status": "unscanned",
+            **(dict.fromkeys(_FREED_FIELDS) if freed else {}),
             "path": _relative_display(str(selected_path), display_base, str(namespace.path)),
         }]
+    row: dict[str, Any]
     if selected["entry_kind"] == "file":
         row = {
             "files": 1,
@@ -535,6 +581,9 @@ def disk_usage(
         connection, selected, str(selected["entry_kind"]),
         bytes(selected["path_key"]), scopes, usage, parent_summary,
     )
+    if freed:
+        indexed_kind = selected["entry_kind"] in {"file", "root", "directory"}
+        row.update(hardlink_usage(connection, [selected["id"]]) if indexed_kind else dict.fromkeys(_FREED_FIELDS))
     return [
         {
             **dict(row),
@@ -542,6 +591,19 @@ def disk_usage(
             "path": _relative_display(selected["path_display"], display_base, selected["root_path_display"]),
         }
     ]
+
+
+def indexed_scope_ids(
+    connection: sqlite3.Connection, scopes: list[Path | str], *, follow_symlink: bool = False
+) -> list[int]:
+    """Path ids of the scopes that are currently indexed; others are skipped."""
+    ids = []
+    for scope in scopes:
+        try:
+            ids.append(int(_scope_row(connection, scope, follow=follow_symlink)["id"]))
+        except FlatlasError:
+            continue
+    return ids
 
 
 def largest_files(
@@ -592,7 +654,8 @@ def duplicate_groups(
             """WITH RECURSIVE descendants(id) AS (
                 SELECT id FROM path WHERE id=? UNION ALL
                 SELECT p.id FROM path p JOIN descendants d ON p.parent_path_id=d.id
-            ) SELECT h.full_algorithm, h.full_digest, p.logical_size, p.id, p.root_id, p.path_display
+            ) SELECT h.full_algorithm, h.full_digest, p.logical_size, p.id, p.root_id, p.path_display,
+                   p.device, p.inode, p.nlink
             FROM file_hash h JOIN path p ON p.id=h.path_id
             WHERE h.state='full_ready' AND p.state='present' AND p.entry_kind='file'
               AND p.logical_size > 0
@@ -605,7 +668,8 @@ def duplicate_groups(
     else:
         where = "AND p.root_id=?" if root_id is not None else ""
         rows = connection.execute(
-            f"""SELECT h.full_algorithm, h.full_digest, p.logical_size, p.id, p.root_id, p.path_display
+            f"""SELECT h.full_algorithm, h.full_digest, p.logical_size, p.id, p.root_id, p.path_display,
+                   p.device, p.inode, p.nlink
             FROM file_hash h JOIN path p ON p.id=h.path_id
             WHERE h.state='full_ready' AND p.state='present' AND p.entry_kind='file'
               AND p.logical_size > 0 {where}
@@ -614,19 +678,34 @@ def duplicate_groups(
             ORDER BY h.full_algorithm, h.full_digest, p.path_display""",
             (*(() if root_id is None else (root_id,)), *filters.size_bounds),
         ).fetchall()
-    grouped: dict[tuple[str, bytes, int], list[dict[str, Any]]] = defaultdict(list)
+    grouped: dict[tuple[str, bytes, int], list[sqlite3.Row]] = defaultdict(list)
     for row in rows:
-        grouped[(row["full_algorithm"], row["full_digest"], row["logical_size"])].append({"id": row["id"], "root_id": row["root_id"], "path_display": row["path_display"]})
+        grouped[(row["full_algorithm"], row["full_digest"], row["logical_size"])].append(row)
     result = []
-    for (algorithm, digest, size), paths in grouped.items():
-        if len(paths) >= filters.min_count and size * (len(paths) - 1) >= filters.min_savings:
+    for (algorithm, digest, size), members in grouped.items():
+        # Hardlink aliases are one copy: count distinct (device, inode) objects.
+        inodes: dict[tuple[Any, ...], list[sqlite3.Row]] = defaultdict(list)
+        for row in members:
+            identity = (row["root_id"], row["device"], row["inode"]) if row["inode"] is not None else ("path", row["id"])
+            inodes[identity].append(row)
+        copies = len(inodes)
+        if copies >= filters.min_count and size * (copies - 1) >= filters.min_savings:
             result.append({
                 "algorithm": algorithm,
                 "digest": digest.hex(),
                 "logical_size": size,
-                "count": len(paths),
-                "theoretical_savings": size * (len(paths) - 1),
-                "paths": paths,
+                "count": len(members),
+                "inodes": copies,
+                "theoretical_savings": size * (copies - 1),
+                # Some inode has links the group does not list (elsewhere or outside the index).
+                "external_links": any(
+                    (aliases[0]["nlink"] or 1) > len(aliases) for aliases in inodes.values()
+                ),
+                "paths": [
+                    {"id": row["id"], "root_id": row["root_id"], "path_display": row["path_display"],
+                     "device": row["device"], "inode": row["inode"]}
+                    for row in members
+                ],
             })
     return sorted(
         result,

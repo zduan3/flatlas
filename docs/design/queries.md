@@ -71,7 +71,18 @@ PATH 默认为当前目录，必须位于已登记的 namespace。命令实时�
 - 已索引的特殊条目（FIFO、socket、设备文件、未跟随的 symlink 等）：文件数与大小均为未知（表格 `-`，JSON/CSV `null`），与 `ls` 一致。扫描不记录它们自身的大小，不能显示为 0。
 - 已登记 namespace 内实际存在但尚未索引的目录：显示 `new`，文件数和大小为未知值；多路径查询仍保留其他已索引路径的汇总。其他未索引路径报错。
 
-表格列为 `S`、`SIZE(B)`（logical bytes）、`N`（文件数）、可用时的 `ALLOC(B)` 与 `PATH`（相对当前目录）。状态列与 `ls` 一样使用 `ok` / `new` / `part`，JSON/CSV 的 `status` 字段对应 `scanned` / `unscanned` / `incomplete`；`du` 不提供 `ls` 现场枚举得出的 `gone`。最近覆盖目标的 scope 为 completed 时显示 `ok`；最近覆盖它的 scan 未完成时，目录及其全部当前子目录都已在该 scan 中完整枚举才显示 `ok`（`--refresh-before` 扫描中改用子树 freshness 与 cutoff 比较）。目录的 `part` 状态可以附带最后已知聚合，但该值可能不完整或过期。
+表格列为 `S`、`SIZE(B)`（logical bytes）、`N`（文件数）、可用时的 `ALLOC(B)` 与 `PATH`（相对当前目录）。`SIZE`、`N`、`ALLOC` 按路径计数：同一 inode 的每条 hardlink 路径都计一次（相当于 GNU `du -l`），因为它们直接读取目录汇总缓存。
+
+`--freed` 增加两列，需要递归遍历 scope（约 60 万条目时约 10 s）：
+
+- `UNIQ(B)`：scope 内每个 `(device, inode)` 只计一次，相当于 GNU `du` 默认口径。
+- `FREED(B)`：只计索引中链接数（`nlink`）全部落在 scope 内的 inode，即删除整个 scope 后实际释放的空间；有链接在 scope 外（含索引范围外）的 inode 不计入。`nlink` 未记录的文件不计入，数量见 `unknown_link_files`。
+- 两列有 `ALLOC` 时按 allocated size，否则按 logical size；JSON/CSV 同时给出 `unique_logical_size`、`unique_allocated_size`、`freed_logical_size`、`freed_allocated_size` 和 `freed_files`（释放的 inode 数）。
+- 依据是最近一次扫描记录的 `nlink`；扫描之后在 scope 外新增或删除的链接不会反映出来。
+
+`-c`/`--total` 在最后加一行 `total`：`SIZE`、`N`、`ALLOC` 是各行按路径的和（任一行未知则未知，参数重叠时会重复计数）；与 `--freed` 同用时，`UNIQ`、`FREED` 按全部参数的并集计算，重叠部分只计一次，回答“这些路径一起删能腾出多少”。
+
+状态列与 `ls` 一样使用 `ok` / `new` / `part`，JSON/CSV 的 `status` 字段对应 `scanned` / `unscanned` / `incomplete`；`du` 不提供 `ls` 现场枚举得出的 `gone`。最近覆盖目标的 scope 为 completed 时显示 `ok`；最近覆盖它的 scan 未完成时，目录及其全部当前子目录都已在该 scan 中完整枚举才显示 `ok`（`--refresh-before` 扫描中改用子树 freshness 与 cutoff 比较）。目录的 `part` 状态可以附带最后已知聚合，但该值可能不完整或过期。
 
 ## `largest [PATH]`
 
@@ -136,7 +147,7 @@ mgs@tcp:/fs1             lustre  325T  284T    42T   88%  /lustre/fs1
 
 ## `plan create` / `plan show`
 
-- `plan create --root PATH`：PATH 所属 namespace 必须已登记。命令使用该 root 内当前已缓存的 `full_ready` 重复组（不读取文件、不计算新的 hash，需要先运行 `dupes`），为每组按路径字典序选第一条路径为 canonical，其余每条路径生成一个 `hardlink` 操作（状态 `planned`），记录预期 size、digest、算法和前置条件；plan 状态为 `dry_run`，创建即不可变（`immutable_at_ns`），`source_scan_id` 为该 root 最近一次 scan。stdout 只打印 plan ID。
+- `plan create --root PATH`：PATH 所属 namespace 必须已登记。命令使用该 root 内当前已缓存的 `full_ready` 重复组（不读取文件、不计算新的 hash，需要先运行 `dupes`），为每组按路径字典序选第一条路径为 canonical，其余每条路径生成一个 `hardlink` 操作（状态 `planned`；已是 canonical 的 hardlink alias 的路径跳过），记录预期 size、digest、算法和前置条件；plan 状态为 `dry_run`，创建即不可变（`immutable_at_ns`），`source_scan_id` 为该 root 最近一次 scan。stdout 只打印 plan ID。
 - `plan show`：无 ID 时列出 plan 摘要（root、状态、时间、操作数和按预期 size 求和的理论节省量）；给出 ID 时列出该 plan 的操作明细。格式为 JSON（默认）或 CSV。
 
 plan 是候选建议快照，不构成删除或替换授权；flatlas 没有 `apply`，不执行任何 operation。

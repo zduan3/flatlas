@@ -42,6 +42,8 @@ from flatlas.queries import (
     disk_usage,
     duplicate_groups,
     filesystem_usage,
+    hardlink_usage,
+    indexed_scope_ids,
     largest_files,
     list_child_directories,
     list_roots,

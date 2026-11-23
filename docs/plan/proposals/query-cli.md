@@ -110,7 +110,7 @@ USED(K)  APPARENT(B)      N  PATH
 - 两列并存是 flatlas 的透明性扩展；不能宣称 USED 是真实物理可回收空间。
 - 全局 namespace 汇总由明确的 flatlas 参数 `--all-roots` 请求。
 
-hardlink 的默认计数应尽量对齐 GNU `du`：同一可靠对象身份在同一次聚合中只计一次；`--count-links` 才按每条路径重复计数。由于 `(device, inode)` 不是跨历史永久 ID，只能在身份与观测依据仍可靠时去重，否则必须保守计数并在机器输出中暴露 completeness/limitations。
+hardlink 的默认计数应尽量对齐 GNU `du`：同一可靠对象身份在同一次聚合中只计一次；`--count-links` 才按每条路径重复计数。现状：默认仍按路径计数（读目录汇总缓存，毫秒级）；按 inode 去重需要递归遍历 scope，约 60 万条目时约 10 s，因此先以 `--freed` 的 `UNIQ` 列按需提供，见 [查询命令](../../design/queries.md#du-path-)。是否把去重改为默认，取决于能否把 inode 去重值也放进目录汇总缓存。由于 `(device, inode)` 不是跨历史永久 ID，只能在身份与观测依据仍可靠时去重，否则必须保守计数并在机器输出中暴露 completeness/limitations。
 
 ### GNU 兼容参数规划
 
@@ -121,7 +121,7 @@ hardlink 的默认计数应尽量对齐 GNU `du`：同一可靠对象身份在�
 | P0 | `-b`, `--bytes` | 等价于 apparent size 且 block size 为 1；表格可只显示 apparent 列。 |
 | P0 | `--apparent-size` | 以 logical/apparent size 作为筛选、排序和主显示指标。 |
 | P0 | `-B SIZE`, `--block-size=SIZE` | 控制表格的 used/apparent 显示缩放；机器输出仍保留字节整数。 |
-| P0 | `-c`, `--total` | 在所有参数后增加 grand total，并明确 hardlink 去重范围。 |
+| P0 | ~~`-c`, `--total`~~ | 已实现：按路径加总；与 `--freed` 同用时 `UNIQ`/`FREED` 按参数并集计算。 |
 | P1 | `-a`, `--all` | 输出目录以及普通文件，而非仅目录。 |
 | P1 | `-d N`, `--max-depth=N` | 输出不超过指定深度的目录；`-d 0` 与 `-s` 等价。 |
 | P1 | `-l`, `--count-links` | 每条 hardlink 路径均计数；默认尽量按可靠对象身份去重。 |
@@ -266,7 +266,7 @@ GNU `find` 默认遍历实时目录树，而 `flatlas find` 应默认查询 SQLi
 ### 兼容第二批：最常用显示参数
 
 - 在已有 `-h` 之上实现 `--si`、`--block-size` 的一致缩放层。
-- `du` 实现 `-b`、`--apparent-size`、`-c`、`-d`。
+- `du` 实现 `-b`、`--apparent-size`、`-d`（`-c` 已实现）。
 - `ls` 实现 `-1`、`-S`、`-t`、`-r`、`--sort`。
 
 ### 兼容第三批：过滤、对象与边界
