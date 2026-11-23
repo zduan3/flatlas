@@ -834,9 +834,16 @@ def rm(
 @app.command("du")
 def du(
     paths: Annotated[
-        list[Path] | None,
+        list[str] | None,
         typer.Argument(help="Optional file or directory scopes; defaults to the current directory."),
     ] = None,
+    dereference_args: Annotated[
+        bool,
+        typer.Option(
+            "--dereference-args", "-D", "-H",
+            help="Follow symlinks given as PATH arguments (GNU du -D/-H); off by default.",
+        ),
+    ] = False,
     human_readable: human_readable_option = False,
     format: table_format_option = "table",
     output: output_option = None,
@@ -845,10 +852,21 @@ def du(
     """Summarize indexed usage. S: ok=scanned, new=unscanned, part=incomplete.
 
     SIZE(B)=logical bytes; N=file count; ALLOC(B)=allocated bytes.
+    A PATH that fails is reported on stderr; the others are still printed, then exit 1.
     """
+    rows: list[dict[str, Any]] = []
+    failed = False
     with _connection(db, write=False) as connection:
-        rows = [row for path in (paths or [Path(".")]) for row in disk_usage(connection, scope=path)]
-        _print_usage(rows, format, output, include_status=True, human_readable=human_readable)
+        for path in paths or ["."]:
+            try:
+                rows.extend(disk_usage(connection, scope=path, follow_symlink=dereference_args))
+            except FlatlasError as exc:
+                typer.echo(f"error: {exc}", err=True)
+                failed = True
+        if rows or not failed:
+            _print_usage(rows, format, output, include_status=True, human_readable=human_readable)
+    if failed:
+        raise typer.Exit(1)
 
 
 @app.command("ls")

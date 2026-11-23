@@ -109,8 +109,22 @@ def _sqlite_integer(value: int | None) -> int | None:
     return value
 
 
-def _scope_row(connection: sqlite3.Connection, value: Path) -> sqlite3.Row:
-    display = display_path(value.expanduser().resolve())
+def scope_path(value: Path | str, *, follow: bool = True) -> Path:
+    """Absolute scope path; with ``follow=False`` a final symlink is not resolved.
+
+    Matches GNU ``du`` without ``-D``: parent components are resolved, the last
+    one is kept unless the argument ends in ``/`` or is ``.``/``..``. Pass a
+    ``str`` to keep a trailing slash; ``Path`` drops it.
+    """
+    raw = os.path.expanduser(os.fspath(value))
+    if follow or raw.endswith(os.sep) or Path(raw).name in {"", ".", ".."}:
+        return Path(raw).resolve()
+    absolute = Path(os.path.abspath(raw))
+    return absolute.parent.resolve() / absolute.name
+
+
+def _scope_row(connection: sqlite3.Connection, value: Path | str, *, follow: bool = True) -> sqlite3.Row:
+    display = display_path(scope_path(value, follow=follow))
     row = connection.execute(
         """SELECT p.id, p.root_id, p.path_key, p.parent_path_id, p.state,
                   p.last_seen_scan_id, p.path_display, p.entry_kind,

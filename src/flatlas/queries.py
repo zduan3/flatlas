@@ -19,6 +19,7 @@ from flatlas.paths import (
     display_path,
     get_root,
     path_key,
+    scope_path,
 )
 from flatlas.scanning import Observation, _observation
 
@@ -468,16 +469,17 @@ def _gone_child_status_row(indexed: sqlite3.Row, usage: sqlite3.Row | None) -> d
 def disk_usage(
     connection: sqlite3.Connection,
     *,
-    scope: Path | None = None,
+    scope: Path | str | None = None,
     relative_to: Path | None = None,
+    follow_symlink: bool = False,
 ) -> list[dict[str, Any]]:
     display_base = Path.cwd() if relative_to is None else relative_to
     scope = Path(".") if scope is None else scope
     try:
-        selected = _scope_row(connection, scope)
+        selected = _scope_row(connection, scope, follow=follow_symlink)
     except FlatlasError:
-        selected_path = scope.expanduser().resolve()
-        if not scope.is_dir() or scope.is_symlink() or os.path.isjunction(scope):
+        selected_path = scope_path(scope, follow=follow_symlink)
+        if not selected_path.is_dir() or selected_path.is_symlink() or os.path.isjunction(selected_path):
             raise
         namespace = discover_namespace(selected_path)
         root = get_root(connection, namespace)

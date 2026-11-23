@@ -49,7 +49,8 @@ def test_du_reports_special_entries_as_unknown(tmp_path: Path) -> None:
     assert table.output.splitlines()[-1].split()[1:3] == ["-", "-"]  # S, SIZE(B), N
 
 
-def test_du_follows_a_symlink_argument_to_its_target(tmp_path: Path) -> None:
+@pytest.fixture
+def linked_index(tmp_path: Path):
     source = tmp_path / "source"
     (source / "real").mkdir(parents=True)
     (source / "real" / "file.bin").write_bytes(b"data")
@@ -58,11 +59,46 @@ def test_du_follows_a_symlink_argument_to_its_target(tmp_path: Path) -> None:
         link.symlink_to(source / "real", target_is_directory=True)
     except OSError:
         pytest.skip("symlink creation unavailable")
-    connection = open_database(tmp_path / "index.sqlite")
+    db = tmp_path / "index.sqlite"
+    connection = open_database(db)
     try:
         register_namespace(connection, discover_namespace(source))
         scan_directory(connection, source)
-        [row] = disk_usage(connection, scope=link)
-        assert (row["files"], row["logical_size"]) == (1, 4)
     finally:
         connection.close()
+    return db, source, link
+
+
+def test_du_does_not_follow_a_symlink_argument_by_default(linked_index) -> None:
+    db, _source, link = linked_index
+    connection = open_database(db)
+    try:
+        [row] = disk_usage(connection, scope=link)
+        assert row["path"].endswith("alias")
+        assert (row["files"], row["logical_size"]) == (None, None)
+        # A trailing slash dereferences, as in GNU du.
+        [slash] = disk_usage(connection, scope=f"{link}/")
+        assert (slash["files"], slash["logical_size"]) == (1, 4)
+    finally:
+        connection.close()
+
+
+def test_du_dereference_args_follows_the_symlink(linked_index) -> None:
+    db, _source, link = linked_index
+    for flag in ("-D", "-H", "--dereference-args"):
+        result = CliRunner().invoke(app, ["du", flag, "--db", str(db), "--format", "json", str(link)])
+        assert result.exit_code == 0, result.output
+        [payload] = json.loads(result.stdout)
+        assert (payload["files"], payload["logical_size"]) == (1, 4)
+
+
+def test_du_reports_a_failing_argument_and_continues(linked_index, tmp_path: Path) -> None:
+    db, source, _link = linked_index
+    outside = tmp_path / "missing"
+    result = CliRunner().invoke(
+        app, ["du", "--db", str(db), "--format", "json", str(outside), str(source / "real")]
+    )
+    assert result.exit_code == 1
+    assert "missing" in result.stderr
+    [payload] = json.loads(result.stdout)
+    assert (payload["files"], payload["logical_size"]) == (1, 4)
