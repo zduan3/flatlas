@@ -187,3 +187,9 @@ def test_largest_human_readable_preserves_index_query(option, tmp_path: Path, mo
     assert file_scope.exit_code == 0, file_scope.output
     assert file_scope.stdout.splitlines()[1].split()[0] == "1023"
     assert file_scope.stdout.splitlines()[1].endswith(".")
+
+
+@pytest.mark.output
+def test_display_width_counts_ascii_as_one_column_and_wide_as_two() -> None:
+    assert cli._display_width("".join(chr(code) for code in range(128))) == 128
+    assert cli._display_width("a/路径/é́") == len("a//") + 4 + 1

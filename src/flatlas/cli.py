@@ -410,6 +410,11 @@ def _print_largest_files(
 
 
 def _display_width(value: str) -> int:
+    if value.isascii():
+        # Every ASCII character is one column under the rule below; paths
+        # nearly always are, and the per-character lookups cost ~5 s on a
+        # 30k-row du table.
+        return len(value)
     return sum(
         0 if unicodedata.combining(character) else 2 if unicodedata.east_asian_width(character) in {"F", "W"} else 1
         for character in value
