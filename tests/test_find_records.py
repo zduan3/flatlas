@@ -46,7 +46,7 @@ def _find(db: Path, *args: str, exit_code: int = 0) -> list[str]:
 
 
 def _names(db: Path, source: Path, *expression: str) -> set[str]:
-    return {os.path.relpath(line, source) for line in _find(db, str(source), *expression)}
+    return {Path(os.path.relpath(line, source)).as_posix() for line in _find(db, str(source), *expression)}
 
 
 def test_records_carry_subtree_totals_and_absolute_paths(tree) -> None:

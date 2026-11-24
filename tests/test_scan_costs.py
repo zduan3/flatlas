@@ -72,7 +72,7 @@ def test_observation_classifies_each_entry_from_one_lstat(tmp_path: Path, monkey
         assert observed.kind == kind
         assert calls == [path]
     if link is not None:
-        assert scanning._observation(namespace, link).symlink_target == os.fsencode(str(tmp_path / "dir"))
+        assert scanning._observation(namespace, link).symlink_target == os.fsencode(os.readlink(link))
 
 
 def test_scan_links_parents_without_per_entry_key_lookup(tmp_path: Path, monkeypatch) -> None:
