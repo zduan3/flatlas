@@ -50,7 +50,9 @@ def test_shared_resolution_matches_plain_resolution(links: Path, monkeypatch, fo
     monkeypatch.chdir(links / "real" / "a")
     cases = [*_cases(links), "rel", "rel/../b", "b/f", "."]
     expected = [_outcome(case, follow) for case in cases]
-    assert any(isinstance(item, tuple) for item in expected), "the loop case must raise"
+    # Windows Path.resolve() may return the unresolved path for this loop.
+    if os.name != "nt":
+        assert any(isinstance(item, tuple) for item in expected), "the loop case must raise"
     with shared_path_resolution():
         # Twice, so the second round is served from the memo.
         assert [_outcome(case, follow) for case in cases] == expected

@@ -121,6 +121,8 @@ def scope_path(value: Path | str, *, follow: bool = True) -> Path:
     ``str`` to keep a trailing slash; ``Path`` drops it.
     """
     raw = os.path.expanduser(os.fspath(value))
+    if os.altsep is not None:
+        raw = raw.replace(os.altsep, os.sep)
     if follow or raw.endswith(os.sep) or Path(raw).name in {"", ".", ".."}:
         if ".." in raw.split(os.sep):
             # ".." after a symlink means the target's parent; only resolve() knows.

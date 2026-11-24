@@ -106,6 +106,7 @@ def test_paths_are_printed_as_given(tree, monkeypatch) -> None:
     # A symlink start point is examined itself unless -H or a trailing slash.
     assert _find(db, "link") == ["link"]
     assert _find(db, "-H", "link", "-maxdepth", "1") == ["link", "link/build", "link/src"]
+    assert _find(db, "link/", "-maxdepth", "1") == ["link/", "link/build", "link/src"]
 
 
 def test_print0_feeds_du_files0_from(tree, monkeypatch) -> None:
@@ -153,7 +154,7 @@ def test_errors_are_reported_and_other_start_points_still_print(tree) -> None:
     db, source = tree
     result = CliRunner().invoke(app, ["find", "--db", str(db), str(source / "nope"), str(source / "b"), "-type", "f"])
     assert result.exit_code == 1
-    assert result.stdout.splitlines() == [str(source / "b" / "build" / "y.o")]
+    assert result.stdout.splitlines() == [f"{source / 'b'}/build/y.o"]
     assert "not currently indexed" in result.stderr
     for bad in (["-bogus"], ["-name"], ["(", "-name", "x"], ["-type", "z"], ["-o", "-name", "x"]):
         rejected = CliRunner().invoke(app, ["find", "--db", str(db), str(source), *bad])
