@@ -32,8 +32,10 @@ pytestmark = [pytest.mark.output, pytest.mark.cli, pytest.mark.query]
 def indexed(tmp_path: Path):
     source = tmp_path / "source"
     (source / "d").mkdir(parents=True)
-    (source / "d" / "a.bin").write_bytes(b"same")
-    (source / "b.bin").write_bytes(b"same")
+    # Keep the duplicate payload out of NTFS resident storage.
+    payload = b"same" * 2048
+    (source / "d" / "a.bin").write_bytes(payload)
+    (source / "b.bin").write_bytes(payload)
     db = tmp_path / "index.sqlite"
     connection = open_database(db)
     try:

@@ -55,7 +55,7 @@ def _find(db: Path, *args: str, exit_code: int = 0) -> list[str]:
 
 
 def _relative(lines: list[str], source: Path) -> list[str]:
-    return [os.path.relpath(line, source) for line in lines]
+    return [Path(os.path.relpath(line, source)).as_posix() for line in lines]
 
 
 def test_default_print_lists_the_tree_in_preorder(tree) -> None:

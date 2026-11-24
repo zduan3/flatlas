@@ -1876,10 +1876,10 @@ def test_index_queries_and_cached_duplicates_work_after_source_goes_offline(tmp_
         ensure_duplicate_hashes(connection, source)
         offline = tmp_path / "offline"
         source.rename(offline)
-        assert [path for path, _end in find_paths(connection, str(source), parse_find_expression([]))] == [
-            str(source),
-            str(source / "a.bin"),
-            str(source / "b.bin"),
+        assert [Path(path) for path, _end in find_paths(connection, str(source), parse_find_expression([]))] == [
+            source,
+            source / "a.bin",
+            source / "b.bin",
         ]
         assert disk_usage(connection, scope=source)[0]["logical_size"] == 8
         assert [row["path"] for row in largest_files(connection, scope=source)] == [
