@@ -225,3 +225,20 @@ def test_find_walks_the_path_key_range_without_sorting(tree) -> None:
             assert "TEMP B-TREE" not in plan and "path_key>" in plan, plan
     finally:
         connection.close()
+
+
+def test_query_commands_run_in_one_read_transaction(tree, monkeypatch) -> None:
+    from flatlas import cli
+
+    db, source = tree
+    seen: list[bool] = []
+    original = cli.disk_usage
+
+    def checked(connection, **kwargs):
+        seen.append(connection.in_transaction)
+        return original(connection, **kwargs)
+
+    monkeypatch.setattr(cli, "disk_usage", checked)
+    result = CliRunner().invoke(app, ["du", "--db", str(db), str(source / "a"), str(source / "b")])
+    assert result.exit_code == 0, result.output
+    assert seen == [True, True]

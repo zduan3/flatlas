@@ -224,6 +224,13 @@ def _connection(db: Path | None, *, create: bool = False, write: bool = True) ->
     """Open the index; ``write=False`` marks query commands, which may fall back to read-only."""
     connection = _open_database(_database(db, create=create), write=write)
     try:
+        if not write:
+            # One read transaction for the whole query: every autocommit
+            # statement would take and drop the WAL/database locks again, and
+            # on Lustre mounted with flock each lock is a metadata-server round
+            # trip (du over 3000 paths: 5.7 s -> 0.5 s). It also gives the
+            # command one consistent snapshot. Query commands never write.
+            connection.execute("BEGIN")
         yield connection
     finally:
         connection.close()
