@@ -11,13 +11,9 @@
 
 ## 0.2.0
 
-- **Windows 中途验证**
-  目标：在 Windows 原生与 WSL 上各跑一次全量 pytest，修复问题并记入 [验证记录](../history/verification-log.md)。
-  原因：自 `fix(du)` `12e3ce1` 之后的提交只在 Linux 验证过，其中涉及平台的有：查询输出直接写 `sys.stdout`（换行）、`realpath` 前缀记忆在 Windows 上回退 `Path.resolve()`、扫描由 `fsencode(name)` 拼接子条目 key、跨盘符的相对显示；`test_allocation.py` 中仅 Windows 运行的用例改为 `jsonl` 后未实际运行。在 `find --format` 之前清掉平台问题，之后出错容易定位。
-
-- **README 自动化配方与 0.2.0 验收**
-  目标：根 README「脚本与自动化」一节；按提案验收，用新接口重新生成按目录的汇总表。
-  验收另含：Windows 原生与 WSL 全量 pytest，结果记入验证记录；机械硬盘性能基线——在 Windows 归档盘（索引放在同一块硬盘上）记录全量扫描、`--refresh-before` 刷新、大子树 `find -prune`、`du --files0-from -c --freed` 的耗时与 `scan-info` 分阶段计时。基线只记录、不设门槛：0.2 的性能改动只在 Lustre 与本地 SSD 上测过，按 `path_key` 顺序回表等访问模式在硬盘上的代价未知。
+- **0.2.0 验收（Windows 与机械硬盘）**
+  目标：Windows 原生与 WSL 各跑一次全量 pytest，修复问题并记入 [验证记录](../history/verification-log.md)；中途发现的 Windows 问题已由 `eb8395b`、`b20d227` 修复，其后新增的 `find --format`、元数据测试与 `FLATLAS_DB` / `--no-config`（含 `test_find_records.py`、`test_config.py` 新用例）尚未在 Windows 上运行。另记录机械硬盘性能基线：在 Windows 归档盘（索引放在同一块硬盘上）记录全量扫描、`--refresh-before` 刷新、大子树 `find -prune` 与 `find --format`、`du --files0-from -c --freed` 的耗时与 `scan-info` 分阶段计时。
+  原因：0.2 的改动只在 Linux 上验证过，性能只在 Lustre 与本地 SSD 上测过；按 `path_key` 顺序回表等访问模式在硬盘上的代价未知。基线只记录、不设门槛，供 0.2.2 对比。
 
 ## 0.2.1
 
