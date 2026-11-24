@@ -7,6 +7,7 @@ import json
 import sys
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
+from io import TextIOWrapper
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -24,8 +25,18 @@ def check_format(fmt: str, allowed: Sequence[str]) -> None:
 @contextmanager
 def _target(output: Path | None) -> Iterator[TextIO]:
     if output is None:
-        yield sys.stdout
-        sys.stdout.flush()
+        stdout = sys.stdout
+        if isinstance(stdout, TextIOWrapper):
+            # Redirected stdout can use a Windows code page that cannot encode paths.
+            stdout.flush()
+            handle = TextIOWrapper(stdout.buffer, encoding="utf-8", newline="", write_through=True)
+            try:
+                yield handle
+            finally:
+                handle.detach()
+        else:
+            yield stdout
+            stdout.flush()
         return
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8", newline="") as handle:

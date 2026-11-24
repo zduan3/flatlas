@@ -18,7 +18,7 @@
 ### 机器输出
 
 - 返回多行的命令（`du`、`ls`、`find`、`largest`、`dupes`、`scans`、`roots`、`df`、`plan show`）用 `--format table|jsonl|csv`；返回单个结果的命令（`scan`、`scan-info`、`rm`、`init`）用 `--format table|json`。默认都是 `table`，不按是否为终端自动切换。
-- `jsonl` 每行一个 JSON 记录，边产生边写出；`csv` 的列与记录字段一一对应，即使没有行也输出表头，列表值写成 JSON。每条记录的 `type` 标明记录种类。
+- 机器输出使用 UTF-8 与 LF 换行。`jsonl` 每行一个 JSON 记录，边产生边写出；`csv` 的列与记录字段一一对应，即使没有行也输出表头，列表值写成 JSON。每条记录的 `type` 标明记录种类。
 - 机器格式没有隐式行数上限：`largest` 的 10 行、`scans` 的 50 行只是表格的默认值，`-n/--limit` 显式给出时才对机器格式生效。
 - 路径一律是绝对显示路径；表格才按命令显示为相对形式（`du` 相对当前目录、`largest` 与 `dupes` 相对 PATH、`ls` 只显示名字）。大小为字节整数，时间为 `*_ns` 整数，二进制 digest 为 hex。
 - `du`、`ls`、`largest` 输出同一种条目记录（`type: entry`），字段依次为：

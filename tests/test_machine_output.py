@@ -2,6 +2,7 @@
 
 import csv
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -66,6 +67,31 @@ def test_entry_records_share_one_field_order(indexed) -> None:
     [file_record] = _run("du", str(source / "b.bin"), "--format", "jsonl", "--db", str(db))
     assert (file_record["kind"], file_record["files"], file_record["entries"]) == ("file", 1, 1)
     assert file_record["mtime_ns"] is not None and file_record["status"] == "ok"
+
+
+@pytest.mark.parametrize("fmt", ["jsonl", "csv"])
+def test_find_machine_stdout_uses_utf8_with_a_legacy_encoding(indexed, monkeypatch, fmt: str) -> None:
+    db, source = indexed
+    unicode_path = source / "归档-½.txt"
+    unicode_path.write_bytes(b"data")
+    connection = open_database(db)
+    try:
+        scan_directory(connection, source)
+    finally:
+        connection.close()
+
+    monkeypatch.setenv("PYTHONIOENCODING", "ascii")
+    result = subprocess.run(
+        [
+            sys.executable, "-c", "from flatlas.cli import main; raise SystemExit(main())",
+            "--no-config", "find", "--db", str(db), "--format", fmt, str(source), "-name", unicode_path.name,
+        ],
+        capture_output=True, check=True,
+    )
+    assert b"\r\n" not in result.stdout
+    lines = result.stdout.decode("utf-8").splitlines()
+    [record] = map(json.loads, lines) if fmt == "jsonl" else csv.DictReader(lines)
+    assert record["path"] == str(unicode_path)
 
 
 @pytest.mark.parametrize(("command", "fields", "record_type"), [
