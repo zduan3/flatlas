@@ -851,7 +851,9 @@ def scan(
             cutoff = resume_selection(connection, path).refresh_before_ns
         assert scan_path is not None
         result = scan_directory(
-            connection, scan_path, refresh_before_ns=cutoff, on_progress=progress.update, shallow=shallow,
+            connection, scan_path, refresh_before_ns=cutoff, shallow=shallow,
+            # Without a terminal the line is never drawn; skip the per-entry callback.
+            on_progress=progress.update if progress.enabled else None,
         )
     _print(result)
 

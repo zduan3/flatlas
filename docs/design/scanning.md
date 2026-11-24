@@ -14,7 +14,7 @@
 
 - 每个条目只做一次 `lstat`，类型由 `st_mode`（`S_ISLNK` / `S_ISDIR` / `S_ISREG`）与 Windows reparse 属性判定，不再额外调用 `islink` / `is_dir` / `is_file`。`lstat` 不跟随最后一级链接，因此分类与此前的探测结果一致。
 - 扫描器把已知的父目录行 id 直接传给子条目的 upsert，不再逐条按 `path_key` 查找父目录；非目录条目不执行无效的 `directory_summary` 删除，非文件条目不执行无效的 `file_hash` 失效更新。
-- 子条目的 `path_key` 由父目录的 key 加上 `fsencode(name)` 与 NUL 直接拼出（按时间刷新时子目录 key 取自索引），不再对每个条目调用 `path_key()` 重新 `relpath` 并逐分量编码；后者在深路径上每条约 80 µs。
+- 子条目的 `path_key` 由父目录的 key 加上 `fsencode(name)` 与 NUL 直接拼出（按时间刷新时子目录 key 取自索引），不再对每个条目调用 `path_key()` 重新 `relpath` 并逐分量编码；后者在深路径上每条约 80 µs。非 TTY 时 CLI 不传进度回调（此前每条仍调用一次，480 万条目约 88 s）。热缓存下 3.5 万条目子树的扫描从 7.5 s 降到 5.4 s。
 - SQLite 页缓存上限为 256 MiB（按需分配），避免大索引在逐条查找时反复读取 B-tree 页。
 - 按父目录查子项（递归遍历子树、目录汇总刷新、删除确认）走 `idx_path_parent`（migration 5）。此前这些查询只能用以 `root_id` 开头的索引，SQLite 每次都为全表临时建自动索引；在 122 万行的索引上，TensorRT-LLM（5.6k 目录）重扫的汇总刷新从 8.1 s 降到 0.7 s。
 - 递归 CTE 一律写成 `FROM <cte> x CROSS JOIN path p ON ...`，外层也从 CTE 按主键回查 `path`。索引里没有 `sqlite_stat1`，计划只取决于 SQL 与索引：带 `p.root_id=?` 条件时 SQLite 会把 `path` 放在外层、按 `root_id` 扫整个 root，递归每取一行就扫一遍，浅扫描确认 41.5 万条删除因此跑不完；改后 3.7 s。`tests/test_query_plans.py` 对全部递归查询检查计划。

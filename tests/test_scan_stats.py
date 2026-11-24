@@ -90,3 +90,26 @@ def test_migration_adds_stats_column_and_keeps_old_scans(tmp_path: Path) -> None
         assert info["stats"] is None and info["files_seen"] == 2
     finally:
         connection.close()
+
+
+@pytest.mark.cli
+def test_scan_without_a_terminal_passes_no_progress_callback(tmp_path: Path, monkeypatch) -> None:
+    from flatlas import cli
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "f").write_bytes(b"x")
+    db = tmp_path / "index.sqlite"
+    assert CliRunner().invoke(app, ["init", str(source), "--db", str(db)]).exit_code == 0
+    seen: list[object] = []
+    original = cli.scan_directory
+
+    def recording(*args, **kwargs):
+        seen.append(kwargs.get("on_progress"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "scan_directory", recording)
+    monkeypatch.setattr(cli, "_stderr_is_tty", lambda: False)
+    result = CliRunner().invoke(app, ["scan", str(source), "--db", str(db)])
+    assert result.exit_code == 0, result.output
+    assert seen == [None]
