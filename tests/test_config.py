@@ -289,3 +289,63 @@ def test_index_dir_accepts_home_relative_paths(locations: config.UserPaths, tmp_
     config.set_default("index.dir", "~/indexes")
     assert config.get_default("index.dir") == "~/indexes"
     assert config.resolve_database(require_existing=False) == tmp_path / "indexes" / "index.sqlite"
+
+
+@pytest.mark.db
+def test_flatlas_db_selects_the_index_like_db(locations: config.UserPaths, tmp_path: Path, monkeypatch) -> None:
+    runner = CliRunner()
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a.bin").write_bytes(b"abcd")
+    from_environment = tmp_path / "env" / "index.sqlite"
+    from_environment.parent.mkdir()
+    monkeypatch.setenv("FLATLAS_DB", str(from_environment))
+    assert runner.invoke(cli.app, ["init", str(source)]).exit_code == 0
+    assert runner.invoke(cli.app, ["scan", str(source)]).exit_code == 0
+    assert from_environment.is_file()
+    # Like --db, it does not pin anything in the user configuration.
+    assert not locations.config_file.exists()
+    du = runner.invoke(cli.app, ["du", str(source), "--format", "jsonl"])
+    assert du.exit_code == 0, du.output
+    assert json.loads(du.stdout)["logical_size"] == 4
+    # --db still wins; an empty variable is ignored.
+    other = tmp_path / "other.sqlite"
+    assert runner.invoke(cli.app, ["init", str(source), "--db", str(other)]).exit_code == 0
+    assert config.resolve_database(other) == other.resolve()
+    monkeypatch.setenv("FLATLAS_DB", "  ")
+    with pytest.raises(FlatlasError, match="not initialized"):
+        config.resolve_database()
+
+
+@pytest.mark.scan
+@pytest.mark.parametrize("how", ["option", "environment"])
+def test_no_config_ignores_command_defaults_but_not_the_index_location(
+    locations: config.UserPaths, tmp_path: Path, monkeypatch, how: str,
+) -> None:
+    runner = CliRunner()
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a.bin").write_bytes(b"x")
+    assert runner.invoke(cli.app, ["config", "set", "index.dir", str(tmp_path / "idx")]).exit_code == 0
+    assert runner.invoke(cli.app, ["init", str(source)]).exit_code == 0
+    assert runner.invoke(cli.app, ["config", "set", "scan.refresh-before", "7d"]).exit_code == 0
+    prefix = ["--no-config"] if how == "option" else []
+    if how == "environment":
+        monkeypatch.setenv("FLATLAS_NO_CONFIG", "1")
+    result = runner.invoke(cli.app, [*prefix, "scan", "--format", "json", str(source)])
+    assert result.exit_code == 0, result.output
+    summary = json.loads(result.stdout)
+    assert summary["refresh_before_ns"] is None  # a full scan, not the saved 7d refresh
+    assert (tmp_path / "idx" / "index.sqlite").is_file()  # index.dir still located the index
+    # Reading the configuration itself is unaffected.
+    assert runner.invoke(cli.app, [*prefix, "config", "get", "scan.refresh-before"]).stdout == "7d\n"
+    # Without the switch the saved default applies again, in the same process.
+    monkeypatch.delenv("FLATLAS_NO_CONFIG", raising=False)
+    again = runner.invoke(cli.app, ["scan", "--format", "json", str(source)])
+    assert json.loads(again.stdout)["refresh_before_ns"] is not None
+
+
+@pytest.mark.parametrize(("value", "disabled"), [("1", True), ("yes", True), ("0", False), ("false", False), ("", False)])
+def test_no_config_environment_words(monkeypatch, value: str, disabled: bool) -> None:
+    monkeypatch.setenv("FLATLAS_NO_CONFIG", value)
+    assert config.defaults_disabled() is disabled

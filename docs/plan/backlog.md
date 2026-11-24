@@ -15,11 +15,6 @@
   目标：在 Windows 原生与 WSL 上各跑一次全量 pytest，修复问题并记入 [验证记录](../history/verification-log.md)。
   原因：自 `fix(du)` `12e3ce1` 之后的提交只在 Linux 验证过，其中涉及平台的有：查询输出直接写 `sys.stdout`（换行）、`realpath` 前缀记忆在 Windows 上回退 `Path.resolve()`、扫描由 `fsencode(name)` 拼接子条目 key、跨盘符的相对显示；`test_allocation.py` 中仅 Windows 运行的用例改为 `jsonl` 后未实际运行。在 `find --format` 之前清掉平台问题，之后出错容易定位。
 
-- **索引位置与配置隔离**
-  目标：`FLATLAS_DB`；`FLATLAS_NO_CONFIG` / `--no-config`。
-  原因：agent 沙箱内 `~/.config` 只读；用户默认参数会改变脚本中 scan 的行为。
-  → [proposals/automation.md](proposals/automation.md#索引位置与配置隔离)
-
 - **README 自动化配方与 0.2.0 验收**
   目标：根 README「脚本与自动化」一节；按提案验收，用新接口重新生成按目录的汇总表。
   验收另含：Windows 原生与 WSL 全量 pytest，结果记入验证记录；机械硬盘性能基线——在 Windows 归档盘（索引放在同一块硬盘上）记录全量扫描、`--refresh-before` 刷新、大子树 `find -prune`、`du --files0-from -c --freed` 的耗时与 `scan-info` 分阶段计时。基线只记录、不设门槛：0.2 的性能改动只在 Lustre 与本地 SSD 上测过，按 `path_key` 顺序回表等访问模式在硬盘上的代价未知。

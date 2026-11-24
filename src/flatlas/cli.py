@@ -20,6 +20,7 @@ from typing import Annotated, Any, Self
 import typer
 
 from flatlas.config import (
+    command_default,
     configured_database,
     get_default,
     list_defaults,
@@ -121,12 +122,31 @@ def _version_callback(value: bool) -> None:
 
 @app.callback()
 def app_callback(
+    ctx: typer.Context,
     version: Annotated[
         bool,
         typer.Option("--version", callback=_version_callback, is_eager=True, help="Show the current version and exit."),
     ] = False,
+    no_config: Annotated[
+        bool,
+        typer.Option(
+            "--no-config",
+            help="Ignore saved command defaults (like FLATLAS_NO_CONFIG=1); the index location still applies.",
+        ),
+    ] = False,
 ) -> None:
-    """Configure top-level flatlas options."""
+    """Configure top-level flatlas options.
+
+    FLATLAS_DB selects the index like --db; FLATLAS_NO_CONFIG=1 ignores saved command defaults.
+    """
+    ctx.obj = {"no_config": no_config}
+
+
+def _command_default(ctx: typer.Context, key: str) -> str | None:
+    """A saved command default unless --no-config or FLATLAS_NO_CONFIG says to ignore it."""
+    if (ctx.find_root().obj or {}).get("no_config"):
+        return None
+    return command_default(key)
 
 
 def _database(explicit: Path | None, *, create: bool = False) -> Path:
@@ -837,6 +857,7 @@ def df_command(
 
 @app.command()
 def scan(
+    ctx: typer.Context,
     path: Annotated[
         Path | None,
         typer.Argument(help="Directory to scan; omit when using --resume-from."),
@@ -883,7 +904,7 @@ def scan(
     check_format(format, OBJECT_FORMATS)
     cutoff = None
     if not (resume or resume_from is not None or full or shallow):
-        value = refresh_before if refresh_before is not None else get_default("scan.refresh-before")
+        value = refresh_before if refresh_before is not None else _command_default(ctx, "scan.refresh-before")
         cutoff = _parse_refresh_before(value) if value is not None else None
     with _connection(db) as connection, _ScanProgressDisplay(enabled=_stderr_is_tty()) as progress:
         scan_path = path

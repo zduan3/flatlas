@@ -80,6 +80,8 @@ flatlas config set index.dir /path/to/flatlas      # 索引为 /path/to/flatlas/
 
 修改只影响配置，不移动文件；已有索引时按提示把 `index.sqlite`（及 `-wal`/`-shm`）移到新目录，或重新 `init`。`--db` 仍可单次覆盖。
 
+脚本和沙箱可以不写用户配置：环境变量 `FLATLAS_DB=/path/to/index.sqlite` 与 `--db` 等价；`FLATLAS_NO_CONFIG=1`（或 `flatlas --no-config ...`）让命令忽略保存的默认参数（如 `scan.refresh-before`），索引位置仍按配置定位。
+
 用 `config` 将默认参数保存到用户级 `config.toml`，当前支持 `scan.refresh-before`：
 
 ```powershell

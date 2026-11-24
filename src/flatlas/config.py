@@ -16,6 +16,11 @@ from flatlas.errors import FlatlasError
 from flatlas.refresh import parse_refresh_before
 
 DATABASE_NAME = "index.sqlite"
+# Scripts and sandboxes select an index or ignore personal defaults without
+# writing the user configuration.
+DATABASE_ENV = "FLATLAS_DB"
+NO_CONFIG_ENV = "FLATLAS_NO_CONFIG"
+_FALSE_WORDS = {"", "0", "false", "no", "off"}
 
 
 @dataclass(frozen=True)
@@ -111,6 +116,20 @@ def get_default(key: str) -> str | None:
     return _configured(_read_config(user_paths()).unwrap(), key)
 
 
+def defaults_disabled() -> bool:
+    """Whether ``FLATLAS_NO_CONFIG`` asks commands to ignore saved command defaults."""
+    return os.environ.get(NO_CONFIG_ENV, "").strip().lower() not in _FALSE_WORDS
+
+
+def command_default(key: str) -> str | None:
+    """A saved command default as commands apply it; ``None`` under ``FLATLAS_NO_CONFIG``.
+
+    Only command defaults are ignored: the index location still comes from the
+    configuration, so scripts find the same index.
+    """
+    return None if defaults_disabled() else get_default(key)
+
+
 def list_defaults(*, include_unset: bool = False) -> dict[str, str | None]:
     """List saved settings, optionally including supported unset keys."""
     defaults = {key: get_default(key) for key in sorted(_VALIDATORS)}
@@ -151,11 +170,14 @@ def configured_database() -> Path | None:
 def resolve_database(
     explicit: Path | None = None, *, create: bool = False, require_existing: bool = True,
 ) -> Path:
-    """Locate the index: ``--db``, then ``index.dir``, then the path pinned by ``init``.
+    """Locate the index: ``--db``, ``FLATLAS_DB``, ``index.dir``, then the path pinned by ``init``.
 
-    ``index.dir`` is an explicit choice, so a missing file there means
-    "not initialized" rather than silently starting an empty index.
+    ``FLATLAS_DB`` behaves exactly like ``--db``. ``index.dir`` is an explicit
+    choice, so a missing file there means "not initialized" rather than
+    silently starting an empty index.
     """
+    if explicit is None and (from_environment := os.environ.get(DATABASE_ENV, "").strip()):
+        explicit = Path(from_environment)
     if explicit is not None:
         return explicit.expanduser().resolve()
     locations = user_paths()
