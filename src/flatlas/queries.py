@@ -816,40 +816,75 @@ def find_paths(
     itself unless ``follow_symlink`` or a trailing ``/``.
     """
     selected = _scope_row(connection, start, follow=follow_symlink)
+    root_id = int(selected["root_id"])
     start_key = bytes(selected["path_key"])
-    base = start
-    base_name = os.path.basename(start.rstrip("/")) or start
+    start_parts = start_key.count(b"\0")
+    prefix = start if start.endswith("/") else start + "/"
     max_depth = expression.max_depth
-    rows = connection.execute(
-        """WITH RECURSIVE tree(id, depth) AS (
-            SELECT ?, 0
-            UNION ALL
-            SELECT p.id, t.depth + 1 FROM tree t CROSS JOIN path p ON p.parent_path_id=t.id
-            WHERE p.state='present' AND (? IS NULL OR t.depth < ?)
+
+    start_row = connection.execute("SELECT entry_kind, mode FROM path WHERE id=?", (int(selected["id"]),)).fetchone()
+    context = FindContext()
+    if expression.min_depth == 0:
+        expression.evaluate(
+            FindEntry(start, os.path.basename(start.rstrip("/")) or start, str(start_row["entry_kind"]),
+                      start_row["mode"], 0),
+            context,
         )
-        SELECT p.path_key, p.name_raw, p.entry_kind, p.mode, t.depth
-        FROM tree t CROSS JOIN path p ON p.id=t.id
-        ORDER BY p.path_key""",
-        (int(selected["id"]), max_depth, max_depth),
-    )
-    pruned: bytes | None = None
-    for row in rows:
-        key = bytes(row["path_key"])
-        if pruned is not None and key.startswith(pruned):
-            continue
-        pruned = None
-        depth = int(row["depth"])
-        if depth == 0:
-            path, name = base, base_name
-        else:
-            relative = "/".join(os.fsdecode(part) for part in key[len(start_key):].rstrip(b"\0").split(b"\0"))
-            path = (base if base.endswith("/") else base + "/") + relative
-            name = os.fsdecode(bytes(row["name_raw"]))
-        context = FindContext()
-        if depth >= expression.min_depth:
-            expression.evaluate(FindEntry(path, name, str(row["entry_kind"]), row["mode"], depth), context)
-        yield from context.output
-        if context.prune and depth > 0:
-            pruned = key
-        elif context.prune:
+    yield from context.output
+    if context.prune or max_depth == 0:
+        return
+
+    # Path keys are NUL-terminated components, so a subtree is one contiguous
+    # range of the (root_id, path_key) index, already in GNU preorder. Walking
+    # that range needs no recursive CTE or sort, and a pruned subtree, one past
+    # -maxdepth, or one under a deleted directory is skipped by restarting the
+    # range after it instead of reading its rows.
+    upper = _subtree_upper_key(start_key)
+    lower = start_key
+    while True:
+        rows = connection.execute(
+            f"""SELECT path_key, name_raw, entry_kind, mode, state FROM path
+                WHERE root_id=? AND path_key>? {'' if upper is None else 'AND path_key<?'}
+                ORDER BY path_key""",
+            (root_id, lower) if upper is None else (root_id, lower, upper),
+        )
+        skip_to: bytes | None = None
+        leaf_skip: bytes | None = None
+        for row in rows:
+            key = bytes(row["path_key"])
+            if leaf_skip is not None and key.startswith(leaf_skip):
+                continue
+            leaf_skip = None
+            kind = str(row["entry_kind"])
+            is_directory = kind in {"root", "directory"}
+            if row["state"] != "present":
+                # The former walk descended through present rows only.
+                if is_directory:
+                    skip_to = key
+                    break
+                leaf_skip = key
+                continue
+            depth = key.count(b"\0") - start_parts
+            context = FindContext()
+            if depth >= expression.min_depth:
+                # Names never contain "/" or NUL, so one decode of the joined
+                # suffix equals decoding and joining each component.
+                path = prefix + os.fsdecode(key[len(start_key):-1].replace(b"\0", b"/"))
+                expression.evaluate(FindEntry(path, os.fsdecode(bytes(row["name_raw"])), kind, row["mode"], depth),
+                                    context)
+                yield from context.output
+            if context.prune or (max_depth is not None and depth >= max_depth):
+                if is_directory:
+                    skip_to = key
+                    break
+                leaf_skip = key
+        rows.close()
+        if skip_to is None:
             return
+        # A key ending in 0x01 is never stored (keys end in NUL), so ">" resumes right after the subtree.
+        lower = skip_to[:-1] + b"\x01"
+
+
+def _subtree_upper_key(key: bytes) -> bytes | None:
+    """Exclusive upper bound of the keys strictly under ``key`` (None for a namespace root)."""
+    return key[:-1] + b"\x01" if key else None

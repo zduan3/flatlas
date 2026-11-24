@@ -103,6 +103,7 @@ PATH 默认为当前目录，必须位于已登记的 namespace。命令实时�
 - 动作：`-print`、`-print0`、`-prune`（匹配的目录不再展开）；没有 `-print`/`-print0` 时与 GNU 一样对整个表达式隐式 `-print`。不提供 `-delete`、`-exec` 等修改或执行动作。
 - 运算符：`( )`、`!`/`-not`、`-a`/`-and`（可省略）、`-o`/`-or`，优先级同 GNU；全局选项 `-maxdepth N`、`-mindepth N`。
 - 结果是索引状态：未扫描或不完整的区域不会出现，扫描后的增删要重新扫描才反映。
+- 实现：`path_key` 由 NUL 结尾的分量拼成，起点下的子树正好是唯一索引 `(root_id, path_key)` 上的一段连续区间，且区间顺序就是上面的输出顺序。因此按区间顺序读取，不用递归 CTE，也不排序；遇到 `-prune` 命中的目录、到达 `-maxdepth` 的目录或已删除的目录时，从该子树的上界（把末尾 NUL 换成 `0x01`）重新开始区间查询，整棵子树一行都不读。打印路径对相对 key 只做一次解码。2026-11 在 380 万条目、4.6 GB 的索引上，`-type d -name build -prune` 从 41.5 s 降到 19.9 s（本地盘，CPU 为主）。
 
 典型用法是找出最外层的可重建目录再汇总：`flatlas find projects -type d \( -name build -o -name __pycache__ \) -prune -print0 | flatlas du --files0-from=- -c --freed`。
 

@@ -11,10 +11,12 @@ from flatlas.cli import app
 from flatlas.core import (
     discover_namespace,
     disk_usage,
+    find_paths,
     open_database,
     register_namespace,
     scan_directory,
 )
+from flatlas.findexpr import parse_find_expression
 
 pytestmark = [pytest.mark.query, pytest.mark.cli]
 
@@ -166,3 +168,60 @@ def test_scope_lookup_uses_the_path_key_index(tree) -> None:
         connection.close()
     # The fallback filters on path_display alone, which scans every path row.
     assert not [sql for sql in statements if "path_display=" in sql and "path_key=" not in sql]
+
+
+def test_skipped_subtrees_keep_siblings_that_share_a_prefix(tmp_path: Path) -> None:
+    # "a b" (0x20), "a-b" (0x2d) and "a.b" sort after "a" but before "a/..." would as text;
+    # skipping the key range under "a" must not swallow them.
+    source = tmp_path / "source"
+    for relative in ("a/x/deep", "a b/y", "a-b/z", "a.b", "b/w"):
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+    db = tmp_path / "index.sqlite"
+    connection = open_database(db)
+    try:
+        register_namespace(connection, discover_namespace(source))
+        scan_directory(connection, source)
+    finally:
+        connection.close()
+    assert _relative(_find(db, str(source), "-name", "a", "-prune", "-o", "-print"), source) == [
+        ".", "a b", "a b/y", "a-b", "a-b/z", "a.b", "b", "b/w",
+    ]
+    assert _relative(_find(db, str(source), "-mindepth", "1", "-maxdepth", "1"), source) == [
+        "a", "a b", "a-b", "a.b", "b",
+    ]
+    assert _relative(_find(db, str(source / "a"), "-maxdepth", "1"), source) == ["a", "a/x"]
+
+
+def test_deleted_entries_and_their_subtrees_are_not_listed(tree) -> None:
+    db, source = tree
+    for path in sorted((source / "a" / "src").rglob("*"), reverse=True):
+        path.rmdir() if path.is_dir() else path.unlink()
+    (source / "a" / "src").rmdir()
+    (source / "README.md").unlink()
+    connection = open_database(db)
+    try:
+        scan_directory(connection, source)
+    finally:
+        connection.close()
+    assert _relative(_find(db, str(source)), source) == [
+        ".", "a", "a/build", "a/build/x.o", "b", "b/build", "b/build/y.o", "link",
+    ]
+
+
+def test_find_walks_the_path_key_range_without_sorting(tree) -> None:
+    db, source = tree
+    connection = open_database(db)
+    statements: list[str] = []
+    try:
+        connection.set_trace_callback(statements.append)
+        assert len(list(find_paths(connection, str(source), parse_find_expression(["-name", "build", "-prune"])))) == 2
+        connection.set_trace_callback(None)
+        walks = [sql for sql in statements if "path_key>" in sql]
+        assert walks
+        for sql in walks:
+            plan = " | ".join(row[3] for row in connection.execute("EXPLAIN QUERY PLAN " + sql, (1, b"", b"\x01")[:sql.count("?")]))
+            assert "TEMP B-TREE" not in plan and "path_key>" in plan, plan
+    finally:
+        connection.close()
