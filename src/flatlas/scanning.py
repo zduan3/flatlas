@@ -247,17 +247,19 @@ def _ensure_ancestors(
     return scope_id
 
 
-def _mark_missing(connection: sqlite3.Connection, root_id: int, scan_id: int, scope_id: int, scope_path_id: int) -> None:
+def _mark_missing(connection: sqlite3.Connection, root_id: int, scan_id: int, scope_id: int, scope_key: bytes) -> None:
+    """Mark every present descendant of the scope not seen by this scan as deleted.
+
+    A path key is its parent's key plus one NUL-terminated name, so the scope's
+    descendants are exactly the keys in one range of the (root_id, path_key)
+    index; walking that range is about twice as fast as a recursive CTE over
+    parent links. The scope itself was observed by this scan.
+    """
+    bounds = "path_key>?" if not scope_key else "path_key>? AND path_key<?"
     connection.execute(
-        """WITH RECURSIVE descendants(id) AS (
-             SELECT id FROM path WHERE id=?
-             UNION ALL
-             SELECT p.id FROM descendants d CROSS JOIN path p ON p.parent_path_id=d.id
-           )
-           -- Unary + keeps the planner on the rowid list instead of a root-wide index scan.
-           UPDATE path SET state='deleted', deleted_by_scope_id=?, deleted_at_ns=?
-           WHERE id IN descendants AND +root_id=? AND +state='present' AND last_seen_scan_id <> ?""",
-        (scope_path_id, scope_id, now_ns(), root_id, scan_id),
+        f"""UPDATE path SET state='deleted', deleted_by_scope_id=?, deleted_at_ns=?
+            WHERE root_id=? AND {bounds} AND state='present' AND last_seen_scan_id <> ?""",
+        (scope_id, now_ns(), root_id, scope_key, *(() if not scope_key else (scope_key[:-1] + b"\x01",)), scan_id),
     )
 
 
@@ -537,6 +539,9 @@ def scan_directory(
         ))
         try:
             scope_path_id = _ensure_ancestors(connection, namespace, root_id, scan_id, scope, lazy=lazy)
+            scope_first_seen = int(connection.execute(
+                "SELECT first_seen_scan_id FROM path WHERE id=?", (scope_path_id,)
+            ).fetchone()[0])
         except OSError as exc:
             _record_error(connection, scope_id, scope_key, "stat", exc)
             connection.execute("UPDATE scan_scope SET status='failed', finished_at_ns=? WHERE id=?", (now_ns(), scope_id))
@@ -758,7 +763,11 @@ def scan_directory(
                     if shallow:
                         _mark_missing_direct_children(connection, root_id, scan_id, scope_id, scope_path_id)
                     elif refresh_before_ns is None:
-                        _mark_missing(connection, root_id, scan_id, scope_id, scope_path_id)
+                        if scope_first_seen != scan_id:
+                            # A scope first recorded by this scan had no indexed
+                            # descendants (a child row needs its parent row), so
+                            # nothing can be missing; skip the whole-subtree pass.
+                            _mark_missing(connection, root_id, scan_id, scope_id, scope_key)
                     else:
                         for directory_id in completed_directories:
                             _mark_missing_direct_children(connection, root_id, scan_id, scope_id, directory_id)

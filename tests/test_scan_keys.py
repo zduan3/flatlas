@@ -1,4 +1,4 @@
-"""Scanner-derived path keys."""
+"""Scanner-derived path keys and the key-range missing pass."""
 
 import os
 import sqlite3
@@ -58,3 +58,47 @@ def test_scanned_keys_equal_path_key_of_each_path(tmp_path: Path) -> None:
     finally:
         connection.close()
 
+
+def test_subtree_rescan_keeps_siblings_that_share_a_prefix(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    _tree(source)
+    connection = open_database(tmp_path / "index.sqlite")
+    try:
+        namespace = discover_namespace(source)
+        register_namespace(connection, namespace)
+        scan_directory(connection, source)
+        before = _present(connection)
+        (source / "a" / "x" / "deep.txt").unlink()
+        scan_directory(connection, source / "a")
+        after = _present(connection)
+        gone = path_key(namespace, source / "a" / "x" / "deep.txt")
+        assert gone in before and gone not in after
+        # "a b", "a-b" and "a.b" sort right after "a" but are not under it.
+        assert {key for key in before if key != gone} == set(after)
+    finally:
+        connection.close()
+
+
+def test_first_scan_skips_the_missing_pass_and_rescans_still_confirm(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    _tree(source)
+    connection = open_database(tmp_path / "index.sqlite")
+    statements: list[str] = []
+    try:
+        namespace = discover_namespace(source)
+        register_namespace(connection, namespace)
+        connection.set_trace_callback(statements.append)
+        scan_directory(connection, source)
+        assert not [sql for sql in statements if "SET state='deleted'" in sql]
+        statements.clear()
+        (source / "b" / "c" / "d" / "e" / "f.txt").unlink()
+        (source / "b" / "c" / "d" / "e").rmdir()
+        scan_directory(connection, source)
+        assert [sql for sql in statements if "SET state='deleted'" in sql]
+        connection.set_trace_callback(None)
+        present = _present(connection)
+        assert path_key(namespace, source / "b" / "c" / "d" / "e") not in present
+        assert path_key(namespace, source / "b" / "c" / "d" / "e" / "f.txt") not in present
+        assert path_key(namespace, source / "b" / "c" / "d") in present
+    finally:
+        connection.close()
