@@ -32,6 +32,15 @@ File Atlas 首先服务于寻找大文件、大目录和重复内容，以减少
 - 基准测试与故障注入测试。
 - 补齐 Linux 非 UTF-8、Windows 长路径/reparse tag、跨 mount/volume 策略和 allocated size 平台校准。
 
+0.2 以「自动化存储评估」为主线分批发布。场景来自 Lustre 上百万级条目的存储盘点与清理：后台扫描百万级条目、脚本生成按目录的字节与条目数概览和可重建候选、删除后同步索引并对比前后数值。0.1 的 JSON 形状与 `core.py` 不再保留，不考虑向后兼容。
+
+| 版本 | 目标 | 内容 |
+|---|---|---|
+| 0.2.0 | 脚本可以直接依赖的查询接口 | 已完成的扫描与查询性能工作（lazy 元数据、checkpoint 续扫、`find`、`du --files0-from`、批量 `rm`）；统一的机器输出约定（`jsonl`/`csv`、绝对路径、统一字段与状态词、无隐式上限、退出码）；`find` 输出条目记录并支持 `-size`/`-entries`/`-mtime`/`-status`；删除 `paths`、`export`、`core.py`；`FLATLAS_DB` 与配置隔离。见 [proposals/automation.md](proposals/automation.md) |
+| 0.2.1 | 报告脚本与清理闭环 | 稳定的只读 Python API（`flatlas.api`）；`scan --shallow --files0-from` 以重新观察确认删除。见同一提案 |
+| 0.2.2 | 降低重复评估的成本 | 按目录 mtime 的增量刷新（[proposals/incremental-refresh.md](proposals/incremental-refresh.md)）；索引存储布局（`path_display` 改为由 root 与 key 推出，约省三分之一体积，需要 migration） |
+| 0.2.x | 其余 0.2 目标 | lazy-hash 后续能力（[proposals/lazy-hash.md](proposals/lazy-hash.md)）；交互用 GNU 参数（[proposals/query-cli.md](proposals/query-cli.md)）；跨平台与数据真实性 |
+
 按优先级排列的具体条目见 [backlog](backlog.md)。
 
 ## 版本 0.3：安全执行器设计与验证

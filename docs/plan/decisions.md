@@ -31,3 +31,9 @@
 - Linux-only 的安全执行器如何与跨平台只读索引 API 分层？
 - Rust 首版使用 sidecar 还是直接 PyO3？
 - 数据库格式何时开始提供兼容性承诺与 migration policy？
+
+## 自动化与机器输出
+
+- 非 UTF-8 名字在机器输出中如何无损表示？`path` 是显示路径（不可解码字节写作 `\xNN`），不能回到文件系统或回传给 `--files0-from`。候选：额外的 `path_raw`（base64 或 hex），仅在显示路径不精确时出现。
+- 扫描前后两次结果的差异报告（清理前后对比）由 flatlas 提供，还是由脚本对比两次 `jsonl`？前者需要可查询的 scan snapshot（见「索引与历史」）。
+- 是否提供 `find -printf` 子集？`--format jsonl|csv` 已覆盖自动化需求，`-printf` 只服务于交互。
