@@ -6,7 +6,7 @@ import errno
 import os
 import sqlite3
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -243,58 +243,120 @@ def _lexical_absolute_path(value: Path) -> Path:
 
 def remove_indexed_subtree(connection: sqlite3.Connection, value: Path) -> dict[str, Any]:
     """Remove one indexed path and all indexed descendants without touching the filesystem."""
+    selected = _removal_row(connection, value)
+    summary = _remove_rows(connection, [selected])
+    return {
+        "path": display_path(_lexical_absolute_path(value)),
+        "paths_removed": summary["paths_removed"],
+        "plans_removed": summary["plans_removed"],
+    }
+
+
+def remove_indexed_subtrees(
+    connection: sqlite3.Connection,
+    values: Sequence[Path],
+    *,
+    on_error: Callable[[Path, FlatlasError], None] | None = None,
+) -> dict[str, Any]:
+    """Remove several indexed subtrees in one transaction, like ``rm -r`` on the index.
+
+    A path that is not indexed raises, or with ``on_error`` is reported there
+    and skipped. Paths nested in another requested path are removed with it.
+    Only the surviving parents and their ancestors get their summaries
+    recomputed, once for the whole batch.
+    """
+    rows = []
+    for value in values:
+        try:
+            rows.append(_removal_row(connection, value))
+        except FlatlasError as exc:
+            if on_error is None:
+                raise
+            on_error(value, exc)
+    return _remove_rows(connection, rows)
+
+
+def _removal_row(connection: sqlite3.Connection, value: Path) -> sqlite3.Row:
     absolute = _lexical_absolute_path(value)
     display = display_path(absolute)
     selected = None
+    columns = "id, root_id, parent_path_id, path_key"
     if (key := indexed_key(connection, absolute)) is not None:
         selected = connection.execute(
-            "SELECT id, root_id, parent_path_id FROM path WHERE root_id=? AND path_key=? AND path_display=?",
+            f"SELECT {columns} FROM path WHERE root_id=? AND path_key=? AND path_display=?",
             (*key, display),
         ).fetchone()
     if selected is None:
-        selected = connection.execute(
-            "SELECT id, root_id, parent_path_id FROM path WHERE path_display=?",
-            (display,),
-        ).fetchone()
+        selected = connection.execute(f"SELECT {columns} FROM path WHERE path_display=?", (display,)).fetchone()
     if selected is None:
         raise FlatlasError(f"path is not indexed: {display}")
+    return selected
 
-    path_id = int(selected["id"])
-    root_id = int(selected["root_id"])
-    parent_path_id = selected["parent_path_id"]
-    plan_ids = [
-        str(row["plan_id"])
-        for row in connection.execute(
-            """WITH RECURSIVE descendants(id) AS (
-                SELECT id FROM path WHERE id=?
-                UNION ALL
-                SELECT p.id FROM descendants d CROSS JOIN path p ON p.parent_path_id=d.id
+
+def _key_range(key: bytes) -> tuple[str, tuple[bytes, ...]]:
+    """SQL condition and parameters for ``key`` and every key under it.
+
+    A key is its parent's key plus one NUL-terminated name, so a subtree is one
+    range of the (root_id, path_key) index; 0x01 never ends a stored key.
+    """
+    # Keep it one plain range: with "path_key=? OR (...)" SQLite gave up the
+    # range and scanned the whole root for every statement (0.65 s each on a
+    # 4.8M-row index). The key itself is >= key, its descendants < the bound.
+    if not key:
+        return "path_key>=?", (key,)
+    return "path_key>=? AND path_key<?", (key, key[:-1] + b"\x01")
+
+
+def _remove_rows(connection: sqlite3.Connection, rows: list[sqlite3.Row]) -> dict[str, Any]:
+    outermost: list[sqlite3.Row] = []
+    for row in sorted(rows, key=lambda item: (int(item["root_id"]), bytes(item["path_key"]))):
+        kept = outermost[-1] if outermost else None
+        if kept is not None and kept["root_id"] == row["root_id"] and bytes(row["path_key"]).startswith(
+            bytes(kept["path_key"])
+        ):
+            continue  # inside an already selected subtree (or the same path again)
+        outermost.append(row)
+
+    plan_ids: set[str] = set()
+    for row in outermost:
+        condition, keys = _key_range(bytes(row["path_key"]))
+        plan_ids.update(
+            str(found["plan_id"])
+            for found in connection.execute(
+                f"""SELECT DISTINCT po.plan_id FROM plan_operation po
+                    JOIN path p ON p.id IN (po.canonical_path_id, po.replacement_path_id)
+                    WHERE p.root_id=? AND {condition.replace("path_key", "p.path_key")}""",
+                (row["root_id"], *keys),
             )
-            SELECT DISTINCT po.plan_id FROM plan_operation po
-            WHERE po.canonical_path_id IN descendants OR po.replacement_path_id IN descendants""",
-            (path_id,),
         )
-    ]
+    removed_paths = 0
     with connection:
         if plan_ids:
-            placeholders = ", ".join("?" for _ in plan_ids)
-            connection.execute(f"DELETE FROM plan WHERE id IN ({placeholders})", plan_ids)
-        connection.execute(
-            """WITH RECURSIVE descendants(id) AS (
-                SELECT id FROM path WHERE id=?
-                UNION ALL
-                SELECT p.id FROM descendants d CROSS JOIN path p ON p.parent_path_id=d.id
-            )
-            DELETE FROM path WHERE id IN descendants""",
-            (path_id,),
-        )
-        removed_paths = int(connection.execute("SELECT changes()").fetchone()[0])
-        if parent_path_id is not None:
-            from flatlas.summaries import refresh_directory_summaries
+            ordered = sorted(plan_ids)
+            placeholders = ", ".join("?" for _ in ordered)
+            connection.execute(f"DELETE FROM plan WHERE id IN ({placeholders})", ordered)
+        for row in outermost:
+            condition, keys = _key_range(bytes(row["path_key"]))
+            cursor = connection.execute(f"DELETE FROM path WHERE root_id=? AND {condition}", (row["root_id"], *keys))
+            removed_paths += cursor.rowcount
+        # Only the surviving parents and their ancestors change; every other
+        # directory keeps its cached totals, which these are computed from.
+        affected: set[int] = set()
+        pending = [int(row["parent_path_id"]) for row in outermost if row["parent_path_id"] is not None]
+        while pending:
+            path_id = pending.pop()
+            if path_id in affected:
+                continue
+            affected.add(path_id)
+            parent = connection.execute("SELECT parent_path_id FROM path WHERE id=?", (path_id,)).fetchone()
+            if parent is not None and parent["parent_path_id"] is not None:
+                pending.append(int(parent["parent_path_id"]))
+        if affected:
+            from flatlas.summaries import refresh_finished_directories
 
-            refresh_directory_summaries(connection, root_id, int(parent_path_id))
+            refresh_finished_directories(connection, sorted(affected), {})
     return {
-        "path": display,
+        "scopes": len(outermost),
         "paths_removed": removed_paths,
         "plans_removed": len(plan_ids),
     }

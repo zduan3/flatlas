@@ -36,6 +36,7 @@ from flatlas.paths import (
     path_key,
     register_namespace,
     remove_indexed_subtree,
+    remove_indexed_subtrees,
 )
 from flatlas.planning import create_dry_run_plan, list_plans, plan_operations
 from flatlas.queries import (

@@ -52,6 +52,7 @@ from flatlas.core import (
     query_paths,
     register_namespace,
     remove_indexed_subtree,
+    remove_indexed_subtrees,
     resume_selection,
     resume_selection_from_scan,
     scan_directory,
@@ -897,12 +898,46 @@ def paths_command(
 
 @app.command("rm")
 def rm(
-    path: Annotated[Path, typer.Argument(help="Indexed path to remove recursively from the index only.")],
+    paths: Annotated[
+        list[Path] | None, typer.Argument(help="Indexed paths to remove recursively from the index only.")
+    ] = None,
+    files0_from: Annotated[
+        str | None,
+        typer.Option(
+            "--files0-from", metavar="FILE",
+            help="Read NUL-separated PATHs from FILE ('-' for stdin), e.g. the list just deleted on disk.",
+        ),
+    ] = None,
     db: db_option = None,
 ) -> None:
-    """Remove an indexed path subtree; never checks or changes filesystem entries."""
+    """Remove indexed path subtrees; never checks or changes filesystem entries.
+
+    One PATH prints that path's counts; several PATHs or --files0-from remove
+    them in one transaction and print the totals. A PATH that is not indexed is
+    reported and skipped, and the exit status is then 1.
+    """
+    if files0_from is not None:
+        if paths:
+            raise FlatlasError("--files0-from cannot be combined with PATH arguments")
+        names, failed = _files0_names(files0_from)
+        targets = [Path(name) for name in names]
+    else:
+        if not paths:
+            raise FlatlasError("rm needs a PATH or --files0-from")
+        targets, failed = list(paths), False
     with _connection(db) as connection:
-        _print(remove_indexed_subtree(connection, path))
+        if files0_from is None and len(targets) == 1:
+            _print(remove_indexed_subtree(connection, targets[0]))
+            return
+
+        def report(_value: Path, exc: FlatlasError) -> None:
+            nonlocal failed
+            typer.echo(f"error: {exc}", err=True)
+            failed = True
+
+        _print(remove_indexed_subtrees(connection, targets, on_error=report))
+    if failed:
+        raise typer.Exit(1)
 
 @app.command("du")
 def du(
@@ -956,17 +991,7 @@ def du(
     if files0_from is not None:
         if paths:
             raise FlatlasError("--files0-from cannot be combined with PATH arguments")
-        scopes = []
-        for number, name in enumerate(_read_files0(files0_from), start=1):
-            # Like GNU du: report a bad name with its position and keep going.
-            if not name:
-                typer.echo(f"error: {files0_from}:{number}: invalid zero-length file name", err=True)
-                failed = True
-            elif files0_from == "-" and name == "-":
-                typer.echo("error: when reading file names from stdin, no file name of '-' allowed", err=True)
-                failed = True
-            else:
-                scopes.append(name)
+        scopes, failed = _files0_names(files0_from)
     else:
         scopes = paths or ["."]
     with _connection(db, write=False) as connection, shared_path_resolution():
@@ -998,6 +1023,22 @@ def du(
             )
     if failed:
         raise typer.Exit(1)
+
+
+def _files0_names(source: str) -> tuple[list[str], bool]:
+    """Valid names from ``--files0-from``; like GNU du, bad names are reported with their position and skipped."""
+    names = []
+    failed = False
+    for number, name in enumerate(_read_files0(source), start=1):
+        if not name:
+            typer.echo(f"error: {source}:{number}: invalid zero-length file name", err=True)
+            failed = True
+        elif source == "-" and name == "-":
+            typer.echo("error: when reading file names from stdin, no file name of '-' allowed", err=True)
+            failed = True
+        else:
+            names.append(name)
+    return names, failed
 
 
 def _read_files0(source: str) -> list[str]:
