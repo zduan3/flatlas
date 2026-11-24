@@ -81,13 +81,17 @@ class ResumeSelection:
     scope: Path
 
 
-def _observation(namespace: Namespace, value: Path, *, root: bool = False, lazy: bool = False) -> Observation:
+def _observation(
+    namespace: Namespace, value: Path, *, root: bool = False, lazy: bool = False, key: bytes | None = None,
+) -> Observation:
     # Classify from this single lstat. Extra islink/is_dir/is_file probes would
     # repeat the metadata request per entry, which is the dominant scan cost on
     # network filesystems such as Lustre. lstat never follows the final link, so
     # S_ISDIR/S_ISREG here match the former is_dir()/is_file() after the symlink
     # check. ``lazy`` (Lustre roots) reads metadata without forcing a size
-    # resynchronisation; see flatlas.lazystat.
+    # resynchronisation; see flatlas.lazystat. ``key`` is the path key when the
+    # caller already has it (the scanner extends its parent's key): path_key()
+    # re-splits the whole relative path, which cost ~80 us per deep entry.
     stat = lazy_lstat(value) if lazy else value.lstat()
     mode = stat.st_mode
     reparse = bool(getattr(stat, "st_file_attributes", 0) & getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
@@ -117,7 +121,7 @@ def _observation(namespace: Namespace, value: Path, *, root: bool = False, lazy:
         except OSError as exc:
             allocation_error = exc
     return Observation(
-        path=value, key=path_key(namespace, value),
+        path=value, key=path_key(namespace, value) if key is None else key,
         name=b"" if root else os.fsencode(value.name), kind=kind,
         device=_sqlite_integer(getattr(stat, "st_dev", None)), inode=_sqlite_integer(getattr(stat, "st_ino", None)),
         mode=mode, uid=getattr(stat, "st_uid", None), gid=getattr(stat, "st_gid", None),
@@ -613,6 +617,7 @@ def scan_directory(
     def visit(
         directory: Path,
         directory_id: int,
+        directory_key: bytes,
     ) -> None:
         nonlocal files_seen, dirs_seen, logical_bytes_seen, failed
         maybe_checkpoint()
@@ -642,7 +647,9 @@ def scan_directory(
                     child_path = Path(str(child["path_display"]))
                     try:
                         with timer.phase("observe"):
-                            child_observed = _observation(namespace, child_path, lazy=lazy)
+                            child_observed = _observation(
+                                namespace, child_path, lazy=lazy, key=bytes(child["path_key"])
+                            )
                     except FileNotFoundError:
                         # The child was known when the parent was last
                         # enumerated. Re-enumerate the parent before
@@ -664,7 +671,7 @@ def scan_directory(
                                 connection, root_id, scan_id, child_observed, parent_id=directory_id
                             )
                         dirs_seen += 1
-                        visit(child_path, child_id)
+                        visit(child_path, child_id, child_observed.key)
                     pending_finished.append(directory_id)
                     return
         report("scanning", directory)
@@ -672,18 +679,19 @@ def scan_directory(
             with timer.phase("readdir"):
                 entries = list(os.scandir(directory))
         except OSError as exc:
-            _record_error(connection, scope_id, path_key(namespace, directory), "enumerate", exc)
+            _record_error(connection, scope_id, directory_key, "enumerate", exc)
             failed = True
             return
         directory_complete = True
         for entry in entries:
             maybe_checkpoint()
             entry_path = Path(entry.path)
+            entry_key = directory_key + os.fsencode(entry.name) + b"\0"
             try:
                 with timer.phase("observe"):
-                    observed = _observation(namespace, entry_path, lazy=lazy)
+                    observed = _observation(namespace, entry_path, lazy=lazy, key=entry_key)
             except OSError as exc:
-                _record_error(connection, scope_id, path_key(namespace, entry_path), "stat", exc)
+                _record_error(connection, scope_id, entry_key, "stat", exc)
                 failed = True
                 directory_complete = False
                 continue
@@ -696,7 +704,7 @@ def scan_directory(
             if observed.kind == "directory":
                 dirs_seen += 1
                 if not shallow:
-                    visit(entry_path, path_id)
+                    visit(entry_path, path_id, entry_key)
             elif observed.kind == "file":
                 files_seen += 1
                 logical_bytes_seen += observed.logical_size or 0
@@ -724,7 +732,7 @@ def scan_directory(
 
     cancelled = False
     try:
-        visit(scope, scope_path_id)
+        visit(scope, scope_path_id, scope_key)
     except KeyboardInterrupt:
         cancelled = True
     except ScanTakenOverError:
