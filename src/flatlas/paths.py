@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from flatlas.db import _last_insert_id, now_ns
-from flatlas.errors import FlatlasError
+from flatlas.errors import FlatlasError, PathError
 from flatlas.mounts import filesystem_type
 
 
@@ -29,7 +29,7 @@ class Namespace:
 def discover_namespace(value: Path) -> Namespace:
     path = value.expanduser().resolve()
     if not path.exists():
-        raise FlatlasError(f"path does not exist: {path}")
+        raise PathError(f"path does not exist: {path}")
     if os.name == "nt":
         anchor = Path(path.anchor)
         return Namespace(anchor, "windows", "windows_volume", os.fsencode(str(anchor)))
@@ -211,7 +211,7 @@ def indexed_key(connection: sqlite3.Connection, value: Path) -> tuple[int, bytes
 
 _SCOPE_ROW_SELECT = """SELECT p.id, p.root_id, p.path_key, p.parent_path_id, p.state,
                   p.last_seen_scan_id, p.first_seen_scan_id, p.path_display, p.entry_kind,
-                  p.logical_size, p.allocated_size,
+                  p.logical_size, p.allocated_size, p.mtime_ns,
                   r.root_path_display
         FROM path p JOIN root r ON r.id=p.root_id"""
 
@@ -232,7 +232,7 @@ def _scope_row(connection: sqlite3.Connection, value: Path | str, *, follow: boo
             f"{_SCOPE_ROW_SELECT} WHERE p.path_display=? AND p.state='present'", (display,)
         ).fetchone()
     if row is None:
-        raise FlatlasError(f"path is not currently indexed: {display}")
+        raise PathError(f"path is not currently indexed: {display}")
     return row
 
 
@@ -289,7 +289,7 @@ def _removal_row(connection: sqlite3.Connection, value: Path) -> sqlite3.Row:
     if selected is None:
         selected = connection.execute(f"SELECT {columns} FROM path WHERE path_display=?", (display,)).fetchone()
     if selected is None:
-        raise FlatlasError(f"path is not indexed: {display}")
+        raise PathError(f"path is not indexed: {display}")
     return selected
 
 

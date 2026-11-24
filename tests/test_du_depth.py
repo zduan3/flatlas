@@ -45,9 +45,9 @@ def tree(tmp_path: Path):
 
 
 def _du(db: Path, *args: str) -> list[dict]:
-    result = CliRunner().invoke(app, ["du", "--format", "json", "--db", str(db), *args])
+    result = CliRunner().invoke(app, ["du", "--format", "jsonl", "--db", str(db), *args])
     assert result.exit_code == 0, result.output
-    return json.loads(result.stdout)
+    return [json.loads(line) for line in result.stdout.splitlines()]
 
 
 def test_entries_count_every_kind_including_the_directory(tree) -> None:
@@ -83,7 +83,7 @@ def test_total_counts_only_the_arguments(tree) -> None:
     db, source = tree
     rows = _du(db, "-d", "1", "-c", str(source / "big"), str(source / "many"))
     total = rows[-1]
-    assert total["path"] == "total"
+    assert (total["type"], total["path"]) == ("total", None)
     assert (total["files"], total["entries"]) == (7, 4 + 6)
 
 

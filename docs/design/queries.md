@@ -6,18 +6,39 @@
 
 - 除 `ls` 的一层实时枚举和 `df` 的实时容量查询外，查询只读取 SQLite 索引，不隐式遍历或更新文件系统；源目录离线时仍可使用。`dupes` 是唯一会读取文件内容的查询，且不改变 scan coverage。
 - 当前状态查询只使用 `state='present'` 的路径；deleted tombstone 不参与 `find`、`du`、`largest` 或 `dupes`。
-- 未知值在表格中显示 `-`，在 JSON/CSV 中为 `null` / 空值，不能伪装为 0。
-- 用户可预期错误（未初始化、路径未索引、namespace 未登记、参数非法等）输出 `error: ...` 并返回退出码 2，不输出 traceback。
-- JSON/CSV 字段稳定、可解析；二进制 digest 以 hex 输出；`--output PATH` 写入文件（自动创建父目录）。
+- 未知值在表格中显示 `-`，在机器输出中为 `null` / 空值，不能伪装为 0。
+- 退出码：0 所有参数成功；1 某个 PATH 无法使用（未索引、不存在、无法列出），多 PATH 命令照常输出其余参数；2 用法或其他领域错误（未初始化、namespace 未登记、参数非法等）。错误一律写 stderr，以 `error: ` 开头，不输出 traceback。结果是否完整看每行的 `status` 与 `complete_through_ns`，不改变退出码。
+- `--output PATH` 把输出写入文件（自动创建父目录）。
 - `--db PATH` 只是全局索引位置的显式覆盖。
 - 按路径定位条目（`du`、`find`、`ls` 等的 PATH，`scans PATH`、`rm PATH`）时，由已登记 root 的路径算出 `(root_id, path_key)` 走唯一索引；`path_display` 没有索引，只在这样查不到时（如非 UTF-8 名字）回退按显示路径全表查找。
 - PATH 的父级分量与 `realpath` 一样逐级解析 symlink。`du`、`find` 一条命令内按目录前缀记忆解析结果，同一前缀只 `lstat` 一次（`--files0-from` 给出数万个同一棵树下的路径时，逐个 `realpath` 会把公共祖先反复 stat；Lustre 上 2.97 万个路径 61 万次 `lstat`、21 s → 3.2 万次）；结果与 `Path.resolve()` 相同，含 symlink 环报错，`..` 跟在 symlink 后时仍交给 `resolve()`。记忆只在单条命令内有效。
 - 只读查询命令（`du`、`find`、`ls`、`largest`、`scans` 等）整条命令在一个读事务内执行：看到同一快照，且 WAL 与库文件的锁只取一次。逐条自动提交时每条语句都要重新加解锁，Lustre 以 `flock` 挂载时每次加锁都是一次元数据服务器往返（`du` 3000 个路径 5.7 s → 0.5 s）。长时间输出的查询（如大子树的 `find`）期间写入者照常提交，只是 WAL checkpoint 不能越过该快照。
 - `flatlas --version` 输出正在运行的包版本；可访问源码仓库时附加 Git 提交、提交日期和 `dirty` 状态，否则回退为纯包版本。该命令无需初始化或打开索引数据库。
 
+### 机器输出
+
+- 返回多行的命令（`du`、`ls`、`find`、`largest`、`dupes`、`scans`、`roots`、`df`、`plan show`）用 `--format table|jsonl|csv`；返回单个结果的命令（`scan`、`scan-info`、`rm`、`init`）用 `--format table|json`。默认都是 `table`，不按是否为终端自动切换。
+- `jsonl` 每行一个 JSON 记录，边产生边写出；`csv` 的列与记录字段一一对应，即使没有行也输出表头，列表值写成 JSON。每条记录的 `type` 标明记录种类。
+- 机器格式没有隐式行数上限：`largest` 的 10 行、`scans` 的 50 行只是表格的默认值，`-n/--limit` 显式给出时才对机器格式生效。
+- 路径一律是绝对显示路径；表格才按命令显示为相对形式（`du` 相对当前目录、`largest` 与 `dupes` 相对 PATH、`ls` 只显示名字）。大小为字节整数，时间为 `*_ns` 整数，二进制 digest 为 hex。
+- `du`、`ls`、`largest` 输出同一种条目记录（`type: entry`），字段依次为：
+
+  | 字段 | 含义 |
+  |---|---|
+  | `path` | 绝对显示路径 |
+  | `kind` | `file`、`dir`（含 namespace root）、`symlink`、`reparse`、`other` |
+  | `status` | `ok`、`new`、`part`、`gone`，与表格相同的词，含义见 `ls` 一节 |
+  | `logical_size`、`allocated_size` | 目录为子树合计；特殊条目未知 |
+  | `files`、`entries` | 子树普通文件数与条目数（含自身）；普通文件为 1、1，特殊条目为 `null`、1 |
+  | `mtime_ns` | 条目自身的修改时间 |
+  | `complete_through_ns` | 目录为子树 freshness 下界 `subtree_complete_through_ns`；其它条目为父目录最近一次完整枚举的时间；未覆盖为 `null` |
+  | `depth` | 相对所在 PATH 的层数，PATH 自身为 0；`ls` 的直接条目为 1 |
+
+  `du --freed` 在其后追加 `unique_*`、`freed_*` 与 `unknown_link_files`。`du -c` 的汇总行为 `type: total`、`path: null`。
+
 ### 大小显示
 
-`ls -h`、`du -h` 和 `largest -h`（长选项 `--human-readable`）按 GNU coreutils 的 `-h` 规则显示表格大小：以 1024 为底、单位 `K` 至 `E`、一律向上取整（大小不会被低估），小于 10 时保留一位小数（如 `1.0K`、`1.5M`、`12G`）；小于 1024 的值显示字节整数，未知值显示 `-`。`roots -h` 与 `df -h` 使用同一规则。大小表头省略 `(B)`；文件数、状态不缩放，JSON/CSV 仍输出原始字节整数。
+`ls -h`、`du -h` 和 `largest -h`（长选项 `--human-readable`）按 GNU coreutils 的 `-h` 规则显示表格大小：以 1024 为底、单位 `K` 至 `E`、一律向上取整（大小不会被低估），小于 10 时保留一位小数（如 `1.0K`、`1.5M`、`12G`）；小于 1024 的值显示字节整数，未知值显示 `-`。`roots -h` 与 `df -h` 使用同一规则。大小表头省略 `(B)`；文件数、状态不缩放，机器输出仍是原始字节整数。
 
 表格按 Unicode 显示宽度对齐。`ALLOC(B)` 列在至少一行占用已知时显示，未知行显示 `-`；全部未知时隐藏此列。
 
@@ -36,17 +57,17 @@ dupes    scope 内的重复内容候选
 
 ## `ls [PATH]`
 
-PATH 默认为当前目录，必须位于已登记的 namespace。命令实时枚举 PATH 的直接条目（文件、目录和特殊条目，包含名称以 `.` 开头的真实条目，不合成 `.` 与 `..`），对每个条目做一次 `lstat`，并与索引中该目录的 present 直接子项和目录汇总缓存合并。结果按名称排序，最后一列只显示条目名称。实时枚举或条目检查发生权限、I/O 等错误时命令以退出码 2 失败，不通过缺行暗示目录不存在。
+PATH 默认为当前目录，必须位于已登记的 namespace。命令实时枚举 PATH 的直接条目（文件、目录和特殊条目，包含名称以 `.` 开头的真实条目，不合成 `.` 与 `..`），对每个条目做一次 `lstat`，并与索引中该目录的 present 直接子项和目录汇总缓存合并。结果按名称排序，最后一列只显示条目名称。实时枚举或条目检查发生权限、I/O 等错误时命令以退出码 1 失败，不通过缺行暗示目录不存在。
 
 表格列为 `T`、`S`、`LOGICAL(B)`、`N`、可用时的 `ALLOC(B)`、`SCANNED-THROUGH` 和 `NAME`：
 
 - `T`：条目类型首字母（`d` 目录、`f` 普通文件、`s` symlink、`r` reparse point、`o` 其他）。
 - `LOGICAL(B)`：普通文件为实时 stat 得到的自身 logical size；目录为索引中以它为根的普通文件递归 logical size（来自目录汇总缓存）；特殊条目为未知。flatlas 有意不显示 GNU `ls -l` 中目录对象自身的 `st_size`（常见为 4 KiB），因为它不代表内容总量。
-- `N`：目录为递归普通文件数；普通文件和特殊条目在表格中显示 `-`（JSON/CSV 中普通文件的 `files` 为 1，特殊条目为 `null`）。
+- `N`：目录为递归普通文件数；普通文件和特殊条目在表格中显示 `-`（机器输出中普通文件的 `files` 为 1，特殊条目为 `null`）。
 - `ALLOC(B)`：普通文件为实时采集的占用空间，目录为缓存中的递归占用汇总。
-- `SCANNED-THROUGH`：目录子树 freshness 下界 `subtree_complete_through_ns`，含义与时间格式见 [扫描与目录汇总](scanning.md#目录汇总缓存)；非目录为 `-`。
+- `SCANNED-THROUGH`：目录子树 freshness 下界（机器输出的 `complete_through_ns`），含义与时间格式见 [扫描与目录汇总](scanning.md#目录汇总缓存)；非目录在表格中为 `-`。
 
-`S` 状态（JSON/CSV `status` 字段对应 `scanned` / `unscanned` / `incomplete` / `missing`）：
+`S` 状态（机器输出的 `status` 使用同样的词）：
 
 - `ok`：最近覆盖该条目的 scope 为 completed，或未完成扫描已完整覆盖它，且实时条目与当前索引均为 present、类型一致。
 - `new`：实时存在，但没有当前有效的扫描覆盖（未索引、类型变化或没有覆盖它的 scope）。
@@ -71,29 +92,29 @@ PATH 默认为当前目录，必须位于已登记的 namespace。命令实时�
 
 - 已索引目录或 namespace root：读取目录汇总缓存中的 `subtree_files`、`subtree_logical_size` 与 `subtree_allocated_size`。
 - 已索引普通文件：`N=1`，大小为索引中的文件大小。
-- 已索引的特殊条目（FIFO、socket、设备文件、未跟随的 symlink 等）：文件数与大小均为未知（表格 `-`，JSON/CSV `null`），与 `ls` 一致。扫描不记录它们自身的大小，不能显示为 0。
+- 已索引的特殊条目（FIFO、socket、设备文件、未跟随的 symlink 等）：文件数与大小均为未知（表格 `-`，机器输出 `null`），与 `ls` 一致。扫描不记录它们自身的大小，不能显示为 0。
 - 已登记 namespace 内实际存在但尚未索引的目录：显示 `new`，文件数和大小为未知值；多路径查询仍保留其他已索引路径的汇总。其他未索引路径报错。
 
-表格列为 `S`、`SIZE(B)`（logical bytes）、`N`（普通文件数）、`E`（条目数）、可用时的 `ALLOC(B)` 与 `PATH`（相对当前目录）。`E` 统计全部类型的条目（含目录、symlink、特殊条目）并包含目录自身，与 GNU `du --inodes` 一致，用于定位 inode 配额压力；文件与特殊条目为 1，未索引目录未知。`SIZE`、`N`、`ALLOC` 按路径计数：同一 inode 的每条 hardlink 路径都计一次（相当于 GNU `du -l`），因为它们直接读取目录汇总缓存。
+表格列为 `S`、`SIZE(B)`（logical bytes）、`N`（普通文件数）、`E`（条目数）、可用时的 `ALLOC(B)` 与 `PATH`（表格中相对当前目录，机器输出为绝对路径）。`E` 统计全部类型的条目（含目录、symlink、特殊条目）并包含目录自身，与 GNU `du --inodes` 一致，用于定位 inode 配额压力；文件与特殊条目为 1，未索引目录未知。`SIZE`、`N`、`ALLOC` 按路径计数：同一 inode 的每条 hardlink 路径都计一次（相当于 GNU `du -l`），因为它们直接读取目录汇总缓存。
 
 `--freed` 增加两列，需要递归遍历 scope（约 60 万条目时约 10 s）：
 
 - `UNIQ(B)`：scope 内每个 `(device, inode)` 只计一次，相当于 GNU `du` 默认口径。
 - `FREED(B)`：只计索引中链接数（`nlink`）全部落在 scope 内的 inode，即删除整个 scope 后实际释放的空间；有链接在 scope 外（含索引范围外）的 inode 不计入。`nlink` 未记录的文件不计入，数量见 `unknown_link_files`。
-- 两列有 `ALLOC` 时按 allocated size，否则按 logical size；JSON/CSV 同时给出 `unique_logical_size`、`unique_allocated_size`、`freed_logical_size`、`freed_allocated_size` 和 `freed_files`（释放的 inode 数）。
+- 两列有 `ALLOC` 时按 allocated size，否则按 logical size；机器输出同时给出 `unique_logical_size`、`unique_allocated_size`、`freed_logical_size`、`freed_allocated_size` 和 `freed_files`（释放的 inode 数）。
 - 依据是最近一次扫描记录的 `nlink`；扫描之后在 scope 外新增或删除的链接不会反映出来。
 
 深度展开与排序（都只读目录汇总缓存，不递归遍历文件）：
 
-- `-d N`/`--max-depth N`：每个 PATH 之后按路径顺序（父目录在前）列出 N 层以内的已索引子目录；JSON/CSV 的 `depth` 为相对 PATH 的层数，PATH 自身为 0。与 GNU `du` 的后序输出不同。
+- `-d N`/`--max-depth N`：每个 PATH 之后按路径顺序（父目录在前）列出 N 层以内的已索引子目录；记录的 `depth` 为相对 PATH 的层数，PATH 自身为 0。与 GNU `du` 的后序输出不同。
 - `--sort size|alloc|files|entries|freed`：按 logical size、allocated size、文件数、条目数或 `FREED`（需 `--freed`）降序排列全部行，未知值排在最后。
 - `-n N`/`--limit N`：排序后保留前 N 行，例如 `du -d 3 --sort entries -n 20 ~/data` 列出条目最多的 20 个目录。
 
 `--files0-from FILE` 从 FILE（`-` 为 stdin）读取以 NUL 分隔的 PATH（末尾 NUL 可省略），与 GNU `du` 相同：不能再同时给 PATH 参数；空文件名按 `FILE:序号` 报错、从 stdin 读时名为 `-` 的项报错，均跳过该项、其余照常输出，最后退出码 1。用于汇总 `find ... -print0` 给出的大量路径，例如 `flatlas find projects -type d -name build -prune -print0 | flatlas du --files0-from=- -c --freed`；`-c` 与 `--freed` 的并集合计因此不会被 xargs 分批拆开。
 
-`-c`/`--total` 在最后加一行 `total`：`SIZE`、`N`、`E`、`ALLOC` 是各 PATH 行（不含 `-d` 展开的子目录）按路径的和（任一行未知则未知，参数重叠时会重复计数）；与 `--freed` 同用时，`UNIQ`、`FREED` 按全部参数的并集计算，重叠部分只计一次，回答“这些路径一起删能腾出多少”。
+`-c`/`--total` 在最后加一行 `total`（机器输出为 `type: total` 的记录）：`SIZE`、`N`、`E`、`ALLOC` 是各 PATH 行（不含 `-d` 展开的子目录）按路径的和（任一行未知则未知，参数重叠时会重复计数）；与 `--freed` 同用时，`UNIQ`、`FREED` 按全部参数的并集计算，重叠部分只计一次，回答“这些路径一起删能腾出多少”。
 
-状态列与 `ls` 一样使用 `ok` / `new` / `part`，JSON/CSV 的 `status` 字段对应 `scanned` / `unscanned` / `incomplete`；`du` 不提供 `ls` 现场枚举得出的 `gone`。最近覆盖目标的 scope 为 completed 时显示 `ok`；最近覆盖它的 scan 未完成时，目录及其全部当前子目录都已在该 scan 中完整枚举才显示 `ok`（`--refresh-before` 扫描中改用子树 freshness 与 cutoff 比较）。目录的 `part` 状态可以附带最后已知聚合，但该值可能不完整或过期。
+状态列与 `ls` 一样使用 `ok` / `new` / `part`；`du` 不提供 `ls` 现场枚举得出的 `gone`。最近覆盖目标的 scope 为 completed 时显示 `ok`；最近覆盖它的 scan 未完成时，目录及其全部当前子目录都已在该 scan 中完整枚举才显示 `ok`（`--refresh-before` 扫描中改用子树 freshness 与 cutoff 比较）。目录的 `part` 状态可以附带最后已知聚合，但该值可能不完整或过期。
 
 ## `find [PATH ...] [EXPRESSION]`
 
@@ -111,7 +132,7 @@ PATH 默认为当前目录，必须位于已登记的 namespace。命令实时�
 
 ## `largest [PATH]`
 
-PATH 默认为当前目录，必须是当前已索引的文件或目录 scope。只列 scope 内 present 普通文件，按 logical size 降序、路径升序稳定排序；默认返回 10 项，`-n` 是 `--limit` 的短别名。路径相对于 PATH 显示。表格只显示 `SIZE(B)`（使用 `-h` 时为 `SIZE`）和 `PATH`，不显示 allocated 列；JSON/CSV 含 `root_id`、`logical_size`、`allocated_size` 与 `path`。
+PATH 默认为当前目录，必须是当前已索引的文件或目录 scope。只列 scope 内 present 普通文件，按 logical size 降序、路径升序稳定排序；表格默认显示 10 项，机器格式默认不限，`-n` 是 `--limit` 的短别名。表格只显示 `SIZE(B)`（使用 `-h` 时为 `SIZE`）和相对 PATH 的路径，不显示 allocated 列；机器输出为条目记录（`depth` 相对 PATH）。
 
 ## `roots`
 
@@ -126,7 +147,7 @@ ID  TYPE    METADATA  FILES  LOGICAL(B)  SCAN  STATUS     SCANNED       ROOT
 - `METADATA`：扫描该 root 时采用的元数据方式，`lazy`（Lustre，见 [扫描与目录汇总](scanning.md#lustre-上的-lazy-元数据)）或 `exact`。由记录的类型决定，不检测当前挂载。
 - `FILES`、`LOGICAL(B)`：namespace root 目录汇总中的已索引普通文件数与 logical size；尚未扫描时为 `-`。`-h` 缩放大小列，规则同 `ls` / `du`。
 - `SCAN`、`STATUS`、`SCANNED`：该 root 最近一次 scan 的 ID、状态与结束时间（未结束时为开始时间），时间格式同 `ls` 的 `SCANNED-THROUGH`。
-- JSON/CSV 输出 `id`、`root_path_display`、`platform`、`namespace_kind`、`filesystem_type`、`metadata`、`enabled`、`created_at_ns`、`updated_at_ns`、`files`、`logical_size`、`allocated_size`、`last_scan_id`、`last_scan_status`、`last_scan_started_at_ns`、`last_scan_finished_at_ns`；未知为 `null`。
+- 机器输出为 `type: root` 的记录：`id`、`path`、`platform`、`namespace_kind`、`filesystem_type`、`metadata`、`enabled`、`created_at_ns`、`updated_at_ns`、`files`、`logical_size`、`allocated_size`、`last_scan_id`、`last_scan_status`、`last_scan_started_at_ns`、`last_scan_finished_at_ns`；未知为 `null`。
 
 ## `df [FILE ...]`
 
@@ -142,7 +163,7 @@ mgs@tcp:/fs1             lustre  325T  284T    42T   88%  /lustre/fs1
 - `Filesystem` 为挂载表中的来源（设备或远端路径），取不到时为挂载点；`-T` 增加 `Type` 列（挂载表中的实时类型）。
 - 默认列为 `1K-blocks`、`Used`、`Available`，按 1024 bytes 向上取整；`-h` 改为 `Size`、`Used`、`Avail`，规则见上文大小显示。
 - `Used` 为 total − free，`Available` 为非特权用户可用空间；`Use%` = ⌈used ÷ (used + available)⌉，与 GNU 相同，因此 `Used + Available` 可以小于总量。
-- 容量不可访问时显示 `-`，JSON/CSV 为 `null` 且 `status=unavailable`；可访问时 `status` 为 `ok`，root 被禁用时为 `disabled`。JSON/CSV 字段为 `filesystem`、`type`、`blocks_1k`、`used_1k`、`available_1k`、`use_percent`、`mounted_on`、`status`。
+- 容量不可访问时显示 `-`，机器输出为 `null` 且 `status=unavailable`；可访问时 `status` 为 `ok`，root 被禁用时为 `disabled`。机器输出为 `type: filesystem` 的记录：`filesystem`、`fstype`、`blocks_1k`、`used_1k`、`available_1k`、`use_percent`、`mounted_on`、`status`。
 - 容量不缓存进 SQLite，`df` 不承诺离线可用。filesystem used 与 `du` 的 indexed allocated 汇总不是同一指标，两者差值不能解释为“未索引文件”或“可回收空间”。
 
 ## `rm PATH...` / `rm --files0-from FILE`
@@ -154,20 +175,20 @@ mgs@tcp:/fs1             lustre  325T  284T    42T   88%  /lustre/fs1
 - 删除后只重算仍存在的父目录及其祖先的汇总（由各子目录已缓存的汇总得出），不重算父目录下的其它子树。
 - 子树按 `path_key` 区间删除：后代 key 以该路径 key 为前缀，即唯一索引上的一段区间。条件必须保持单一区间（`path_key>=? AND path_key<?`）；写成 `path_key=? OR (...)` 时 SQLite 放弃区间、每条语句扫整个 root。
 - 多个 PATH 或 `--files0-from`（格式同 `du`）时在一个事务内删除，嵌套的路径随外层一起删除，未索引的 PATH 写 stderr 并跳过、最后退出码 1；汇总只在最后对所有受影响的父目录与祖先重算一次。用于文件系统上批量删除后同步索引，例如 `flatlas find ... -prune -print0 > list`，按 list 删除文件后 `flatlas rm --files0-from list`。2026-11 实测 2.97 万个目录、122 万行 36 s；此前逐个 `rm` 每次都重算父目录整棵子树，在 79 万条目的目录下删一个子目录就要重算整个该目录。
-- 输出 JSON：单个 PATH 为 `path`、`paths_removed`、`plans_removed`；批量为 `scopes`（实际删除的最外层路径数）、`paths_removed`、`plans_removed`。
+- 输出（`--format table|json`）：单个 PATH 为 `path`、`paths_removed`、`plans_removed`；批量为 `scopes`（实际删除的最外层路径数）、`paths_removed`、`plans_removed`。
 
 ## `scans [PATH]` 与 `scan-info ID`
 
 两个命令只读取索引中的扫描审计记录，不访问文件内容。
 
-- `scans [PATH]` 每个 scope 一行，按 scan ID 降序，默认最多 50 行（`--limit`），格式为表格（默认）、JSON 或 CSV。表格列为 `ID`、`STATUS`、`STARTED`、`FINISHED`（本地时区 ISO 8601）、`FILES`、`DIRS`、`ERRORS`、`SCOPE`；scope 路径不在索引中时显示 `key:<hex>`。JSON/CSV 另含 `kind`、`duration_ns`、`refresh_before_ns`、`scanner_version`、`note`、scope 状态与计数等字段。
+- `scans [PATH]` 每个 scope 一行，按 scan ID 降序；表格默认最多 50 行，机器格式默认不限（`-n/--limit`）。表格列为 `ID`、`STATUS`、`STARTED`、`FINISHED`（本地时区 ISO 8601）、`FILES`、`DIRS`、`ERRORS`、`SCOPE`；scope 路径不在索引中时显示 `key:<hex>`。机器输出为 `type: scan` 的记录，另含 `kind`、`duration_ns`、`refresh_before_ns`、`scanner_version`、`note`、scope 状态与计数等字段。
 - PATH 过滤同时包含覆盖该路径的祖先 scope 和位于该路径下的子树 scope；PATH 可以尚未索引，但必须位于已登记的 namespace。
-- `scan-info ID` 以 JSON 展示单次 scan 的字段、分阶段计时 `stats`（见 [分阶段计时](scanning.md#分阶段计时)）、全部 scope（含状态、时间、计数）以及 `scan_error` 明细（路径、operation、错误码与消息）。
+- `scan-info ID` 展示（表格为 `key: value` 行，`--format json` 为一个 JSON 对象）单次 scan 的字段、分阶段计时 `stats`（见 [分阶段计时](scanning.md#分阶段计时)）、全部 scope（含状态、时间、计数）以及 `scan_error` 明细（路径、operation、错误码与消息）。
 
 ## `plan create` / `plan show`
 
 - `plan create --root PATH`：PATH 所属 namespace 必须已登记。命令使用该 root 内当前已缓存的 `full_ready` 重复组（不读取文件、不计算新的 hash，需要先运行 `dupes`），为每组按路径字典序选第一条路径为 canonical，其余每条路径生成一个 `hardlink` 操作（状态 `planned`；已是 canonical 的 hardlink alias 的路径跳过），记录预期 size、digest、算法和前置条件；plan 状态为 `dry_run`，创建即不可变（`immutable_at_ns`），`source_scan_id` 为该 root 最近一次 scan。stdout 只打印 plan ID。
-- `plan show`：无 ID 时列出 plan 摘要（root、状态、时间、操作数和按预期 size 求和的理论节省量）；给出 ID 时列出该 plan 的操作明细。格式为 JSON（默认）或 CSV。
+- `plan show`：无 ID 时列出 plan 摘要（root、状态、时间、操作数和按预期 size 求和的理论节省量）；给出 ID 时列出该 plan 的操作明细。格式为表格（默认）、`jsonl` 或 `csv`，记录类型分别为 `plan` 与 `operation`。
 
 plan 是候选建议快照，不构成删除或替换授权；flatlas 没有 `apply`，不执行任何 operation。
 

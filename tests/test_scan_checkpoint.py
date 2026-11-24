@@ -133,7 +133,7 @@ def test_killed_scan_keeps_checkpoints_and_resumes_from_them(tmp_path: Path) -> 
         # Directories finished before the kill are pruned: only the scope and the rest are listed.
         assert resumed["stats"]["phases"]["readdir"]["calls"] <= 1 + 5 - 2
         [total] = disk_usage(connection, scope=source)
-        assert total["status"] == "scanned"
+        assert total["status"] == "ok"
     finally:
         connection.close()
 

@@ -40,9 +40,9 @@ def test_du_reports_special_entries_as_unknown(tmp_path: Path) -> None:
     finally:
         connection.close()
 
-    result = CliRunner().invoke(app, ["du", "--db", str(db), "--format", "json", str(fifo)])
+    result = CliRunner().invoke(app, ["du", "--db", str(db), "--format", "jsonl", str(fifo)])
     assert result.exit_code == 0, result.output
-    [payload] = json.loads(result.output)
+    [payload] = [json.loads(line) for line in result.output.splitlines()]
     assert payload["files"] is None and payload["logical_size"] is None
     table = CliRunner().invoke(app, ["du", "--db", str(db), str(fifo)])
     assert table.exit_code == 0, table.output
@@ -86,9 +86,9 @@ def test_du_does_not_follow_a_symlink_argument_by_default(linked_index) -> None:
 def test_du_dereference_args_follows_the_symlink(linked_index) -> None:
     db, _source, link = linked_index
     for flag in ("-D", "-H", "--dereference-args"):
-        result = CliRunner().invoke(app, ["du", flag, "--db", str(db), "--format", "json", str(link)])
+        result = CliRunner().invoke(app, ["du", flag, "--db", str(db), "--format", "jsonl", str(link)])
         assert result.exit_code == 0, result.output
-        [payload] = json.loads(result.stdout)
+        [payload] = [json.loads(line) for line in result.stdout.splitlines()]
         assert (payload["files"], payload["logical_size"]) == (1, 4)
 
 
@@ -96,9 +96,9 @@ def test_du_reports_a_failing_argument_and_continues(linked_index, tmp_path: Pat
     db, source, _link = linked_index
     outside = tmp_path / "missing"
     result = CliRunner().invoke(
-        app, ["du", "--db", str(db), "--format", "json", str(outside), str(source / "real")]
+        app, ["du", "--db", str(db), "--format", "jsonl", str(outside), str(source / "real")]
     )
     assert result.exit_code == 1
     assert "missing" in result.stderr
-    [payload] = json.loads(result.stdout)
+    [payload] = [json.loads(line) for line in result.stdout.splitlines()]
     assert (payload["files"], payload["logical_size"]) == (1, 4)

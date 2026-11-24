@@ -32,7 +32,7 @@ File Atlas (flatlas) 是跨平台、持久化且只读的文件系统索引工�
 - 实现按职责拆分在 `src/flatlas/` 的 `db.py`、`paths.py`、`scanning.py`（及 `summaries.py`、`refresh.py`）、`allocation.py`、`hashing.py`、`queries.py`、`planning.py`、`output.py`、`config.py`、`cli.py` 中；测试与调用方直接引用这些模块（0.1 的 `core.py` facade 已删除）。新增功能可以在职责清晰时拆分模块，但应保留公开 CLI 行为和数据库语义。
 - 用户可预期错误抛出 `FlatlasError`，由 `flatlas.cli.main()` 统一渲染为 `error: ...` 并返回退出码 2；不得给普通输入错误输出 traceback。
 - 新 CLI 命令默认只读；若未来增加风险操作，必须先有独立设计、明确 approval/dry-run、执行前重验与审计。
-- JSON/CSV 输出要稳定、可解析；二进制 digest 输出为 hex，不能依赖 Python `bytes` 的 repr。
+- 机器输出（`jsonl` / `csv` / 单对象 `json`）按 [查询命令](docs/design/queries.md#机器输出) 的约定：绝对路径、统一字段与状态词、无隐式上限；二进制 digest 输出为 hex，不能依赖 Python `bytes` 的 repr。
 - 任何 Windows 路径链接在回复中使用正斜杠。
 
 ## 依赖、测试与交付

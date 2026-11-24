@@ -22,6 +22,10 @@ from flatlas.scanning import scan_directory
 pytestmark = [pytest.mark.hash, pytest.mark.allocation]
 
 
+def _records(text: str) -> list[dict]:
+    return [json.loads(line) for line in text.splitlines()]
+
+
 @pytest.mark.parametrize("cached", [False, True])
 def test_dupes_filters_zero_allocation_before_grouping_and_hashing(tmp_path: Path, monkeypatch, cached: bool) -> None:
     source = tmp_path / "source"
@@ -78,21 +82,24 @@ def test_dupes_filters_zero_allocation_before_grouping_and_hashing(tmp_path: Pat
         connection.close()
 
     runner = CliRunner()
-    for format in ("table", "json", "csv"):
+    for format in ("table", "jsonl", "csv"):
         result = runner.invoke(app, ["dupes", str(source), "--format", format, "--db", str(database)])
         assert result.exit_code == 0, result.output
-        assert "mixed-positive" in result.stdout
-        assert "mixed-unknown" in result.stdout
-        assert "zero" not in result.stdout
-        assert "singleton" not in result.stdout
-        if format == "json":
-            assert json.loads(result.stdout)["hash"]["candidate_files"] == 2
+        if format == "jsonl":
+            hash_record, *groups = _records(result.stdout)
+            assert hash_record["candidate_files"] == 2
+            names = {Path(path).name for group in groups for path in group["paths"]}
         elif format == "csv":
-            assert next(iter(csv.DictReader(result.stdout.splitlines())))["count"] == "2"
+            rows = list(csv.DictReader(result.stdout.splitlines()))
+            assert rows[0]["count"] == "2"
+            names = {Path(path).name for row in rows for path in json.loads(row["paths"])}
+        else:
+            names = {line.strip() for line in result.stdout.splitlines() if line.startswith("    ")}
+        assert names == {"mixed-positive", "mixed-unknown"}
     output = tmp_path / "dupes.json"
-    result = runner.invoke(app, ["dupes", str(source), "--format", "json", "--output", str(output), "--db", str(database)])
+    result = runner.invoke(app, ["dupes", str(source), "--format", "jsonl", "--output", str(output), "--db", str(database)])
     assert result.exit_code == 0, result.output
-    assert json.loads(output.read_text(encoding="utf-8"))["groups"][0]["count"] == 2
+    assert _records(output.read_text(encoding="utf-8"))[1]["count"] == 2
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="native Windows resident file metadata")
@@ -108,11 +115,11 @@ def test_native_resident_duplicates_are_skipped(tmp_path: Path) -> None:
     with open_database(database) as connection:
         register_namespace(connection, discover_namespace(source))
         assert scan_directory(connection, source)["status"] == "completed"
-    result = CliRunner().invoke(app, ["dupes", str(source), "--format", "json", "--db", str(database)])
+    result = CliRunner().invoke(app, ["dupes", str(source), "--format", "jsonl", "--db", str(database)])
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.stdout)
-    assert payload["hash"]["candidate_files"] == 0
-    assert payload["hash"]["content_files_read"] == 0
-    assert payload["groups"] == []
+    hash_record, *groups = _records(result.stdout)
+    assert hash_record["candidate_files"] == 0
+    assert hash_record["content_files_read"] == 0
+    assert groups == []
     with open_database(database) as connection:
         assert connection.execute("SELECT count(*) FROM file_hash").fetchone()[0] == 0

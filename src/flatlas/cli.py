@@ -10,7 +10,7 @@ import sqlite3
 import sys
 import time
 import unicodedata
-from collections.abc import Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -31,20 +31,28 @@ from flatlas.db import (
     open_database_readonly,
 )
 from flatlas.duplicate_filters import DuplicateFilters
-from flatlas.errors import FlatlasError
+from flatlas.errors import FlatlasError, PathError
 from flatlas.findexpr import is_expression_start, parse_find_expression
 from flatlas.hashing import (
     HashProgress,
     HashSummary,
     ensure_duplicate_hashes,
 )
-from flatlas.output import export_rows
+from flatlas.output import (
+    OBJECT_FORMATS,
+    ROW_FORMATS,
+    check_format,
+    write_object,
+    write_records,
+)
 from flatlas.paths import (
     discover_namespace,
+    display_path,
     get_root,
     register_namespace,
     remove_indexed_subtree,
     remove_indexed_subtrees,
+    scope_path,
     shared_path_resolution,
 )
 from flatlas.planning import (
@@ -65,6 +73,19 @@ from flatlas.queries import (
     list_scans,
     scan_info,
 )
+from flatlas.records import (
+    ENTRY_FIELDS,
+    FILESYSTEM_FIELDS,
+    FREED_FIELDS,
+    GROUP_FIELDS,
+    NEW,
+    OK,
+    OPERATION_FIELDS,
+    PART,
+    PLAN_FIELDS,
+    ROOT_FIELDS,
+    SCAN_FIELDS,
+)
 from flatlas.refresh import parse_refresh_before
 from flatlas.scanning import (
     ScanProgress,
@@ -81,8 +102,10 @@ max_size_option = Annotated[int | None, typer.Option("--max-size", min=0, help="
 min_count_option = Annotated[int, typer.Option("--min-count", min=2, help="Minimum number of paths in a full-hash group.")]
 min_savings_option = Annotated[int, typer.Option("--min-savings", min=0, help="Minimum theoretical logical savings per group in bytes (inclusive).")]
 group_limit_option = Annotated[int | None, typer.Option("--limit", "-n", min=1, help="Maximum groups after filtering and sorting by theoretical savings.")]
-table_format_option = Annotated[str, typer.Option("--format", help="Output format: table, json, or csv.")]
-data_format_option = Annotated[str, typer.Option("--format", help="Output format: json or csv.")]
+table_format_option = Annotated[
+    str, typer.Option("--format", help="Output format: table, jsonl (one JSON record per line), or csv.")
+]
+object_format_option = Annotated[str, typer.Option("--format", help="Output format: table or json.")]
 output_option = Annotated[Path | None, typer.Option("--output", help="Write output to this file instead of stdout.")]
 human_readable_option = Annotated[
     bool, typer.Option("-h", "--human-readable", help="Show table sizes in GNU -h style (1024-based, rounded up).")
@@ -246,13 +269,19 @@ def _connection(db: Path | None, *, create: bool = False, write: bool = True) ->
         connection.close()
 
 
-def _print(rows: object, fmt: str = "json", output: Path | None = None) -> None:
-    if not isinstance(rows, list):
-        typer.echo(json.dumps(rows, ensure_ascii=False, indent=2, default=str))
+def _print_object(value: dict[str, Any], fmt: str = "table", output: Path | None = None) -> None:
+    """A single result: ``key: value`` lines, or one JSON object."""
+    check_format(fmt, OBJECT_FORMATS)
+    if fmt == "json":
+        write_object(value, output)
         return
-    rendered = export_rows(rows, fmt, output)
-    if output is None:
-        typer.echo(rendered, nl=False)
+
+    def scalar(item: object) -> str:
+        if isinstance(item, (dict, list)):
+            return json.dumps(item, ensure_ascii=False, default=str)
+        return "-" if item is None else str(item)
+
+    _emit("".join(f"{key}: {scalar(item)}\n" for key, item in value.items()), output)
 
 
 def _emit(rendered: str, output: Path | None) -> None:
@@ -264,14 +293,15 @@ def _emit(rendered: str, output: Path | None) -> None:
     output.write_text(rendered, encoding="utf-8", newline="")
 
 
-def _print_machine(rows: list[dict[str, Any]], fmt: str, output: Path | None = None) -> bool:
-    """Print JSON/CSV and return True; return False for ``table``; reject other formats."""
-    if fmt in {"json", "csv"}:
-        _print(rows, fmt, output)
-        return True
-    if fmt != "table":
-        raise FlatlasError("format must be table, json or csv")
-    return False
+def _print_machine(
+    rows: Iterable[dict[str, Any]], fmt: str, fields: Sequence[str], output: Path | None = None
+) -> bool:
+    """Write JSON Lines/CSV records and return True; return False for ``table``."""
+    check_format(fmt, ROW_FORMATS)
+    if fmt == "table":
+        return False
+    write_records(rows, fmt, fields, output)
+    return True
 
 
 def _format_size(value: object, *, human_readable: bool = False) -> str:
@@ -309,16 +339,21 @@ def _usage_total(rows: list[dict[str, Any]]) -> dict[str, Any]:
         return None if any(value is None for value in values) else sum(values)
 
     statuses = {row["status"] for row in rows}
-    status = "scanned" if statuses == {"scanned"} else "unscanned" if statuses == {"unscanned"} else "incomplete"
+    status = OK if statuses == {OK} else NEW if statuses == {NEW} else PART
     return {
-        "files": summed("files"),
-        "entries": summed("entries"),
-        "logical_size": summed("logical_size"),
-        "allocated_size": summed("allocated_size"),
-        "status": status,
-        "depth": None,
-        "path": "total",
+        "type": "total", "path": None, "kind": None, "status": status,
+        "logical_size": summed("logical_size"), "allocated_size": summed("allocated_size"),
+        "files": summed("files"), "entries": summed("entries"),
+        "mtime_ns": None, "complete_through_ns": None, "depth": None,
     }
+
+
+def _relative_display(path: str, base: Path) -> str:
+    try:
+        return os.path.relpath(path, base)
+    except ValueError:
+        # Windows cannot express a relative path across drive letters.
+        return path
 
 
 def _group_copies(group: dict[str, Any]) -> str:
@@ -328,10 +363,12 @@ def _group_copies(group: dict[str, Any]) -> str:
 
 
 def _print_usage(
-    rows: list[dict[str, object]],
+    rows: list[dict[str, Any]],
     fmt: str,
     output: Path | None,
     *,
+    display: Callable[[dict[str, Any]], str],
+    fields: Sequence[str] = ENTRY_FIELDS,
     include_kind: bool = False,
     include_status: bool = False,
     name_column: bool = False,
@@ -341,7 +378,7 @@ def _print_usage(
     include_entries: bool = False,
     human_readable: bool = False,
 ) -> None:
-    if _print_machine(rows, fmt, output):
+    if _print_machine(rows, fmt, fields, output):
         return
 
     show_allocated = any(row["allocated_size"] is not None for row in rows)
@@ -361,16 +398,15 @@ def _print_usage(
     if include_scanned_through:
         headers.append("SCANNED-THROUGH")
     listing_time_ns = time.time_ns() if include_scanned_through else None
-    value_column = "name" if name_column else "path"
-    headers.append(value_column.upper())
+    headers.append("NAME" if name_column else "PATH")
     table_rows: list[list[str]] = []
     for row in rows:
-        fields = [str(row["entry_kind"])[0]] if include_kind else []
+        fields = [str(row["kind"])[0]] if include_kind else []
         if include_status:
-            fields.append({"scanned": "ok", "unscanned": "new", "incomplete": "part", "missing": "gone"}[str(row["status"])])
+            fields.append(str(row["status"]))
         fields.extend([
             _format_size(row["logical_size"], human_readable=human_readable),
-            "-" if row["files"] is None or (include_kind and row["entry_kind"] == "file") else str(row["files"]),
+            "-" if row["files"] is None or (include_kind and row["kind"] == "file") else str(row["files"]),
         ])
         if include_entries:
             fields.append("-" if row.get("entries") is None else str(row["entries"]))
@@ -382,14 +418,15 @@ def _print_usage(
                 for kind in ("unique", "freed")
             )
         if include_scanned_through:
-            scanned_through = row["subtree_complete_through_ns"]
+            # A subtree property; a file's own coverage is its parent's.
+            scanned_through = row["complete_through_ns"] if row["kind"] == "dir" else None
             fields.append(
                 _format_ls_timestamp_ns(
                     scanned_through if isinstance(scanned_through, int) else None,
                     now_ns=listing_time_ns,
                 )
             )
-        fields.append(str(row[value_column]))
+        fields.append(display(row))
         table_rows.append(fields)
 
     leading_columns = int(include_kind) + int(include_status)
@@ -399,18 +436,19 @@ def _print_usage(
 
 
 def _print_largest_files(
-    rows: list[dict[str, object]],
+    rows: list[dict[str, Any]],
     fmt: str,
     output: Path | None,
     *,
+    base: Path,
     human_readable: bool = False,
 ) -> None:
-    if _print_machine(rows, fmt, output):
+    if _print_machine(rows, fmt, ENTRY_FIELDS, output):
         return
 
     headers = ["SIZE" if human_readable else "SIZE(B)", "PATH"]
     table_rows = [
-        [_format_size(row["logical_size"], human_readable=human_readable), str(row["path"])]
+        [_format_size(row["logical_size"], human_readable=human_readable), _relative_display(row["path"], base)]
         for row in rows
     ]
 
@@ -507,9 +545,10 @@ def _format_ls_timestamp_ns(value: int | None, *, now_ns: int | None = None) -> 
     return f"{month_and_day}  {local.year}"
 
 
-def _print_scans(rows: list[dict[str, Any]], fmt: str) -> None:
-    if _print_machine(rows, fmt):
+def _print_scans(rows: list[dict[str, Any]], fmt: str, *, limit: int | None) -> None:
+    if _print_machine(rows, fmt, SCAN_FIELDS):
         return
+    rows = rows[:50 if limit is None else limit]
     headers = ["ID", "STATUS", "STARTED", "FINISHED", "FILES", "DIRS", "ERRORS", "SCOPE"]
     values = [
         [
@@ -624,51 +663,33 @@ class _HashProgressDisplay(_ProgressLine):
         self._show(line, progress.phase)
 
 
-def _duplicate_display_paths(
-    groups: list[dict[str, Any]],
-    scope: Path,
-    *,
-    absolute: bool,
-) -> list[dict[str, Any]]:
-    if absolute:
-        return groups
-    base = scope.expanduser().resolve()
-    return [
-        {
-            **group,
-            "paths": [
-                {
-                    **path,
-                    "path_display": os.path.relpath(path["path_display"], base),
-                }
-                for path in group["paths"]
-            ],
-        }
-        for group in groups
-    ]
-
-
 def _print_duplicate_groups(
     groups: list[dict[str, Any]],
     fmt: str,
     output: Path | None,
     hash_summary: HashSummary,
+    *,
+    base: Path | None,
 ) -> None:
-    if fmt == "json":
-        rendered = json.dumps(
-            {"hash": hash_summary.as_dict(), "groups": groups},
-            ensure_ascii=False,
-            indent=2,
-            default=str,
-        ) + "\n"
-        _emit(rendered, output)
-        return
-    if fmt == "csv":
-        rows = [{**hash_summary.as_dict(), **group} for group in groups]
-        _print(rows, fmt, output)
-        return
+    """``base`` relativizes table paths; machine output always has absolute paths."""
+    check_format(fmt, ROW_FORMATS)
     if fmt != "table":
-        raise FlatlasError("format must be table, json or csv")
+        records = [
+            {"type": "group", **{key: group[key] for key in GROUP_FIELDS[1:-1]},
+             "paths": [path["path_display"] for path in group["paths"]]}
+            for group in groups
+        ]
+        if fmt == "jsonl":
+            # The hash summary first: it says whether the groups are complete.
+            records = [{"type": "hash", **hash_summary.as_dict()}, *records]
+        write_records(records, fmt, GROUP_FIELDS, output)
+        return
+    if base is not None:
+        groups = [
+            {**group, "paths": [{**path, "path_display": _relative_display(path["path_display"], base)}
+                                for path in group["paths"]]}
+            for group in groups
+        ]
 
     redundant_files = sum(int(group["inodes"]) - 1 for group in groups)
     theoretical_savings = sum(int(group["theoretical_savings"]) for group in groups)
@@ -714,7 +735,7 @@ def _warn_incomplete_hashes(summary: HashSummary) -> None:
 
 
 def _print_df(rows: list[dict[str, object]], fmt: str, *, human_readable: bool, print_type: bool) -> None:
-    if _print_machine(rows, fmt):
+    if _print_machine(rows, fmt, FILESYSTEM_FIELDS):
         return
 
     def size(blocks_1k: object) -> str:
@@ -728,7 +749,7 @@ def _print_df(rows: list[dict[str, object]], fmt: str, *, human_readable: bool, 
     table_rows = [
         [
             str(row["filesystem"]),
-            *([str(row["type"] or "-")] if print_type else []),
+            *([str(row["fstype"] or "-")] if print_type else []),
             size(row["blocks_1k"]),
             size(row["used_1k"]),
             size(row["available_1k"]),
@@ -742,7 +763,7 @@ def _print_df(rows: list[dict[str, object]], fmt: str, *, human_readable: bool, 
 
 
 def _print_roots(rows: list[dict[str, Any]], fmt: str, *, human_readable: bool) -> None:
-    if _print_machine(rows, fmt):
+    if _print_machine(rows, fmt, ROOT_FIELDS):
         return
     table_rows = [
         [
@@ -754,7 +775,7 @@ def _print_roots(rows: list[dict[str, Any]], fmt: str, *, human_readable: bool) 
             "-" if row["last_scan_id"] is None else str(row["last_scan_id"]),
             row["last_scan_status"] or "-",
             _format_ls_timestamp_ns(row["last_scan_finished_at_ns"] or row["last_scan_started_at_ns"]),
-            row["root_path_display"],
+            row["path"],
         ]
         for row in rows
     ]
@@ -766,13 +787,18 @@ def _print_roots(rows: list[dict[str, Any]], fmt: str, *, human_readable: bool) 
 @app.command()
 def init(
     path: Annotated[Path, typer.Argument(help="A path on the filesystem/volume to register.")] = Path("."),
+    format: object_format_option = "table",
     db: db_option = None,
 ) -> None:
     """Initialize global configuration and register a filesystem without scanning it."""
+    check_format(format, OBJECT_FORMATS)
     with _connection(db, create=True) as connection:
         namespace = discover_namespace(path)
         root_id = register_namespace(connection, namespace)
-    typer.echo(f"registered filesystem {namespace.path} as root {root_id}; no files were scanned")
+    if format == "json":
+        write_object({"root_id": root_id, "path": display_path(namespace.path)})
+    else:
+        typer.echo(f"registered filesystem {namespace.path} as root {root_id}; no files were scanned")
 
 
 @app.command("roots")
@@ -838,6 +864,7 @@ def scan(
             help="Re-list only PATH's direct entries and confirm the missing ones; subdirectories are not entered.",
         ),
     ] = False,
+    format: object_format_option = "table",
     db: db_option = None,
 ) -> None:
     """Scan metadata for a complete namespace or one subtree and update the persistent index."""
@@ -851,6 +878,7 @@ def scan(
         raise typer.BadParameter("PATH must be omitted with --resume-from; the scan scope is read from the record")
     if resume_from is None and path is None:
         raise typer.BadParameter("PATH is required unless --resume-from is used")
+    check_format(format, OBJECT_FORMATS)
     cutoff = None
     if not (resume or resume_from is not None or full or shallow):
         value = refresh_before if refresh_before is not None else get_default("scan.refresh-before")
@@ -870,31 +898,36 @@ def scan(
             # Without a terminal the line is never drawn; skip the per-entry callback.
             on_progress=progress.update if progress.enabled else None,
         )
-    _print(result)
+    _print_object(result, format)
 
 
 @app.command("scans")
 def scans_command(
     path: Annotated[Path | None, typer.Argument(help="Optional path whose related scan scopes are listed.")] = None,
-    limit: Annotated[int, typer.Option("--limit", min=1)] = 50,
+    limit: Annotated[
+        int | None, typer.Option("--limit", "-n", min=1, help="Keep the newest N scopes; the table shows 50 by default.")
+    ] = None,
     format: table_format_option = "table",
     db: db_option = None,
 ) -> None:
     """List scan and scope audit records without accessing file contents."""
+    check_format(format, ROW_FORMATS)
     with _connection(db, write=False) as connection:
-        rows = list_scans(connection, scope=path, limit=limit)
-    _print_scans(rows, format)
+        rows = list_scans(connection, scope=path, limit=limit if limit is not None or format != "table" else 50)
+    _print_scans(rows, format, limit=limit)
 
 
 @app.command("scan-info")
 def scan_info_command(
     scan_id: Annotated[int, typer.Argument(min=1, help="Scan ID to inspect.")],
+    format: object_format_option = "table",
     db: db_option = None,
 ) -> None:
-    """Show one scan with its scopes and recorded errors as JSON."""
+    """Show one scan with its stage timings, scopes and recorded errors."""
+    check_format(format, OBJECT_FORMATS)
     with _connection(db, write=False) as connection:
         result = scan_info(connection, scan_id)
-    _print(result)
+    _print_object(result, format)
 
 
 @app.command("rm")
@@ -909,6 +942,7 @@ def rm(
             help="Read NUL-separated PATHs from FILE ('-' for stdin), e.g. the list just deleted on disk.",
         ),
     ] = None,
+    format: object_format_option = "table",
     db: db_option = None,
 ) -> None:
     """Remove indexed path subtrees; never checks or changes filesystem entries.
@@ -917,6 +951,7 @@ def rm(
     them in one transaction and print the totals. A PATH that is not indexed is
     reported and skipped, and the exit status is then 1.
     """
+    check_format(format, OBJECT_FORMATS)
     if files0_from is not None:
         if paths:
             raise FlatlasError("--files0-from cannot be combined with PATH arguments")
@@ -928,7 +963,7 @@ def rm(
         targets, failed = list(paths), False
     with _connection(db) as connection:
         if files0_from is None and len(targets) == 1:
-            _print(remove_indexed_subtree(connection, targets[0]))
+            _print_object(remove_indexed_subtree(connection, targets[0]), format)
             return
 
         def report(_value: Path, exc: FlatlasError) -> None:
@@ -936,7 +971,7 @@ def rm(
             typer.echo(f"error: {exc}", err=True)
             failed = True
 
-        _print(remove_indexed_subtrees(connection, targets, on_error=report))
+        _print_object(remove_indexed_subtrees(connection, targets, on_error=report), format)
     if failed:
         raise typer.Exit(1)
 
@@ -987,6 +1022,7 @@ def du(
     sort_key = _DU_SORT_KEYS.get(sort) if sort is not None else None
     if sort is not None and (sort_key is None or (sort == "freed" and not freed)):
         raise FlatlasError("--sort must be size, alloc, files, entries, or freed with --freed")
+    check_format(format, ROW_FORMATS)
     rows: list[dict[str, Any]] = []
     failed = False
     if files0_from is not None:
@@ -1018,9 +1054,12 @@ def du(
         if total_row is not None:
             rows.append(total_row)
         if rows or not failed:
+            base = Path.cwd()
             _print_usage(
                 rows, format, output, include_status=True, include_entries=True,
                 human_readable=human_readable, include_freed=freed,
+                fields=(*ENTRY_FIELDS, *FREED_FIELDS) if freed else ENTRY_FIELDS,
+                display=lambda row: "total" if row["type"] == "total" else _relative_display(row["path"], base),
             )
     if failed:
         raise typer.Exit(1)
@@ -1106,11 +1145,13 @@ def ls_command(
     LOGICAL(B)=file bytes or indexed directory bytes; N=file count; ALLOC(B)=allocated bytes.
     SCANNED-THROUGH=oldest successful directory scan in an indexed subtree, not a snapshot.
     """
+    check_format(format, ROW_FORMATS)
     with _connection(db, write=False) as connection:
         _print_usage(
             list_child_directories(connection, scope=path),
             format,
             output,
+            display=lambda row: os.path.basename(row["path"]),
             include_kind=True,
             include_status=True,
             logical_header=True,
@@ -1123,23 +1164,30 @@ def ls_command(
 @app.command("largest")
 def largest(
     path: Annotated[Path, typer.Argument(help="Indexed file or directory scope.")] = Path("."),
-    limit: Annotated[int, typer.Option("--limit", "-n", min=1)] = 10,
+    limit: Annotated[
+        int | None, typer.Option("--limit", "-n", min=1, help="Keep the N largest; the table shows 10 by default.")
+    ] = None,
     human_readable: human_readable_option = False,
     format: table_format_option = "table",
     output: output_option = None,
     db: db_option = None,
 ) -> None:
     """List the largest currently indexed files."""
-    with _connection(db, write=False) as connection:
-        _print_largest_files(
-            largest_files(connection, scope=path, limit=limit), format, output, human_readable=human_readable
-        )
+    check_format(format, ROW_FORMATS)
+    if limit is None and format == "table":
+        limit = 10
+    with _connection(db, write=False) as connection, shared_path_resolution():
+        rows = largest_files(connection, scope=path, limit=limit)
+        base = scope_path(path)
+    _print_largest_files(rows, format, output, base=base, human_readable=human_readable)
 
 
 @app.command("dupes")
 def dupes(
     path: Annotated[Path, typer.Argument(help="Indexed directory whose duplicate groups are listed.")] = Path("."),
-    absolute: Annotated[bool, typer.Option("--absolute", help="Show absolute paths instead of paths relative to PATH.")] = False,
+    absolute: Annotated[
+        bool, typer.Option("--absolute", help="Show absolute paths in the table; machine output always does.")
+    ] = False,
     format: table_format_option = "table",
     output: output_option = None,
     db: db_option = None,
@@ -1151,11 +1199,12 @@ def dupes(
 ) -> None:
     """List full-hash duplicate groups within an indexed directory."""
     filters = DuplicateFilters(min_size, max_size, min_count, min_savings, limit)
+    check_format(format, ROW_FORMATS)
     with _connection(db) as connection, _HashProgressDisplay(enabled=_stderr_is_tty()) as hash_progress:
         hash_summary = ensure_duplicate_hashes(connection, path, on_progress=hash_progress.update, filters=filters)
-        groups = _duplicate_display_paths(duplicate_groups(connection, scope=path, filters=filters), path, absolute=absolute)
+        groups = duplicate_groups(connection, scope=path, filters=filters)
     _warn_incomplete_hashes(hash_summary)
-    _print_duplicate_groups(groups, format, output, hash_summary)
+    _print_duplicate_groups(groups, format, output, hash_summary, base=None if absolute else scope_path(path))
 
 
 plan_app = typer.Typer(help="Create and inspect immutable dry-run plans; never applies filesystem changes.")
@@ -1179,13 +1228,26 @@ def plan_create(
 @plan_app.command("show")
 def plan_show(
     plan_id: Annotated[str | None, typer.Argument(help="Plan ID to inspect; omit to list plan summaries.")] = None,
-    format: data_format_option = "json",
+    format: table_format_option = "table",
     output: output_option = None,
     db: db_option = None,
 ) -> None:
+    """Show one plan's operations, or a summary of every plan."""
+    check_format(format, ROW_FORMATS)
     with _connection(db, write=False) as connection:
         rows = plan_operations(connection, plan_id) if plan_id is not None else list_plans(connection)
-        _print(rows, format, output)
+    fields = OPERATION_FIELDS if plan_id is not None else PLAN_FIELDS
+    if _print_machine(rows, format, fields, output):
+        return
+    columns = [field for field in fields if field != "type"]
+    _emit(
+        _render_table(
+            [column.upper() for column in columns],
+            [["-" if row[column] is None else str(row[column]) for column in columns] for row in rows],
+            set(),
+        ),
+        output,
+    )
 
 
 def _raise_keyboard_interrupt(signum: int, frame: object) -> None:
@@ -1214,6 +1276,9 @@ def main() -> int:
     _route_termination_signals()
     try:
         app()
+    except PathError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        return 1
     except FlatlasError as exc:
         typer.echo(f"error: {exc}", err=True)
         return 2

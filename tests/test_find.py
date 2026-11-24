@@ -117,12 +117,13 @@ def test_print0_feeds_du_files0_from(tree, monkeypatch) -> None:
     listing = source.parent / "builds.lst"
     listing.write_bytes(found.stdout_bytes)
     usage = CliRunner().invoke(
-        app, ["du", "--db", str(db), "--files0-from", str(listing), "-c", "--format", "json"]
+        app, ["du", "--db", str(db), "--files0-from", str(listing), "-c", "--format", "jsonl"]
     )
     assert usage.exit_code == 0, usage.output
-    rows = json.loads(usage.stdout)
-    assert [(row["path"], row["logical_size"]) for row in rows] == [
-        ("a/build", 100), ("b/build", 1000), ("total", 1100),
+    rows = [json.loads(line) for line in usage.stdout.splitlines()]
+    assert [(row["type"], row["path"], row["logical_size"]) for row in rows] == [
+        ("entry", str(source / "a" / "build"), 100), ("entry", str(source / "b" / "build"), 1000),
+        ("total", None, 1100),
     ]
     piped = CliRunner().invoke(app, ["du", "--db", str(db), "--files0-from=-", "-c"], input=found.stdout_bytes)
     assert piped.exit_code == 0 and "total" in piped.stdout
@@ -133,11 +134,11 @@ def test_files0_from_reports_bad_names_and_keeps_going(tree, tmp_path: Path) -> 
     listing = tmp_path / "bad.lst"
     a, b = str(source / "a"), str(source / "b")
     listing.write_bytes(f"{a}\0\0{b}".encode())  # an empty second name, no final NUL
-    result = CliRunner().invoke(app, ["du", "--db", str(db), "--files0-from", str(listing), "-c", "--format", "json"])
+    result = CliRunner().invoke(app, ["du", "--db", str(db), "--files0-from", str(listing), "-c", "--format", "jsonl"])
     assert result.exit_code == 1
     assert f"{listing}:2: invalid zero-length file name" in result.stderr
-    rows = json.loads(result.stdout)
-    assert [Path(row["path"]).name for row in rows] == ["a", "b", "total"]
+    rows = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [row["path"] for row in rows] == [a, b, None]
     assert rows[-1]["logical_size"] == 130 + 1000
 
     piped = CliRunner().invoke(app, ["du", "--db", str(db), "--files0-from=-"], input=f"-\0{b}\0".encode())

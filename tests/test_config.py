@@ -154,10 +154,10 @@ def test_scan_default_override_full_and_unset_preserve_fresh_paths(
     database = tmp_path / "index.sqlite"
     options = ["--db", str(database)]
     assert runner.invoke(cli.app, ["init", str(source), *options]).exit_code == 0
-    assert runner.invoke(cli.app, ["scan", str(source), *options]).exit_code == 0
+    assert runner.invoke(cli.app, ["scan", "--format", "json", str(source), *options]).exit_code == 0
     (source / "old.txt").unlink()
     config.set_default("scan.refresh-before", "7d")
-    result = runner.invoke(cli.app, ["scan", str(source), *options])
+    result = runner.invoke(cli.app, ["scan", "--format", "json", str(source), *options])
     assert result.exit_code == 0, result.exception
     summary = json.loads(result.stdout)
     assert summary["refresh_before_ns"] is not None
@@ -166,10 +166,10 @@ def test_scan_default_override_full_and_unset_preserve_fresh_paths(
         assert connection.execute("SELECT state FROM path WHERE entry_kind='file'").fetchone()[0] == "present"
     finally:
         connection.close()
-    result = runner.invoke(cli.app, ["scan", str(source), "--refresh-before", "1970-01-01T00:00:01Z", *options])
+    result = runner.invoke(cli.app, ["scan", "--format", "json", str(source), "--refresh-before", "1970-01-01T00:00:01Z", *options])
     assert result.exit_code == 0, result.exception
     assert json.loads(result.stdout)["refresh_before_ns"] == 1_000_000_000
-    result = runner.invoke(cli.app, ["scan", str(source), "--full", *options])
+    result = runner.invoke(cli.app, ["scan", "--format", "json", str(source), "--full", *options])
     assert result.exit_code == 0, result.exception
     assert json.loads(result.stdout)["refresh_before_ns"] is None
     connection = open_database(database)
@@ -178,7 +178,7 @@ def test_scan_default_override_full_and_unset_preserve_fresh_paths(
     finally:
         connection.close()
     config.set_default("scan.refresh-before", None)
-    result = runner.invoke(cli.app, ["scan", str(source), *options])
+    result = runner.invoke(cli.app, ["scan", "--format", "json", str(source), *options])
     assert result.exit_code == 0, result.exception
     assert json.loads(result.stdout)["refresh_before_ns"] is None
 
@@ -194,7 +194,7 @@ def test_resume_uses_saved_cutoff_instead_of_config(
     database = tmp_path / "index.sqlite"
     options = ["--db", str(database)]
     assert runner.invoke(cli.app, ["init", str(source), *options]).exit_code == 0
-    result = runner.invoke(cli.app, ["scan", str(source), "--refresh-before", "1970-01-01T00:00:01Z", *options])
+    result = runner.invoke(cli.app, ["scan", "--format", "json", str(source), "--refresh-before", "1970-01-01T00:00:01Z", *options])
     assert result.exit_code == 0, result.exception
     connection = open_database(database)
     try:
@@ -205,7 +205,7 @@ def test_resume_uses_saved_cutoff_instead_of_config(
         connection.close()
     config.set_default("scan.refresh-before", "7d")
     path_args = [str(source)] if resume_args == ["--resume"] else []
-    result = runner.invoke(cli.app, ["scan", *path_args, *resume_args, *options])
+    result = runner.invoke(cli.app, ["scan", "--format", "json", *path_args, *resume_args, *options])
     assert result.exit_code == 0, result.exception
     assert json.loads(result.stdout)["refresh_before_ns"] == 1_000_000_000
 
@@ -213,7 +213,7 @@ def test_resume_uses_saved_cutoff_instead_of_config(
 @pytest.mark.scan
 @pytest.mark.parametrize("args", [["--refresh-before", "7d"], ["--resume"], ["--resume-from", "1"]])
 def test_full_rejects_conflicting_options(locations: config.UserPaths, tmp_path: Path, args: list[str]) -> None:
-    result = CliRunner().invoke(cli.app, ["scan", str(tmp_path), "--full", *args])
+    result = CliRunner().invoke(cli.app, ["scan", "--format", "json", str(tmp_path), "--full", *args])
     assert result.exit_code == 2
     assert "mutually exclusive" in result.output
 
@@ -229,7 +229,7 @@ def test_relative_default_is_resolved_for_each_scan(locations: config.UserPaths,
     config.set_default("scan.refresh-before", "7d")
     for now in (1_800_000_000_000_000_000, 1_800_000_001_000_000_000):
         monkeypatch.setattr(refresh.time, "time_ns", lambda current=now: current)
-        result = runner.invoke(cli.app, ["scan", str(source), *options])
+        result = runner.invoke(cli.app, ["scan", "--format", "json", str(source), *options])
         assert result.exit_code == 0, result.exception
         assert json.loads(result.stdout)["refresh_before_ns"] == now - 604800 * 1_000_000_000
 

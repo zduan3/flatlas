@@ -12,6 +12,7 @@ from flatlas.paths import (
     discover_namespace,
     register_namespace,
 )
+from flatlas.records import entry_record
 from flatlas.scanning import scan_directory
 
 pytestmark = [pytest.mark.output, pytest.mark.query]
@@ -21,16 +22,11 @@ pytestmark = [pytest.mark.output, pytest.mark.query]
 def usage_rows(monkeypatch):
     sizes = [None, 0, 1023, 1024, 1536, 1024**2, 1024**3, 1024**4, 1024**5, 1024**2 - 1]
     rows = [
-        {
-            "path": f"entry-{index}",
-            "name": f"entry-{index}",
-            "entry_kind": "directory" if index % 2 else "file",
-            "status": "unscanned" if size is None else "scanned",
-            "logical_size": size,
-            "allocated_size": size,
-            "files": None if size is None else 1536,
-            "subtree_complete_through_ns": None,
-        }
+        entry_record(
+            path=f"entry-{index}", kind="directory" if index % 2 else "file",
+            status="new" if size is None else "ok", logical_size=size, allocated_size=size,
+            files=None if size is None else 1536, entries=None, mtime_ns=None, complete_through_ns=None, depth=0,
+        )
         for index, size in enumerate(sizes)
     ]
     monkeypatch.setattr(cli, "_database", lambda *args, **kwargs: Path("unused.sqlite"))
@@ -64,7 +60,7 @@ def test_human_readable_usage_table(command, option, usage_rows, tmp_path: Path)
         assert fields[header.index(size_header)] == size
         if command != "largest":
             assert fields[header.index("ALLOC")] == size
-            hide_count = row["files"] is None or (command == "ls" and row["entry_kind"] == "file")
+            hide_count = row["files"] is None or (command == "ls" and row["kind"] == "file")
             assert fields[header.index("N")] == ("-" if hide_count else "1536")
 
     output = tmp_path / "usage.txt"
@@ -84,12 +80,12 @@ def test_human_readable_usage_table(command, option, usage_rows, tmp_path: Path)
     for line, row in zip(raw.stdout.splitlines()[1:], usage_rows, strict=True):
         assert line.split()[raw_header.index(f"{size_header}(B)")] == cli._format_size(row["logical_size"])
         if command != "largest":
-            hide_count = row["files"] is None or (command == "ls" and row["entry_kind"] == "file")
+            hide_count = row["files"] is None or (command == "ls" and row["kind"] == "file")
             assert line.split()[raw_header.index("N")] == ("-" if hide_count else "1536")
 
 
 @pytest.mark.parametrize("command", ["ls", "du", "largest"])
-@pytest.mark.parametrize("fmt", ["json", "csv"])
+@pytest.mark.parametrize("fmt", ["jsonl", "csv"])
 @pytest.mark.parametrize("option", ["-h", "--human-readable"])
 def test_human_readable_preserves_machine_output(command, fmt, option, usage_rows, tmp_path: Path) -> None:
     runner = CliRunner()
@@ -98,8 +94,8 @@ def test_human_readable_preserves_machine_output(command, fmt, option, usage_row
     human = runner.invoke(cli.app, [*arguments, option])
     assert raw.exit_code == human.exit_code == 0
     assert raw.stdout == human.stdout
-    if fmt == "json":
-        assert json.loads(human.stdout) == usage_rows
+    if fmt == "jsonl":
+        assert [json.loads(line) for line in human.stdout.splitlines()] == usage_rows
     else:
         rows = list(csv.DictReader(human.stdout.splitlines()))
         assert rows[4]["logical_size"] == rows[4]["allocated_size"] == "1536"
@@ -164,12 +160,15 @@ def test_largest_human_readable_preserves_index_query(option, tmp_path: Path, mo
 
     runner = CliRunner()
     arguments = ["largest", str(scope), "--db", str(database)]
-    raw = runner.invoke(cli.app, [*arguments, "--format", "json"])
-    human = runner.invoke(cli.app, [*arguments, option, "--format", "json"])
+    raw = runner.invoke(cli.app, [*arguments, "--format", "jsonl"])
+    human = runner.invoke(cli.app, [*arguments, option, "--format", "jsonl"])
     assert raw.exit_code == human.exit_code == 0
     assert raw.stdout == human.stdout
     expected_paths = ["a.bin", str(Path("nested") / "b.bin"), "small.bin"]
-    assert [row["path"] for row in json.loads(human.stdout)] == expected_paths
+    # Machine output is unlimited and absolute; only the table is relative to PATH.
+    assert [json.loads(line)["path"] for line in human.stdout.splitlines()] == [
+        str(scope / path) for path in expected_paths
+    ]
     table = runner.invoke(cli.app, [*arguments, option, "-n", "2"])
     assert table.exit_code == 0, table.output
     lines = table.stdout.splitlines()

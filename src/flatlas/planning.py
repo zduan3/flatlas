@@ -48,7 +48,7 @@ def create_dry_run_plan(connection: sqlite3.Connection, root_id: int) -> str:
 
 def plan_operations(connection: sqlite3.Connection, plan_id: str) -> list[dict[str, Any]]:
     rows = connection.execute(
-        """SELECT po.ordinal, po.action, c.path_display AS canonical_path, r.path_display AS replacement_path,
+        """SELECT 'operation' AS type, po.ordinal, po.action, c.path_display AS canonical_path, r.path_display AS replacement_path,
         po.expected_size, hex(po.expected_full_digest) AS expected_digest, po.expected_algorithm,
         po.preconditions_json, po.status FROM plan_operation po
         JOIN path c ON c.id=po.canonical_path_id JOIN path r ON r.id=po.replacement_path_id
@@ -60,7 +60,7 @@ def plan_operations(connection: sqlite3.Connection, plan_id: str) -> list[dict[s
 def list_plans(connection: sqlite3.Connection) -> list[dict[str, Any]]:
     """Return plan summaries without exposing their operation details."""
     rows = connection.execute(
-        """SELECT plan.id, root.root_path_display, plan.source_scan_id, plan.status,
+        """SELECT 'plan' AS type, plan.id, root.root_path_display AS root, plan.source_scan_id, plan.status,
         plan.created_at_ns, plan.immutable_at_ns, plan.exported_at_ns, plan.note,
         COUNT(po.id) AS operation_count,
         COALESCE(SUM(po.expected_size), 0) AS theoretical_savings

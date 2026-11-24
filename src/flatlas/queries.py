@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from flatlas.duplicate_filters import DuplicateFilters
-from flatlas.errors import FlatlasError
+from flatlas.errors import FlatlasError, PathError
 from flatlas.findexpr import FindContext, FindEntry, FindExpression
 from flatlas.lazystat import uses_lazy_metadata
 from flatlas.mounts import mount_entry
@@ -26,7 +26,8 @@ from flatlas.paths import (
     path_key,
     scope_path,
 )
-from flatlas.scanning import Observation, _observation
+from flatlas.records import FREED_FIELDS, GONE, NEW, OK, PART, entry_record
+from flatlas.scanning import _observation
 
 
 def list_roots(connection: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -52,8 +53,9 @@ def list_roots(connection: sqlite3.Connection) -> list[dict[str, Any]]:
     ).fetchall()
     return [
         {
+            "type": "root",
             "id": row["id"],
-            "root_path_display": row["root_path_display"],
+            "path": row["root_path_display"],
             "platform": row["platform"],
             "namespace_kind": row["namespace_kind"],
             "filesystem_type": row["filesystem_type"],
@@ -95,8 +97,9 @@ def _usage_row(mount_point: Path, *, statfs_path: Path | None = None, status_whe
         use_percent = None if usable == 0 else -(-usage.used * 100 // usable)
         status = status_when_ok
     return {
+        "type": "filesystem",
         "filesystem": str(mount_point) if entry is None else entry.source,
-        "type": None if entry is None else entry.fstype,
+        "fstype": None if entry is None else entry.fstype,
         "blocks_1k": total,
         "used_1k": used,
         "available_1k": available,
@@ -134,7 +137,7 @@ def list_scans(
     connection: sqlite3.Connection,
     *,
     scope: Path | None = None,
-    limit: int = 50,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
     parameters: list[Any] = []
     where = ""
@@ -166,9 +169,9 @@ def list_scans(
             OR substr(?, 1, length(ss.scope_path_key))=ss.scope_path_key
         )"""
         parameters.extend((root_id, selected_key, selected_key, selected_key))
-    parameters.append(limit)
+    parameters.append(-1 if limit is None else limit)  # SQLite: a negative LIMIT means none
     rows = connection.execute(
-        f"""SELECT s.id AS scan_id, s.root_id, r.root_path_display AS root,
+        f"""SELECT 'scan' AS type, s.id AS scan_id, s.root_id, r.root_path_display AS root,
                    s.kind, s.status, s.started_at_ns, s.finished_at_ns,
                    CASE WHEN s.finished_at_ns IS NULL THEN NULL
                         ELSE s.finished_at_ns-s.started_at_ns END AS duration_ns,
@@ -240,15 +243,6 @@ def scan_info(connection: sqlite3.Connection, scan_id: int) -> dict[str, Any]:
     }
 
 
-def _relative_display(path_display: str, relative_to: Path, namespace_path: str) -> str:
-    try:
-        return os.path.relpath(path_display, relative_to)
-    except ValueError:
-        # Windows cannot express a cwd-relative path across drive letters, but
-        # every indexed path can still be shown relative to its scan namespace.
-        return os.path.relpath(path_display, namespace_path)
-
-
 def list_child_directories(
     connection: sqlite3.Connection,
     *,
@@ -263,7 +257,7 @@ def list_child_directories(
         with os.scandir(selected_path) as entries:
             actual_paths = [Path(entry.path) for entry in entries]
     except OSError as exc:
-        raise FlatlasError(f"cannot list directory {selected_path}: {exc}") from exc
+        raise PathError(f"cannot list directory {selected_path}: {exc}") from exc
 
     parent = connection.execute(
         "SELECT id FROM path WHERE root_id=? AND path_key=?",
@@ -271,14 +265,14 @@ def list_child_directories(
     ).fetchone()
     indexed_rows = [] if parent is None else connection.execute(
         """SELECT id, path_key, path_display, entry_kind, state, logical_size, allocated_size,
-                  last_seen_scan_id, first_seen_scan_id
+                  mtime_ns, last_seen_scan_id, first_seen_scan_id
         FROM path WHERE parent_path_id=? AND state='present'""",
         (parent["id"],),
     ).fetchall()
     indexed_by_path = {_normalized_display(row["path_display"]): row for row in indexed_rows}
 
     usage_rows = [] if parent is None else connection.execute(
-        """SELECT p.id, ds.subtree_files AS files,
+        """SELECT p.id, ds.subtree_files AS files, ds.subtree_entries AS entries,
                   ds.subtree_logical_size AS logical_size,
                   ds.subtree_allocated_size AS allocated_size,
                   ds.self_completed_at_ns, ds.subtree_complete_through_ns,
@@ -312,7 +306,7 @@ def list_child_directories(
         try:
             observed = _observation(namespace, actual_path, lazy=uses_lazy_metadata(root["filesystem_type"]))
         except OSError as exc:
-            raise FlatlasError(f"cannot inspect directory entry {actual_path}: {exc}") from exc
+            raise PathError(f"cannot inspect directory entry {actual_path}: {exc}") from exc
         usage = None if indexed is None else usage_by_id.get(indexed["id"])
         status = _entry_scan_status(
             connection,
@@ -324,12 +318,18 @@ def list_child_directories(
             parent_summary,
             check_subtree=False,
         )
-        result.append(_live_child_status_row(observed, status, usage))
+        result.append(_child_record(
+            display_path(actual_path), observed.kind, status, observed.logical_size, observed.allocated_size,
+            observed.mtime_ns, usage, parent_summary,
+        ))
 
     for indexed in indexed_rows:
         if _normalized_display(indexed["path_display"]) not in actual_keys:
-            result.append(_gone_child_status_row(indexed, usage_by_id.get(indexed["id"])))
-    return sorted(result, key=lambda row: os.path.normcase(str(row["name"])))
+            result.append(_child_record(
+                str(indexed["path_display"]), str(indexed["entry_kind"]), GONE, indexed["logical_size"],
+                indexed["allocated_size"], indexed["mtime_ns"], usage_by_id.get(indexed["id"]), parent_summary,
+            ))
+    return sorted(result, key=lambda row: os.path.normcase(os.path.basename(str(row["path"]))))
 
 
 def _normalized_display(path_display: str) -> str:
@@ -366,16 +366,16 @@ def _entry_scan_status(
         or indexed["state"] != "present"
         or indexed["entry_kind"] != entry_kind
     ):
-        return "unscanned"
+        return NEW
     covering = [scope for scope in scopes if _scope_covers(scope, entry_key, entry_kind)]
     if not covering:
-        return "unscanned"
+        return NEW
     latest = covering[0]
     if entry_kind in {"root", "directory"} and int(indexed["first_seen_scan_id"]) > int(latest["scan_id"]):
         # First seen by a later shallow scan that did not enumerate it.
-        return "unscanned"
+        return NEW
     if latest["status"] == "completed":
-        return "scanned"
+        return OK
 
     refresh_before = latest["refresh_before_ns"]
     if refresh_before is None:
@@ -402,14 +402,14 @@ def _entry_scan_status(
             complete_through = None if parent_summary is None else parent_summary["self_completed_at_ns"]
         completed = complete_through is not None and int(complete_through) >= int(refresh_before)
     if completed:
-        return "scanned"
+        return OK
     if int(indexed["last_seen_scan_id"]) == int(latest["scan_id"]):
-        return "incomplete"
+        return PART
 
     previous = covering[1] if len(covering) > 1 else None
     if previous is None:
-        return "unscanned"
-    return "scanned" if previous["status"] == "completed" else "incomplete"
+        return NEW
+    return OK if previous["status"] == "completed" else PART
 
 
 def _subtree_completed_in_scan(connection: sqlite3.Connection, path_id: int, scan_id: int) -> bool:
@@ -427,65 +427,37 @@ def _subtree_completed_in_scan(connection: sqlite3.Connection, path_id: int, sca
     return incomplete is None
 
 
-def _directory_status_row(
-    path: Path,
+def _child_record(
+    path: str,
+    kind: str,
     status: str,
+    logical_size: int | None,
+    allocated_size: int | None,
+    mtime_ns: int | None,
     usage: sqlite3.Row | None,
+    parent_summary: sqlite3.Row | None,
 ) -> dict[str, Any]:
-    return {
-        "entry_kind": "directory",
-        "status": status,
-        "files": None if usage is None else usage["files"],
-        "logical_size": None if usage is None else usage["logical_size"],
-        "allocated_size": None if usage is None else usage["allocated_size"],
-        "subtree_complete_through_ns": None if usage is None else usage["subtree_complete_through_ns"],
-        "name": path.name,
-    }
-
-
-def _live_child_status_row(
-    observed: Observation,
-    status: str,
-    usage: sqlite3.Row | None,
-) -> dict[str, Any]:
-    if observed.kind == "directory":
-        return _directory_status_row(observed.path, status, usage)
-    if observed.kind == "file":
-        return {
-            "entry_kind": "file", "status": status, "files": 1,
-            "logical_size": observed.logical_size, "allocated_size": observed.allocated_size,
-            "subtree_complete_through_ns": None,
-            "name": observed.path.name,
-        }
-    return {
-        "entry_kind": observed.kind, "status": status, "files": None,
-        "logical_size": None, "allocated_size": None, "name": observed.path.name,
-        "subtree_complete_through_ns": None,
-    }
-
-
-def _gone_child_status_row(indexed: sqlite3.Row, usage: sqlite3.Row | None) -> dict[str, Any]:
-    kind = str(indexed["entry_kind"])
-    if kind == "directory":
-        return _directory_status_row(Path(indexed["path_display"]), "missing", usage)
-    if kind == "file":
-        return {
-            "entry_kind": "file", "status": "missing", "files": 1,
-            "logical_size": indexed["logical_size"], "allocated_size": indexed["allocated_size"],
-            "subtree_complete_through_ns": None,
-            "name": Path(indexed["path_display"]).name,
-        }
-    return {
-        "entry_kind": kind, "status": "missing", "files": None,
-        "logical_size": None, "allocated_size": None, "name": Path(indexed["path_display"]).name,
-        "subtree_complete_through_ns": None,
-    }
-
-
-_FREED_FIELDS = (
-    "unique_logical_size", "unique_allocated_size",
-    "freed_logical_size", "freed_allocated_size", "freed_files", "unknown_link_files",
-)
+    """One ``ls`` entry: a directory carries its indexed subtree totals."""
+    if kind in {"root", "directory"}:
+        return entry_record(
+            path=path, kind=kind, status=status,
+            logical_size=None if usage is None else usage["logical_size"],
+            allocated_size=None if usage is None else usage["allocated_size"],
+            files=None if usage is None else usage["files"],
+            entries=None if usage is None else usage["entries"],
+            mtime_ns=mtime_ns,
+            complete_through_ns=None if usage is None else usage["subtree_complete_through_ns"],
+            depth=1,
+        )
+    is_file = kind == "file"
+    return entry_record(
+        path=path, kind=kind, status=status,
+        logical_size=logical_size if is_file else None,
+        allocated_size=allocated_size if is_file else None,
+        files=1 if is_file else None, entries=1, mtime_ns=mtime_ns,
+        complete_through_ns=None if parent_summary is None else parent_summary["self_completed_at_ns"],
+        depth=1,
+    )
 
 
 def hardlink_usage(connection: sqlite3.Connection, path_ids: list[int]) -> dict[str, int | None]:
@@ -497,7 +469,7 @@ def hardlink_usage(connection: sqlite3.Connection, path_ids: list[int]) -> dict[
     without a recorded ``nlink`` are never counted as freed.
     """
     if not path_ids:
-        return dict.fromkeys(_FREED_FIELDS)
+        return dict.fromkeys(FREED_FIELDS)
     placeholders = ", ".join("?" for _ in path_ids)
     row = connection.execute(
         f"""WITH RECURSIVE descendants(id) AS (
@@ -522,12 +494,12 @@ def hardlink_usage(connection: sqlite3.Connection, path_ids: list[int]) -> dict[
         FROM inodes""",
         path_ids,
     ).fetchone()
-    return {key: row[key] for key in _FREED_FIELDS}
+    return {key: row[key] for key in FREED_FIELDS}
 
 
 _SCOPE_COLUMNS = """p.id, p.root_id, p.path_key, p.parent_path_id, p.state,
                   p.last_seen_scan_id, p.first_seen_scan_id, p.path_display, p.entry_kind,
-                  p.logical_size, p.allocated_size, r.root_path_display"""
+                  p.logical_size, p.allocated_size, p.mtime_ns, r.root_path_display"""
 
 
 def _descendant_directories(
@@ -549,25 +521,28 @@ def _descendant_directories(
     return [(int(row["depth"]), row) for row in rows]
 
 
-def _indexed_usage_row(
+def _scan_scopes(connection: sqlite3.Connection, root_id: int) -> list[sqlite3.Row]:
+    return connection.execute(
+        """SELECT ss.scope_path_key, ss.status, ss.scan_id,
+                  s.started_at_ns, s.refresh_before_ns, s.max_depth
+           FROM scan_scope ss JOIN scan s ON s.id=ss.scan_id
+           WHERE ss.root_id=? ORDER BY s.id DESC, ss.id DESC""",
+        (root_id,),
+    ).fetchall()
+
+
+def _indexed_entry(
     connection: sqlite3.Connection,
     selected: sqlite3.Row,
     scopes: list[sqlite3.Row],
     *,
-    display_base: Path,
     depth: int,
-    freed: bool,
+    freed: bool = False,
 ) -> dict[str, Any]:
-    row: dict[str, Any]
-    if selected["entry_kind"] == "file":
-        row = {
-            "files": 1,
-            "entries": 1,
-            "logical_size": selected["logical_size"],
-            "allocated_size": selected["allocated_size"],
-        }
-        usage = None
-    elif selected["entry_kind"] in {"root", "directory"}:
+    """The entry record of one indexed path; directories use their cached subtree totals."""
+    kind = str(selected["entry_kind"])
+    usage = None
+    if kind in {"root", "directory"}:
         usage = connection.execute(
             """SELECT subtree_files AS files, subtree_entries AS entries,
                       subtree_logical_size AS logical_size,
@@ -578,48 +553,44 @@ def _indexed_usage_row(
         ).fetchone()
         if usage is None:
             raise FlatlasError(f"directory summary is missing: {selected['path_display']}")
-        row = {
-            "files": usage["files"],
-            "entries": usage["entries"],
-            "logical_size": usage["logical_size"],
-            "allocated_size": usage["allocated_size"],
-        }
-    else:
-        # Sizes only count regular-file content and special entries record none;
-        # report unknown rather than 0, matching ls. The entry itself is one inode.
-        row = {"files": None, "entries": 1, "logical_size": None, "allocated_size": None}
-        usage = None
     parent_summary = connection.execute(
         """SELECT self_completed_at_ns, last_completed_scan_id
            FROM directory_summary WHERE path_id=?""",
         (selected["parent_path_id"],),
     ).fetchone() if selected["parent_path_id"] is not None else None
-    status = _entry_scan_status(
-        connection, selected, str(selected["entry_kind"]),
-        bytes(selected["path_key"]), scopes, usage, parent_summary,
+    status = _entry_scan_status(connection, selected, kind, bytes(selected["path_key"]), scopes, usage, parent_summary)
+    if usage is not None:
+        files, entries = usage["files"], usage["entries"]
+        logical, allocated = usage["logical_size"], usage["allocated_size"]
+        complete_through = usage["subtree_complete_through_ns"]
+    else:
+        # Sizes only count regular-file content and special entries record none;
+        # report unknown rather than 0. The entry itself is one inode.
+        is_file = kind == "file"
+        files, entries = (1 if is_file else None), 1
+        logical = selected["logical_size"] if is_file else None
+        allocated = selected["allocated_size"] if is_file else None
+        complete_through = None if parent_summary is None else parent_summary["self_completed_at_ns"]
+    record = entry_record(
+        path=str(selected["path_display"]), kind=kind, status=status,
+        logical_size=logical, allocated_size=allocated, files=files, entries=entries,
+        mtime_ns=selected["mtime_ns"], complete_through_ns=complete_through, depth=depth,
     )
     if freed:
-        indexed_kind = selected["entry_kind"] in {"file", "root", "directory"}
-        row.update(hardlink_usage(connection, [selected["id"]]) if indexed_kind else dict.fromkeys(_FREED_FIELDS))
-    return {
-        **row,
-        "status": status,
-        "depth": depth,
-        "path": _relative_display(selected["path_display"], display_base, selected["root_path_display"]),
-    }
+        indexed_kind = kind in {"file", "root", "directory"}
+        record.update(hardlink_usage(connection, [selected["id"]]) if indexed_kind else dict.fromkeys(FREED_FIELDS))
+    return record
 
 
 def disk_usage(
     connection: sqlite3.Connection,
     *,
     scope: Path | str | None = None,
-    relative_to: Path | None = None,
     follow_symlink: bool = False,
     freed: bool = False,
     max_depth: int = 0,
 ) -> list[dict[str, Any]]:
-    """Usage of one scope, then its subdirectories down to ``max_depth`` (``depth`` field)."""
-    display_base = Path.cwd() if relative_to is None else relative_to
+    """Entry records of one scope, then its subdirectories down to ``max_depth``."""
     scope = Path(".") if scope is None else scope
     try:
         selected = _scope_row(connection, scope, follow=follow_symlink)
@@ -631,30 +602,16 @@ def disk_usage(
         root = get_root(connection, namespace)
         if root is None:
             raise FlatlasError(f"filesystem is not registered; run 'flatlas init {scope}' first") from None
-        return [{
-            "files": None,
-            "entries": None,
-            "logical_size": None,
-            "allocated_size": None,
-            "status": "unscanned",
-            "depth": 0,
-            **(dict.fromkeys(_FREED_FIELDS) if freed else {}),
-            "path": _relative_display(str(selected_path), display_base, str(namespace.path)),
-        }]
-    scopes = connection.execute(
-        """SELECT ss.scope_path_key, ss.status, ss.scan_id,
-                  s.started_at_ns, s.refresh_before_ns, s.max_depth
-           FROM scan_scope ss JOIN scan s ON s.id=ss.scan_id
-           WHERE ss.root_id=? ORDER BY s.id DESC, ss.id DESC""",
-        (selected["root_id"],),
-    ).fetchall()
+        record = entry_record(
+            path=display_path(selected_path), kind="directory", status=NEW, logical_size=None,
+            allocated_size=None, files=None, entries=None, mtime_ns=None, complete_through_ns=None, depth=0,
+        )
+        return [{**record, **(dict.fromkeys(FREED_FIELDS) if freed else {})}]
+    scopes = _scan_scopes(connection, int(selected["root_id"]))
     targets = [(0, selected)]
     if max_depth > 0 and selected["entry_kind"] in {"root", "directory"}:
         targets.extend(_descendant_directories(connection, selected, max_depth))
-    return [
-        _indexed_usage_row(connection, target, scopes, display_base=display_base, depth=depth, freed=freed)
-        for depth, target in targets
-    ]
+    return [_indexed_entry(connection, target, scopes, depth=depth, freed=freed) for depth, target in targets]
 
 
 def indexed_scope_ids(
@@ -674,28 +631,24 @@ def largest_files(
     connection: sqlite3.Connection,
     *,
     scope: Path = Path("."),
-    limit: int = 10,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
+    """Entry records of the largest present files under ``scope``, largest first."""
     selected = _scope_row(connection, scope)
+    key = bytes(selected["path_key"])
+    upper = key[:-1] + b"\x01" if key else None
     rows = connection.execute(
-        """WITH RECURSIVE descendants(id) AS (
-            SELECT id FROM path WHERE id=? UNION ALL
-            SELECT p.id FROM descendants d CROSS JOIN path p ON p.parent_path_id=d.id
-        )
-        SELECT p.root_id, p.path_display, p.logical_size, p.allocated_size
-        FROM path p
-        WHERE p.state='present' AND p.entry_kind='file' AND p.id IN descendants
+        f"""SELECT {_SCOPE_COLUMNS}
+        FROM path p JOIN root r ON r.id=p.root_id
+        WHERE p.root_id=? AND p.path_key>=? {'' if upper is None else 'AND p.path_key<?'}
+          AND p.state='present' AND p.entry_kind='file'
         ORDER BY p.logical_size DESC, p.path_display LIMIT ?""",
-        (selected["id"], limit),
-    )
-    display_base = Path(selected["path_display"])
+        (selected["root_id"], key, *(() if upper is None else (upper,)), -1 if limit is None else limit),
+    ).fetchall()
+    scopes = _scan_scopes(connection, int(selected["root_id"]))
+    base = key.count(b"\0")
     return [
-        {
-            "root_id": row["root_id"],
-            "logical_size": row["logical_size"],
-            "allocated_size": row["allocated_size"],
-            "path": _relative_display(row["path_display"], display_base, selected["root_path_display"]),
-        }
+        _indexed_entry(connection, row, scopes, depth=bytes(row["path_key"]).count(b"\0") - base)
         for row in rows
     ]
 

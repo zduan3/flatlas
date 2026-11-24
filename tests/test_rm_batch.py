@@ -44,7 +44,7 @@ def _index(db: Path, source: Path) -> None:
 def _usage(db: Path, source: Path) -> dict[str, tuple]:
     connection = open_database(db)
     try:
-        rows = disk_usage(connection, scope=source, max_depth=3, relative_to=source)
+        rows = disk_usage(connection, scope=source, max_depth=3)
     finally:
         connection.close()
     return {row["path"]: (row["files"], row["entries"], row["logical_size"]) for row in rows}
@@ -56,7 +56,7 @@ def test_batch_rm_matches_a_fresh_scan_of_what_remains(tmp_path: Path) -> None:
     db = tmp_path / "index.sqlite"
     _index(db, source)
     targets = [source / "a", source / "a" / "x", source / "keep" / "big", source / "c" / "d" / "e", source / "nope"]
-    result = CliRunner().invoke(app, ["rm", *map(str, targets), "--db", str(db)])
+    result = CliRunner().invoke(app, ["rm", *map(str, targets), "--format", "json", "--db", str(db)])
     assert result.exit_code == 1
     assert "path is not indexed" in result.stderr and "nope" in result.stderr
     # "a/x" is inside "a"; the siblings "a b", "a-b", "a.b" sort right after "a" and stay.
@@ -76,13 +76,13 @@ def test_rm_reads_paths_from_files0_from(tmp_path: Path) -> None:
     _index(db, source)
     found = CliRunner().invoke(app, ["find", "--db", str(db), str(source), "-name", "big", "-o", "-name", "d", "-prune"])
     listing = "\0".join(found.stdout.splitlines()) + "\0"
-    result = CliRunner().invoke(app, ["rm", "--files0-from=-", "--db", str(db)], input=listing.encode())
+    result = CliRunner().invoke(app, ["rm", "--files0-from=-", "--format", "json", "--db", str(db)], input=listing.encode())
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["scopes"] == 2
-    assert _usage(db, source)["."][2] == sum(FILES.values()) - 320 - 640 - 2560
+    assert _usage(db, source)[str(source)][2] == sum(FILES.values()) - 320 - 640 - 2560
 
-    assert CliRunner().invoke(app, ["rm", "--db", str(db)]).exit_code != 0
-    both = CliRunner().invoke(app, ["rm", str(source), "--files0-from=-", "--db", str(db)], input=b"x\0")
+    assert CliRunner().invoke(app, ["rm", "--format", "json", "--db", str(db)]).exit_code != 0
+    both = CliRunner().invoke(app, ["rm", "--format", "json", str(source), "--files0-from=-", "--db", str(db)], input=b"x\0")
     assert both.exit_code != 0 and "cannot be combined" in str(both.exception)
 
 

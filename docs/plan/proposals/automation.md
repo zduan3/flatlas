@@ -22,40 +22,11 @@
 
 ## 0.2.0：新约定
 
-### 输出格式
-
-- 返回多行的命令（`du`、`ls`、`find`、`largest`、`dupes`、`scans`、`roots`、`df`、`plan show`）支持 `--format table|jsonl|csv`；返回单个对象的命令（`scan`、`scan-info`、`rm`、`init`）支持 `--format table|json`。删除数组形式的 `json`。
-- 默认仍是 `table`，不按是否为终端自动切换；脚本显式写 `--format jsonl`。
-- `jsonl` 逐行写出，不缓冲整个结果；`csv` 列与 `jsonl` 字段一一对应，未知值为空。
-
-### 条目记录
-
-`du`、`ls`、`find`、`largest` 输出同一种记录，字段固定、按需追加的字段只在给出对应选项时出现：
-
-| 字段 | 含义 |
-|---|---|
-| `type` | `entry`；汇总行为 `total` |
-| `path` | 绝对显示路径。表格中才按 GNU 规则显示为相对参数的形式 |
-| `kind` | `file`、`dir`（含 namespace root）、`symlink`、`reparse`、`other` |
-| `status` | `ok`、`new`、`part`、`gone`，表格与机器格式使用同一组词 |
-| `logical_size`、`allocated_size` | 字节；目录为子树合计；未知为 `null` |
-| `files`、`entries` | 子树普通文件数与条目数（含自身，同 `du --inodes`）；文件为 1、1 |
-| `mtime_ns` | 条目自身的修改时间 |
-| `complete_through_ns` | 子树最近一次完整覆盖的时间；未完整覆盖为 `null` |
-| `depth` | 相对所在参数的深度 |
-| `unique_*`、`freed_*` | 仅 `du --freed` |
-
-`dupes` 输出组记录（`type: group`，含 digest、size、各路径的绝对 `path`）；`scans` 输出扫描记录；字段名与单位沿用上表规则（字节、`_ns` 整数、绝对路径）。
-
-### 限制与退出码
-
-- 机器格式没有隐式上限；`-n/--limit` 只在显式给出时生效。`largest` 的默认 10 行只作用于表格。
-- 退出码：0 所有参数成功；1 部分参数失败（未索引、读不到），其余照常输出；2 用法或领域错误。错误一律写 stderr，以 `error: ` 开头并带上出错的参数。
-- 结果是否完整看每行的 `status` 与 `complete_through_ns`，不改变退出码。
+机器输出约定（格式、条目记录、上限与退出码）已实现，见 [查询命令：机器输出](../../design/queries.md#机器输出)。
 
 ### `find` 作为自动化入口
 
-- 加 `--format`：`table`/`jsonl`/`csv` 输出条目记录；无 `--format` 时保持 GNU 风格逐行路径与 `-print0`。
+- 加 `--format`：`table`/`jsonl`/`csv` 输出[条目记录](../../design/queries.md#机器输出)；无 `--format` 时保持 GNU 风格逐行路径与 `-print0`。
 - 新增测试：`-size [+-]N[kMG]`（logical size；目录取子树合计）、`-entries [+-]N`（子树条目数，flatlas 独有）、`-mtime [+-]N`（天）、`-status WORD`。目录的子树值来自目录汇总缓存，不额外遍历。
 - 效果：「每个子目录的字节与条目数」是一条 `find DIR -mindepth 1 -maxdepth 1 -type d --format jsonl`；「候选及其大小」是一条带 `-prune` 的 `find --format jsonl`；hardlink 去重后的并集仍用 `du --files0-from -c --freed`。
 

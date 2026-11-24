@@ -11,8 +11,13 @@ from flatlas import db, hashing, paths, queries, scanning
 from flatlas.cli import app, main
 from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError
+from flatlas.records import GROUP_FIELDS
 
 pytestmark = [pytest.mark.hash, pytest.mark.query]
+
+
+def _records(text: str) -> list[dict]:
+    return [json.loads(line) for line in text.splitlines()]
 
 
 @pytest.fixture
@@ -162,24 +167,23 @@ def test_group_filter_does_not_hide_hash_errors_or_change_coverage(indexed, monk
         return digest(candidate, full=full)
 
     monkeypatch.setattr(hashing, "_validated_digest", fail_one)
-    monkeypatch.setattr(hashing, "_validated_digest", fail_one)
     with db.open_database(database) as connection:
         before = [tuple(row) for row in connection.execute("SELECT * FROM scan_scope ORDER BY id")]
     result = CliRunner().invoke(app, [
-        "dupes", str(scope), "--db", str(database), "--format", "json",
+        "dupes", str(scope), "--db", str(database), "--format", "jsonl",
         "--min-size", "8", "--max-size", "8", "--min-count", "3", "--limit", "1",
     ])
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.stdout)
-    assert payload["hash"]["complete"] is False and payload["hash"]["errors"] == 1
-    assert len(payload["groups"]) == 1 and payload["groups"][0]["count"] == 3
+    hash_record, *groups = _records(result.stdout)
+    assert hash_record["complete"] is False and hash_record["errors"] == 1
+    assert len(groups) == 1 and groups[0]["count"] == 3
     assert "incomplete" in result.stderr
     with db.open_database(database) as connection:
         assert [tuple(row) for row in connection.execute("SELECT * FROM scan_scope ORDER BY id")] == before
         assert connection.execute("SELECT count(*) FROM path WHERE state='deleted'").fetchone()[0] == 0
 
 
-@pytest.mark.parametrize("fmt", ["table", "json", "csv"])
+@pytest.mark.parametrize("fmt", ["table", "jsonl", "csv"])
 @pytest.mark.cli
 @pytest.mark.output
 def test_cli_and_export_share_filters_and_paths(indexed, tmp_path: Path, fmt) -> None:
@@ -191,12 +195,13 @@ def test_cli_and_export_share_filters_and_paths(indexed, tmp_path: Path, fmt) ->
     assert result.exit_code == 0, result.output
     assert "medium-0" in result.stdout
     assert "small" not in result.stdout and "large" not in result.stdout and "other" not in result.stdout
-    if fmt == "json":
-        payload = json.loads(result.stdout)
-        assert set(payload) == {"hash", "groups"}
-        assert payload["hash"]["candidate_files"] == 5
-        assert payload["groups"][0]["count"] == 3
-        assert not Path(payload["groups"][0]["paths"][0]["path_display"]).is_absolute()
+    if fmt == "jsonl":
+        hash_record, *groups = _records(result.stdout)
+        assert [hash_record["type"], *(group["type"] for group in groups)] == ["hash", "group"]
+        assert hash_record["candidate_files"] == 5
+        assert groups[0]["count"] == 3
+        # Machine output is always absolute; --absolute only affects the table.
+        assert Path(groups[0]["paths"][0]).is_absolute()
     elif fmt == "csv":
         rows = list(csv.DictReader(result.stdout.splitlines()))
         assert len(rows) == 1 and rows[0]["theoretical_savings"] == "16"
@@ -208,13 +213,13 @@ def test_cli_and_export_share_filters_and_paths(indexed, tmp_path: Path, fmt) ->
     assert "medium-0" in output.read_text(encoding="utf-8")
     if fmt == "table":
         assert str(scope) in output.read_text(encoding="utf-8")
-    if fmt == "json":
-        payload = json.loads(output.read_text(encoding="utf-8"))
-        assert payload["hash"]["content_files_read"] == 0
-        assert Path(payload["groups"][0]["paths"][0]["path_display"]).is_absolute()
+    if fmt == "jsonl":
+        hash_record, *groups = _records(output.read_text(encoding="utf-8"))
+        assert hash_record["content_files_read"] == 0
+        assert Path(groups[0]["paths"][0]).is_absolute()
 
 
-@pytest.mark.parametrize("fmt", ["table", "json", "csv"])
+@pytest.mark.parametrize("fmt", ["table", "jsonl", "csv"])
 @pytest.mark.cli
 @pytest.mark.output
 def test_empty_filtered_export_preserves_existing_format(indexed, tmp_path: Path, fmt) -> None:
@@ -226,11 +231,12 @@ def test_empty_filtered_export_preserves_existing_format(indexed, tmp_path: Path
     ])
     assert result.exit_code == 0, result.output
     text = output.read_text(encoding="utf-8")
-    if fmt == "json":
-        payload = json.loads(text)
-        assert payload["groups"] == [] and payload["hash"]["candidate_files"] == 0
+    if fmt == "jsonl":
+        # Still says how complete the (empty) result is.
+        assert _records(text) == [{"type": "hash", **_records(text)[0], "candidate_files": 0}]
     elif fmt == "csv":
-        assert text == ""
+        # The header keeps the schema visible even with no rows.
+        assert text == ",".join(GROUP_FIELDS) + "\n"
     else:
         assert "0 duplicate groups" in text
 

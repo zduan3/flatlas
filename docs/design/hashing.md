@@ -52,8 +52,9 @@
 ## 输出
 
 - **表格**：首行汇总筛选后显示的组数、冗余副本数（`inodes - 1` 之和）与理论节省量，再逐组列出大小 × 路径数（与 inode 数不同时附 `(N inodes)`）、节省量、`has links outside this group`（`external_links`）和路径；hash 不完整时末尾提示 changed 与 error 数。
-- **JSON**：`{"hash": {...}, "groups": [...]}`。`hash` 含 `complete`、`candidate_files`、`candidate_bytes`、`content_files_read`、`changed_files`、`errors`，描述大小筛选后的全部候选，不因组数限制截断；每组含 `algorithm`、hex `digest`、`logical_size`、`count`、`inodes`、`theoretical_savings`、`external_links` 与 `paths`（每条含 `id`、`root_id`、`path_display`、`device`、`inode`）。零组时 `groups` 为 `[]`。
-- **CSV**：每组一行，并在行内重复 `hash` 摘要字段；零组时为空文件，没有独立摘要。
+- **jsonl**：第一行是 `type: hash` 的摘要记录（`complete`、`candidate_files`、`candidate_bytes`、`content_files_read`、`changed_files`、`errors`），描述大小筛选后的全部候选，不因组数限制截断；其后每组一行 `type: group`：`algorithm`、hex `digest`、`logical_size`、`count`、`inodes`、`theoretical_savings`、`external_links` 与 `paths`（绝对路径列表）。零组时只有摘要行。
+- **CSV**：每组一行，列同组记录，`paths` 为 JSON 列表；没有摘要行，零组时只有表头。
+- 表格路径默认相对 PATH，`--absolute` 改为绝对路径；机器输出始终是绝对路径。
 - hash 不完整时 stderr 输出 `warning: duplicate analysis incomplete: ...`。
 
 `hash.complete` 仅描述该候选范围的 hash 处理状态，不保证 scan coverage 完整，也不表示筛选范围外没有重复。`--output FILE` 把同样的内容写入文件。

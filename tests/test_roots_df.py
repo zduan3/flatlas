@@ -20,6 +20,10 @@ from flatlas.scanning import scan_directory
 pytestmark = [pytest.mark.cli, pytest.mark.output, pytest.mark.query]
 
 
+def _records(text: str) -> list[dict]:
+    return [json.loads(line) for line in text.splitlines()]
+
+
 @pytest.fixture
 def indexed(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
     monkeypatch.setattr(paths, "filesystem_type", lambda _mount: "lustre")
@@ -51,7 +55,7 @@ def test_roots_reports_recorded_state_without_touching_the_filesystem(indexed, m
     assert header.split() == ["ID", "TYPE", "METADATA", "FILES", "LOGICAL(B)", "SCAN", "STATUS", "SCANNED", "ROOT"]
     assert row.split()[:7] == ["1", "lustre", "lazy", "1", "4", "1", "completed"]
 
-    [record] = json.loads(runner.invoke(app, ["roots", "--format", "json", "--db", str(database)]).stdout)
+    [record] = _records(runner.invoke(app, ["roots", "--format", "jsonl", "--db", str(database)]).stdout)
     assert record["filesystem_type"] == "lustre"
     assert record["metadata"] == "lazy"
     assert (record["files"], record["logical_size"]) == (1, 4)
@@ -66,7 +70,7 @@ def test_roots_marks_unscanned_and_non_lustre_roots(tmp_path: Path, monkeypatch)
         register_namespace(connection, discover_namespace(tmp_path))
     finally:
         connection.close()
-    [record] = json.loads(CliRunner().invoke(app, ["roots", "--format", "json", "--db", str(database)]).stdout)
+    [record] = _records(CliRunner().invoke(app, ["roots", "--format", "jsonl", "--db", str(database)]).stdout)
     assert record["metadata"] == "exact"
     assert record["files"] is None and record["last_scan_id"] is None
 
@@ -89,9 +93,9 @@ def test_df_uses_gnu_headers_use_percent_and_mount_source(indexed, monkeypatch) 
     # GNU df: Use% = ceil(used / (used + available)), here 4 / 9.
     assert row.split()[:6] == ["server:/fs1", "lustre", "10", "4", "5", "45%"]
 
-    [record] = json.loads(runner.invoke(app, ["df", "--format", "json", "--db", str(database)]).stdout)
+    [record] = _records(runner.invoke(app, ["df", "--format", "jsonl", "--db", str(database)]).stdout)
     assert record["filesystem"] == "server:/fs1"
-    assert record["type"] == "lustre"
+    assert record["fstype"] == "lustre"
     assert record["use_percent"] == 45
     assert record["status"] == "ok"
 
@@ -107,9 +111,9 @@ def test_df_file_arguments_query_the_file_and_need_no_index(tmp_path: Path, monk
     target = tmp_path / "dir"
     target.mkdir()
     missing_db = tmp_path / "never-created.sqlite"
-    result = CliRunner().invoke(app, ["df", "--format", "json", "--db", str(missing_db), str(target)])
+    result = CliRunner().invoke(app, ["df", "--format", "jsonl", "--db", str(missing_db), str(target)])
     assert result.exit_code == 0, result.output
-    [record] = json.loads(result.stdout)
+    [record] = _records(result.stdout)
     # statfs goes to the FILE itself, as GNU df does, so directory quotas apply.
     assert queried == [target]
     assert record["mounted_on"] == str(discover_namespace(target).path)
@@ -124,7 +128,7 @@ def test_df_unavailable_capacity_is_unknown(indexed, monkeypatch) -> None:
 
     monkeypatch.setattr(queries.shutil, "disk_usage", unavailable)
     runner = CliRunner()
-    [record] = json.loads(runner.invoke(app, ["df", "--format", "json", "--db", str(database)]).stdout)
+    [record] = _records(runner.invoke(app, ["df", "--format", "jsonl", "--db", str(database)]).stdout)
     assert [record[key] for key in ("blocks_1k", "used_1k", "available_1k", "use_percent")] == [None] * 4
     assert record["status"] == "unavailable"
     row = runner.invoke(app, ["df", "-h", "--db", str(database)]).stdout.splitlines()[1].split()

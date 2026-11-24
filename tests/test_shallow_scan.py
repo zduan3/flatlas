@@ -67,15 +67,15 @@ def test_shallow_scan_does_not_claim_subdirectories_are_fresh(indexed) -> None:
     (source / "new.bin").write_bytes(b"n")
     scan_directory(connection, source, shallow=True)
     [fresh] = disk_usage(connection, scope=source / "fresh")
-    assert fresh["status"] == "unscanned"  # listed as an entry, never enumerated
+    assert fresh["status"] == "new"  # listed as an entry, never enumerated
     [new_file] = disk_usage(connection, scope=source / "new.bin")
-    assert new_file["status"] == "scanned"
+    assert new_file["status"] == "ok"
     [keep] = disk_usage(connection, scope=source / "keep")
-    assert keep["status"] == "scanned"  # still from the earlier full scan
+    assert keep["status"] == "ok"  # still from the earlier full scan
     # A later full scan of the new directory makes it current.
     scan_directory(connection, source / "fresh")
     [fresh] = disk_usage(connection, scope=source / "fresh")
-    assert (fresh["status"], fresh["files"]) == ("scanned", 1)
+    assert (fresh["status"], fresh["files"]) == ("ok", 1)
 
 
 def test_shallow_scans_are_not_resumed(indexed) -> None:
@@ -91,9 +91,9 @@ def test_shallow_scans_are_not_resumed(indexed) -> None:
 def test_cli_shallow_flag_and_exclusions(indexed, tmp_path: Path) -> None:
     _connection, source = indexed
     db = str(tmp_path / "index.sqlite")
-    result = CliRunner().invoke(app, ["scan", "--shallow", str(source), "--db", db])
+    result = CliRunner().invoke(app, ["scan", "--format", "json", "--shallow", str(source), "--db", db])
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["status"] == "completed"
     for extra in (["--full"], ["--resume"], ["--refresh-before", "1d"]):
-        rejected = CliRunner().invoke(app, ["scan", "--shallow", *extra, str(source), "--db", db])
+        rejected = CliRunner().invoke(app, ["scan", "--format", "json", "--shallow", *extra, str(source), "--db", db])
         assert rejected.exit_code != 0

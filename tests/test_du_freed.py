@@ -73,13 +73,13 @@ def test_union_frees_an_inode_whose_links_are_split_across_scopes(linked_tree) -
 def test_cli_freed_columns_and_total(linked_tree) -> None:
     db, source = linked_tree
     result = CliRunner().invoke(
-        app, ["du", "--freed", "-c", "--format", "json", "--db", str(db), str(source / "x"), str(source / "y")]
+        app, ["du", "--freed", "-c", "--format", "jsonl", "--db", str(db), str(source / "x"), str(source / "y")]
     )
     assert result.exit_code == 0, result.output
-    x, y, total = json.loads(result.stdout)
+    x, y, total = [json.loads(line) for line in result.stdout.splitlines()]
     assert (x["logical_size"], x["freed_logical_size"]) == (210, 10)
     assert (y["logical_size"], y["freed_logical_size"]) == (101, 1)
-    assert total["path"] == "total"
+    assert (total["type"], total["path"]) == ("total", None)
     assert (total["files"], total["logical_size"], total["freed_logical_size"]) == (5, 311, 111)
 
     table = CliRunner().invoke(app, ["du", "--freed", "--db", str(db), str(source / "x")])
@@ -89,8 +89,8 @@ def test_cli_freed_columns_and_total(linked_tree) -> None:
 
 def test_total_without_freed_sums_rows(linked_tree) -> None:
     db, source = linked_tree
-    result = CliRunner().invoke(app, ["du", "-c", "--format", "json", "--db", str(db), str(source / "x")])
+    result = CliRunner().invoke(app, ["du", "-c", "--format", "jsonl", "--db", str(db), str(source / "x")])
     assert result.exit_code == 0, result.output
-    x, total = json.loads(result.stdout)
+    x, total = [json.loads(line) for line in result.stdout.splitlines()]
     assert "freed_logical_size" not in total
     assert (total["files"], total["logical_size"]) == (x["files"], x["logical_size"])

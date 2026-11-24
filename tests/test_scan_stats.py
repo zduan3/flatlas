@@ -43,7 +43,7 @@ def test_scan_reports_and_persists_phase_timing(tmp_path: Path) -> None:
     finally:
         connection.close()
 
-    info = CliRunner().invoke(app, ["scan-info", str(result["scan_id"]), "--db", str(tmp_path / "index.sqlite")])
+    info = CliRunner().invoke(app, ["scan-info", "--format", "json", str(result["scan_id"]), "--db", str(tmp_path / "index.sqlite")])
     assert info.exit_code == 0, info.output
     assert '"exact_stat_fallbacks": 0' in info.stdout
 
@@ -110,6 +110,6 @@ def test_scan_without_a_terminal_passes_no_progress_callback(tmp_path: Path, mon
 
     monkeypatch.setattr(cli, "scan_directory", recording)
     monkeypatch.setattr(cli, "_stderr_is_tty", lambda: False)
-    result = CliRunner().invoke(app, ["scan", str(source), "--db", str(db)])
+    result = CliRunner().invoke(app, ["scan", "--format", "json", str(source), "--db", str(db)])
     assert result.exit_code == 0, result.output
     assert seen == [None]

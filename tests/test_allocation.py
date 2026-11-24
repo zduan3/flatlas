@@ -207,7 +207,7 @@ def test_allocation_failure_preserves_metadata_and_prevents_false_deletion(tmp_p
             (str(nested),),
         ).fetchone()[0] == old_freshness
         live = list_child_directories(connection, scope=nested)
-        assert next(row for row in live if row["name"] == "file")["allocated_size"] is None
+        assert next(row for row in live if Path(row["path"]).name == "file")["allocated_size"] is None
         monkeypatch.setattr(scanning, "allocated_size", lambda _path, _metadata: 4096)
         assert scan_directory(connection, nested)["status"] == "completed"
         assert disk_usage(connection, scope=source)[0]["allocated_size"] == 8192
@@ -333,6 +333,6 @@ def test_native_resident_file_zero_survives_scan_summaries_and_cli(tmp_path: Pat
         result = runner.invoke(app, [command, str(source), "--db", str(database)])
         assert result.exit_code == 0, result.output
         assert "ALLOC(B)" in result.stdout
-        result = runner.invoke(app, [command, str(source), "--db", str(database), "--format", "json"])
+        result = runner.invoke(app, [command, str(source), "--db", str(database), "--format", "jsonl"])
         assert result.exit_code == 0, result.output
-        assert json.loads(result.stdout)[0]["allocated_size"] == 0
+        assert json.loads(result.stdout.splitlines()[0])["allocated_size"] == 0

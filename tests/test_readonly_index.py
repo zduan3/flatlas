@@ -59,14 +59,14 @@ def test_query_commands_fall_back_to_read_only(readonly_index) -> None:
     for command in (["roots"], ["scans"], ["du", str(source)], ["largest", str(source)]):
         result = runner.invoke(app, [*command, "--db", str(database)])
         assert result.exit_code == 0, (command, result.output, result.exception)
-    du = runner.invoke(app, ["du", str(source), "--format", "json", "--db", str(database)])
+    du = runner.invoke(app, ["du", str(source), "--format", "jsonl", "--db", str(database)])
     assert '"logical_size": 4' in du.stdout
     assert sorted(path.name for path in database.parent.iterdir()) == ["index.sqlite"]
 
 
 def test_write_commands_report_a_domain_error(readonly_index) -> None:
     database, source = readonly_index
-    result = CliRunner().invoke(app, ["scan", str(source), "--db", str(database)])
+    result = CliRunner().invoke(app, ["scan", "--format", "json", str(source), "--db", str(database)])
     assert isinstance(result.exception, FlatlasError)
     assert "cannot open index database for writing" in str(result.exception)
 

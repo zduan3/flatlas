@@ -36,7 +36,7 @@ def test_ls_other_directory_during_scan(tmp_path: Path) -> None:
             return
         queried = True
         assert writer.in_transaction
-        result = CliRunner().invoke(app, ["ls", str(second), "--db", str(database), "--format", "json"])
+        result = CliRunner().invoke(app, ["ls", str(second), "--db", str(database), "--format", "jsonl"])
         assert result.exit_code == 0, result.output
         assert "kept.bin" in result.stdout
         assert "migration" not in result.stderr

@@ -40,6 +40,10 @@ from flatlas.summaries import refresh_directory_summaries
 from flatlas.version import VersionInfo
 
 
+def _records(text: str) -> list[dict]:
+    return [json.loads(line) for line in text.splitlines()]
+
+
 @pytest.fixture
 def external_file_allocation(monkeypatch) -> None:
     """Keep hash/plan fixtures eligible regardless of NTFS resident storage."""
@@ -129,9 +133,10 @@ def test_plan_show_without_id_lists_summaries_without_operations(tmp_path: Path,
     finally:
         connection.close()
 
-    result = CliRunner().invoke(app, ["plan", "show", "--db", str(database)])
+    result = CliRunner().invoke(app, ["plan", "show", "--format", "jsonl", "--db", str(database)])
     assert result.exit_code == 0
-    payload = json.loads(result.stdout)
+    payload = _records(result.stdout)
+    assert payload[0]["type"] == "plan"
     assert payload[0]["id"] == plan_id
     assert payload[0]["operation_count"] == 1
     assert "canonical_path" not in payload[0]
@@ -186,7 +191,7 @@ def test_rm_recursively_removes_only_indexed_paths_without_touching_files(tmp_pa
     finally:
         connection.close()
 
-    result = CliRunner().invoke(app, ["rm", str(target), "--db", str(database)])
+    result = CliRunner().invoke(app, ["rm", "--format", "json", str(target), "--db", str(database)])
     assert result.exit_code == 0
     assert json.loads(result.stdout) == {
         "path": str(target),
@@ -197,7 +202,7 @@ def test_rm_recursively_removes_only_indexed_paths_without_touching_files(tmp_pa
     assert indexed_file.read_bytes() == b"payload"
     assert retained_file.read_bytes() == b"retain"
     absent.rmdir()
-    absent_result = CliRunner().invoke(app, ["rm", str(absent), "--db", str(database)])
+    absent_result = CliRunner().invoke(app, ["rm", "--format", "json", str(absent), "--db", str(database)])
     assert absent_result.exit_code == 0
     assert json.loads(absent_result.stdout)["paths_removed"] == 1
 
@@ -244,8 +249,8 @@ def test_du_defaults_to_headered_summary_with_relative_path(tmp_path: Path, monk
     try:
         register_namespace(connection, discover_namespace(source))
         scan_directory(connection, source)
-        rows = disk_usage(connection, scope=source, relative_to=tmp_path)
-        assert rows[0]["path"] == "source"
+        rows = disk_usage(connection, scope=source)
+        assert rows[0]["path"] == str(source)
         assert rows[0]["files"] == 2
         assert rows[0]["logical_size"] == 3
     finally:
@@ -263,24 +268,25 @@ def test_du_defaults_to_headered_summary_with_relative_path(tmp_path: Path, monk
     assert lines[1].endswith("  source")
     assert lines[0].index("PATH") == lines[1].index("source")
 
-    json_result = runner.invoke(app, ["du", str(source), "--format", "json", "--db", str(database)])
+    json_result = runner.invoke(app, ["du", str(source), "--format", "jsonl", "--db", str(database)])
     assert json_result.exit_code == 0
-    assert json.loads(json_result.stdout)[0]["path"] == "source"
-    assert json.loads(json_result.stdout)[0]["status"] == "scanned"
+    # Machine output carries the absolute path; only the table is relative.
+    assert _records(json_result.stdout)[0]["path"] == str(source)
+    assert _records(json_result.stdout)[0]["status"] == "ok"
 
     monkeypatch.chdir(source)
-    default_result = runner.invoke(app, ["du", "--format", "json", "--db", str(database)])
+    default_result = runner.invoke(app, ["du", "--format", "jsonl", "--db", str(database)])
     assert default_result.exit_code == 0, default_result.output
-    assert json.loads(default_result.stdout)[0]["path"] == "."
-    assert json.loads(default_result.stdout)[0]["logical_size"] == 3
+    assert _records(default_result.stdout)[0]["path"] == str(source)
+    assert _records(default_result.stdout)[0]["logical_size"] == 3
     monkeypatch.chdir(tmp_path)
 
     multiple_result = runner.invoke(
         app,
-        ["du", "source/one.bin", "source/two.bin", "--format", "json", "--db", str(database)],
+        ["du", "source/one.bin", "source/two.bin", "--format", "jsonl", "--db", str(database)],
     )
     assert multiple_result.exit_code == 0
-    assert [row["logical_size"] for row in json.loads(multiple_result.stdout)] == [1, 2]
+    assert [row["logical_size"] for row in _records(multiple_result.stdout)] == [1, 2]
 
     help_result = runner.invoke(app, ["du", "--help"])
     assert help_result.exit_code == 0
@@ -303,16 +309,16 @@ def test_du_reports_unscanned_directories_without_inventing_sizes(tmp_path: Path
     try:
         register_namespace(connection, discover_namespace(source))
         root_row = disk_usage(connection, scope=source)[0]
-        assert root_row["status"] == "unscanned"
+        assert root_row["status"] == "new"
         assert root_row["files"] is None
         assert root_row["logical_size"] is None
-        initial = CliRunner().invoke(app, ["du", str(source), "--format", "json", "--db", str(database)])
+        initial = CliRunner().invoke(app, ["du", str(source), "--format", "jsonl", "--db", str(database)])
         assert initial.exit_code == 0, initial.output
-        assert json.loads(initial.stdout)[0]["status"] == "unscanned"
+        assert _records(initial.stdout)[0]["status"] == "new"
         scan_directory(connection, source)
         later = source / "later"
         later.mkdir()
-        assert disk_usage(connection, scope=later)[0]["status"] == "unscanned"
+        assert disk_usage(connection, scope=later)[0]["status"] == "new"
     finally:
         connection.close()
 
@@ -326,17 +332,18 @@ def test_du_reports_unscanned_directories_without_inventing_sizes(tmp_path: Path
     assert lines[2].split()[:3] == ["new", "-", "-"]
     assert lines[2].endswith(str(Path("source/later")))
 
-    json_result = runner.invoke(app, ["du", "source/later", "--format", "json", "--db", str(database)])
+    json_result = runner.invoke(app, ["du", "source/later", "--format", "jsonl", "--db", str(database)])
     assert json_result.exit_code == 0, json_result.output
-    assert json.loads(json_result.stdout) == [{
-        "files": None, "entries": None, "logical_size": None, "allocated_size": None,
-        "status": "unscanned", "depth": 0, "path": str(Path("source/later")),
+    assert _records(json_result.stdout) == [{
+        "type": "entry", "path": str(tmp_path / "source" / "later"), "kind": "dir", "status": "new",
+        "logical_size": None, "allocated_size": None, "files": None, "entries": None,
+        "mtime_ns": None, "complete_through_ns": None, "depth": 0,
     }]
 
-    default_result = runner.invoke(app, ["du", "--format", "json", "--db", str(database)])
+    default_result = runner.invoke(app, ["du", "--format", "jsonl", "--db", str(database)])
     assert default_result.exit_code == 0, default_result.output
-    assert json.loads(default_result.stdout)[0]["path"] == "."
-    assert json.loads(default_result.stdout)[0]["status"] == "unscanned"
+    assert _records(default_result.stdout)[0]["path"] == str(tmp_path)
+    assert _records(default_result.stdout)[0]["status"] == "new"
 
 
 @pytest.mark.scan
@@ -359,9 +366,9 @@ def test_du_uses_ls_coverage_status_for_partial_directory(tmp_path: Path, monkey
             failed_scan.setattr("flatlas.scanning.os.scandir", fail_nested)
             assert scan_directory(connection, source)["status"] == "partial"
 
-        ls_status = next(row["status"] for row in list_child_directories(connection, scope=source) if row["name"] == "nested")
+        ls_status = next(row["status"] for row in list_child_directories(connection, scope=source) if Path(row["path"]).name == "nested")
         du_row = disk_usage(connection, scope=nested)[0]
-        assert ls_status == du_row["status"] == "incomplete"
+        assert ls_status == du_row["status"] == "part"
         assert du_row["logical_size"] == 5
     finally:
         connection.close()
@@ -386,13 +393,15 @@ def test_largest_is_scoped_to_path_and_defaults_to_cwd(tmp_path: Path, monkeypat
         register_namespace(connection, discover_namespace(source))
         scan_directory(connection, source)
         assert [row["path"] for row in largest_files(connection, scope=inside)] == [
-            str(Path("nested") / "large.bin"),
-            "small.bin",
+            str(nested / "large.bin"),
+            str(inside / "small.bin"),
         ]
         assert [row["path"] for row in largest_files(connection, scope=inside, limit=1)] == [
-            str(Path("nested") / "large.bin")
+            str(nested / "large.bin")
         ]
-        assert [row["path"] for row in largest_files(connection, scope=inside / "small.bin")] == ["."]
+        assert [row["path"] for row in largest_files(connection, scope=inside / "small.bin")] == [
+            str(inside / "small.bin")
+        ]
     finally:
         connection.close()
 
@@ -406,9 +415,9 @@ def test_largest_is_scoped_to_path_and_defaults_to_cwd(tmp_path: Path, monkeypat
     assert lines[2].endswith("small.bin")
 
     monkeypatch.chdir(inside)
-    defaulted = runner.invoke(app, ["largest", "--limit", "1", "--format", "json", "--db", str(database)])
+    defaulted = runner.invoke(app, ["largest", "--limit", "1", "--format", "jsonl", "--db", str(database)])
     assert defaulted.exit_code == 0
-    assert [row["path"] for row in json.loads(defaulted.stdout)] == [str(Path("nested") / "large.bin")]
+    assert [row["path"] for row in _records(defaulted.stdout)] == [str(nested / "large.bin")]
 
 
 @pytest.mark.query
@@ -424,18 +433,22 @@ def test_largest_defaults_to_ten_and_accepts_short_limit_alias(tmp_path: Path) -
     try:
         register_namespace(connection, discover_namespace(source))
         scan_directory(connection, source)
-        assert len(largest_files(connection, scope=source)) == 10
+        # The query has no implicit limit; only the CLI table shows 10 by default.
+        assert len(largest_files(connection, scope=source)) == 12
     finally:
         connection.close()
 
     runner = CliRunner()
-    default_result = runner.invoke(app, ["largest", str(source), "--format", "json", "--db", str(database)])
+    default_result = runner.invoke(app, ["largest", str(source), "--format", "jsonl", "--db", str(database)])
     assert default_result.exit_code == 0
-    assert [row["logical_size"] for row in json.loads(default_result.stdout)] == list(range(12, 2, -1))
+    assert [row["logical_size"] for row in _records(default_result.stdout)] == list(range(12, 0, -1))
+    table_result = runner.invoke(app, ["largest", str(source), "--db", str(database)])
+    assert table_result.exit_code == 0
+    assert len(table_result.stdout.splitlines()) == 1 + 10
 
-    short_result = runner.invoke(app, ["largest", str(source), "-n", "2", "--format", "json", "--db", str(database)])
+    short_result = runner.invoke(app, ["largest", str(source), "-n", "2", "--format", "jsonl", "--db", str(database)])
     assert short_result.exit_code == 0
-    assert [row["logical_size"] for row in json.loads(short_result.stdout)] == [12, 11]
+    assert [row["logical_size"] for row in _records(short_result.stdout)] == [12, 11]
 
     help_result = runner.invoke(app, ["largest", "--help"])
     assert help_result.exit_code == 0
@@ -471,20 +484,20 @@ def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch
         empty.rmdir()
         (source / "new").mkdir()
         rows = list_child_directories(connection, scope=source)
-        by_name = {row["name"]: row for row in rows}
+        by_name = {Path(row["path"]).name: row for row in rows}
         assert list(by_name) == ["complete", "empty", "nested", "new"]
-        assert by_name["complete"]["status"] == "scanned"
+        assert by_name["complete"]["status"] == "ok"
         assert by_name["complete"]["logical_size"] == 4
-        assert by_name["complete"]["subtree_complete_through_ns"] is not None
-        assert by_name["empty"]["status"] == "missing"
+        assert by_name["complete"]["complete_through_ns"] is not None
+        assert by_name["empty"]["status"] == "gone"
         assert by_name["empty"]["logical_size"] == 0
-        assert by_name["empty"]["subtree_complete_through_ns"] is not None
-        assert by_name["nested"]["status"] == "incomplete"
+        assert by_name["empty"]["complete_through_ns"] is not None
+        assert by_name["nested"]["status"] == "part"
         assert by_name["nested"]["files"] == 1
-        assert by_name["nested"]["subtree_complete_through_ns"] is not None
-        assert by_name["new"]["status"] == "unscanned"
+        assert by_name["nested"]["complete_through_ns"] is not None
+        assert by_name["new"]["status"] == "new"
         assert by_name["new"]["files"] is None
-        assert by_name["new"]["subtree_complete_through_ns"] is None
+        assert by_name["new"]["complete_through_ns"] is None
         empty_state = connection.execute(
             "SELECT state FROM path WHERE path_display=?",
             (str(empty),),
@@ -521,12 +534,12 @@ def test_ls_does_not_treat_equal_scan_times_as_completed_coverage(tmp_path: Path
 
         scans = connection.execute("SELECT id, started_at_ns FROM scan ORDER BY id").fetchall()
         assert scans[0]["started_at_ns"] == scans[1]["started_at_ns"]
-        statuses = {row["name"]: row["status"] for row in list_child_directories(connection, scope=source)}
-        assert statuses == {"complete": "scanned", "parent": "scanned"}
-        assert disk_usage(connection, scope=parent)[0]["status"] == "incomplete"
+        statuses = {Path(row["path"]).name: row["status"] for row in list_child_directories(connection, scope=source)}
+        assert statuses == {"complete": "ok", "parent": "ok"}
+        assert disk_usage(connection, scope=parent)[0]["status"] == "part"
         child_rows = list_child_directories(connection, scope=parent)
-        assert child_rows[0]["name"] == "child"
-        assert child_rows[0]["status"] == "incomplete"
+        assert Path(child_rows[0]["path"]).name == "child"
+        assert child_rows[0]["status"] == "part"
         assert connection.execute(
             "SELECT state FROM path WHERE path_display=?", (str(child / "old.bin"),)
         ).fetchone()["state"] == "present"
@@ -556,9 +569,9 @@ def test_ls_refresh_status_uses_directory_itself_without_descendant_checks(tmp_p
         with monkeypatch.context() as partial_scan:
             partial_scan.setattr("flatlas.scanning.os.scandir", fail_child)
             assert scan_directory(connection, source, refresh_before_ns=previous_time + 5)["status"] == "partial"
-        assert list_child_directories(connection, scope=source)[0]["status"] == "scanned"
-        assert list_child_directories(connection, scope=parent)[0]["status"] == "incomplete"
-        assert disk_usage(connection, scope=parent)[0]["status"] == "incomplete"
+        assert list_child_directories(connection, scope=source)[0]["status"] == "ok"
+        assert list_child_directories(connection, scope=parent)[0]["status"] == "part"
+        assert disk_usage(connection, scope=parent)[0]["status"] == "part"
     finally:
         connection.close()
 
@@ -583,7 +596,7 @@ def test_scan_reports_file_count_and_logical_size_progress(tmp_path: Path, monke
         connection.close()
 
     monkeypatch.setattr("flatlas.cli._stderr_is_tty", lambda: True)
-    result = CliRunner().invoke(app, ["scan", str(source), "--db", str(database)])
+    result = CliRunner().invoke(app, ["scan", "--format", "json", str(source), "--db", str(database)])
     assert result.exit_code == 0
     summary = json.loads(result.stdout)
     assert summary["files_seen"] == 3
@@ -695,15 +708,12 @@ def test_dupes_scopes_grouped_output_to_path_and_defaults_to_cwd(tmp_path: Path,
     assert f"    {inside / 'large-b.bin'}" in absolute_result.stdout
 
     monkeypatch.chdir(inside)
-    json_result = runner.invoke(app, ["dupes", "--format", "json", "--db", str(database)])
+    json_result = runner.invoke(app, ["dupes", "--format", "jsonl", "--db", str(database)])
     assert json_result.exit_code == 0
-    payload = json.loads(json_result.stdout)
-    assert payload["hash"]["complete"] is True
-    assert [group["theoretical_savings"] for group in payload["groups"]] == [14]
-    assert [path["path_display"] for path in payload["groups"][0]["paths"]] == [
-        "large-a.bin",
-        "large-b.bin",
-    ]
+    hash_record, *groups = _records(json_result.stdout)
+    assert hash_record["type"] == "hash" and hash_record["complete"] is True
+    assert [group["theoretical_savings"] for group in groups] == [14]
+    assert groups[0]["paths"] == [str(inside / "large-a.bin"), str(inside / "large-b.bin")]
 
     old_command = runner.invoke(app, ["duplicates", "--db", str(database)])
     assert old_command.exit_code != 0
@@ -840,16 +850,16 @@ def test_ls_lists_direct_files_and_preserves_gone_file_metadata(tmp_path: Path) 
         fresh = source / "fresh.bin"
         fresh.write_bytes(b"fresh")
 
-        by_name = {row["name"]: row for row in list_child_directories(connection, scope=source)}
-        assert by_name["live.bin"]["entry_kind"] == "file"
-        assert by_name["live.bin"]["status"] == "scanned"
+        by_name = {Path(row["path"]).name: row for row in list_child_directories(connection, scope=source)}
+        assert by_name["live.bin"]["kind"] == "file"
+        assert by_name["live.bin"]["status"] == "ok"
         assert by_name["live.bin"]["logical_size"] == 3
         assert by_name["live.bin"]["files"] == 1
-        assert by_name["fresh.bin"]["status"] == "unscanned"
+        assert by_name["fresh.bin"]["status"] == "new"
         assert by_name["fresh.bin"]["logical_size"] == 5
         assert by_name["fresh.bin"]["files"] == 1
-        assert by_name["gone.bin"]["entry_kind"] == "file"
-        assert by_name["gone.bin"]["status"] == "missing"
+        assert by_name["gone.bin"]["kind"] == "file"
+        assert by_name["gone.bin"]["status"] == "gone"
         assert by_name["gone.bin"]["logical_size"] == 4
         assert by_name["gone.bin"]["files"] == 1
     finally:
@@ -893,16 +903,17 @@ def test_ls_shows_subtree_scan_time_in_table_json_and_csv(tmp_path: Path) -> Non
     assert table_rows["file.bin"][-2] == "-"
     assert table_rows["new"][-2] == "-"
 
-    json_result = runner.invoke(app, [*arguments, "--format", "json"])
+    json_result = runner.invoke(app, [*arguments, "--format", "jsonl"])
     csv_result = runner.invoke(app, [*arguments, "--format", "csv"])
     assert json_result.exit_code == csv_result.exit_code == 0
-    json_rows = {row["name"]: row for row in json.loads(json_result.stdout)}
-    csv_rows = {row["name"]: row for row in csv.DictReader(csv_result.stdout.splitlines())}
-    assert json_rows["indexed"]["subtree_complete_through_ns"] == scanned_through
-    assert csv_rows["indexed"]["subtree_complete_through_ns"] == str(scanned_through)
-    for name in ("file.bin", "new"):
-        assert json_rows[name]["subtree_complete_through_ns"] is None
-        assert csv_rows[name]["subtree_complete_through_ns"] == ""
+    json_rows = {Path(row["path"]).name: row for row in _records(json_result.stdout)}
+    csv_rows = {Path(row["path"]).name: row for row in csv.DictReader(csv_result.stdout.splitlines())}
+    assert json_rows["indexed"]["complete_through_ns"] == scanned_through
+    assert csv_rows["indexed"]["complete_through_ns"] == str(scanned_through)
+    # Unscanned: unknown. A file's coverage is its parent's listing, which completed.
+    assert json_rows["new"]["complete_through_ns"] is None
+    assert csv_rows["new"]["complete_through_ns"] == ""
+    assert json_rows["file.bin"]["complete_through_ns"] is not None
 
 
 @pytest.mark.query
@@ -1013,7 +1024,7 @@ def test_ls_skips_recursive_checks_after_cancellation_and_keeps_cached_usage(
             raise AssertionError("scan should be cancelled in the active branch")
 
         monkeypatch.setattr("flatlas.scanning.os.scandir", real_scandir)
-        assert disk_usage(connection, scope=completed)[0]["status"] == "scanned"
+        assert disk_usage(connection, scope=completed)[0]["status"] == "ok"
         cached_usage = connection.execute(
             """SELECT subtree_files, subtree_logical_size, subtree_complete_through_ns
                FROM directory_summary ds JOIN path p ON p.id=ds.path_id
@@ -1032,19 +1043,19 @@ def test_ls_skips_recursive_checks_after_cancellation_and_keeps_cached_usage(
         connection.set_trace_callback(None)
         assert not any("WITH RECURSIVE" in statement.upper() for statement in statements)
         statuses = {
-            row["name"]: row["status"]
+            Path(row["path"]).name: row["status"]
             for row in rows
         }
         assert statuses == {
-            completed.name: "scanned",
-            active.name: "incomplete",
-            untouched.name: "scanned",
+            completed.name: "ok",
+            active.name: "part",
+            untouched.name: "ok",
         }
-        completed_row = next(row for row in rows if row["name"] == completed.name)
+        completed_row = next(row for row in rows if Path(row["path"]).name == completed.name)
         assert completed_row["files"] == cached_usage["subtree_files"]
         assert completed_row["logical_size"] == cached_usage["subtree_logical_size"]
-        assert completed_row["subtree_complete_through_ns"] == cached_usage["subtree_complete_through_ns"]
-        assert list_child_directories(connection, scope=completed)[0]["status"] == "scanned"
+        assert completed_row["complete_through_ns"] == cached_usage["subtree_complete_through_ns"]
+        assert list_child_directories(connection, scope=completed)[0]["status"] == "ok"
     finally:
         connection.close()
 
@@ -1062,10 +1073,10 @@ def test_cli_reports_pending_migration_progress_to_stderr(tmp_path: Path) -> Non
     connection.commit()
     connection.close()
 
-    result = CliRunner().invoke(app, ["du", str(source), "--format", "json", "--db", str(database)])
+    result = CliRunner().invoke(app, ["du", str(source), "--format", "jsonl", "--db", str(database)])
 
     assert result.exit_code == 0
-    assert json.loads(result.stdout)[0]["logical_size"] == len(b"payload")
+    assert _records(result.stdout)[0]["logical_size"] == len(b"payload")
     assert "database migration 2 required: cache directory usage and scan freshness" in result.stderr
     assert "Migrating database 2:" in result.stderr
     assert "database migration 2 completed" in result.stderr
@@ -1459,7 +1470,7 @@ def test_completed_scan_confirms_directory_deletion_and_reappearance_stales_hash
     finally:
         connection.close()
 
-    result = CliRunner().invoke(app, ["scan", str(source / "missing"), "--db", str(tmp_path / "index.sqlite")])
+    result = CliRunner().invoke(app, ["scan", "--format", "json", str(source / "missing"), "--db", str(tmp_path / "index.sqlite")])
     assert result.exit_code == 1
     assert "path does not exist" in str(result.exception)
 
@@ -1642,7 +1653,7 @@ def test_resume_preserves_existing_refresh_cutoff(tmp_path: Path) -> None:
 def test_cli_rejects_resume_with_refresh_before(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         app,
-        ["scan", str(tmp_path), "--resume", "--refresh-before", "7d", "--db", str(tmp_path / "index.sqlite")],
+        ["scan", "--format", "json", str(tmp_path), "--resume", "--refresh-before", "7d", "--db", str(tmp_path / "index.sqlite")],
     )
 
     assert result.exit_code == 2
@@ -1679,7 +1690,7 @@ def test_cli_resumes_from_explicit_scan_id(tmp_path: Path) -> None:
 
     result = CliRunner().invoke(
         app,
-        ["scan", "--resume-from", str(cancelled["id"]), "--db", str(database)],
+        ["scan", "--format", "json", "--resume-from", str(cancelled["id"]), "--db", str(database)],
     )
 
     assert result.exit_code == 0
@@ -1693,7 +1704,7 @@ def test_cli_resumes_from_explicit_scan_id(tmp_path: Path) -> None:
 def test_cli_rejects_path_with_resume_from(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         app,
-        ["scan", str(tmp_path), "--resume-from", "1", "--db", str(tmp_path / "index.sqlite")],
+        ["scan", "--format", "json", str(tmp_path), "--resume-from", "1", "--db", str(tmp_path / "index.sqlite")],
     )
 
     assert result.exit_code == 2
@@ -1771,14 +1782,14 @@ def test_scan_audit_cli_outputs_table_and_json(tmp_path: Path) -> None:
 
     json_result = runner.invoke(
         app,
-        ["scans", str(source), "--format", "json", "--db", str(database)],
+        ["scans", str(source), "--format", "jsonl", "--db", str(database)],
     )
     assert json_result.exit_code == 0
-    assert json.loads(json_result.stdout)[0]["scan_id"] == result["scan_id"]
+    assert _records(json_result.stdout)[0]["scan_id"] == result["scan_id"]
 
     info_result = runner.invoke(
         app,
-        ["scan-info", str(result["scan_id"]), "--db", str(database)],
+        ["scan-info", "--format", "json", str(result["scan_id"]), "--db", str(database)],
     )
     assert info_result.exit_code == 0
     details = json.loads(info_result.stdout)
@@ -1871,7 +1882,9 @@ def test_index_queries_and_cached_duplicates_work_after_source_goes_offline(tmp_
             str(source / "b.bin"),
         ]
         assert disk_usage(connection, scope=source)[0]["logical_size"] == 8
-        assert [row["path"] for row in largest_files(connection, scope=source)] == ["a.bin", "b.bin"]
+        assert [row["path"] for row in largest_files(connection, scope=source)] == [
+            str(source / "a.bin"), str(source / "b.bin"),
+        ]
         assert ensure_duplicate_hashes(connection, source).content_files_read == 0
         assert duplicate_groups(connection, scope=source)[0]["count"] == 2
     finally:
@@ -1901,26 +1914,26 @@ def test_json_csv_output_and_read_only_commands_preserve_user_files(tmp_path: Pa
 
     runner = CliRunner()
     for command in ("du", "ls", "largest", "dupes"):
-        arguments = [command, str(source), "--format", "json", "--db", str(database)]
+        arguments = [command, str(source), "--format", "jsonl", "--db", str(database)]
         result = runner.invoke(app, arguments)
         assert result.exit_code == 0, result.output
-        json.loads(result.stdout)
+        assert all(record["type"] for record in _records(result.stdout))
         csv_result = runner.invoke(app, [command, str(source), "--format", "csv", "--db", str(database)])
         assert csv_result.exit_code == 0, csv_result.output
         list(csv.reader(csv_result.stdout.splitlines()))
 
     for command in ("roots", "df"):
-        result = runner.invoke(app, [command, "--format", "json", "--db", str(database)])
+        result = runner.invoke(app, [command, "--format", "jsonl", "--db", str(database)])
         assert result.exit_code == 0
-        assert json.loads(result.stdout)
+        assert _records(result.stdout)
     plan = runner.invoke(app, ["plan", "create", "--root", str(source), "--db", str(database)])
     assert plan.exit_code == 0
     assert runner.invoke(app, ["plan", "show", plan.stdout.strip(), "--db", str(database)]).exit_code == 0
     exported = tmp_path / "dupes.json"
     assert runner.invoke(
-        app, ["dupes", "--format", "json", "--output", str(exported), str(source), "--db", str(database)]
+        app, ["dupes", "--format", "jsonl", "--output", str(exported), str(source), "--db", str(database)]
     ).exit_code == 0
-    assert json.loads(exported.read_text(encoding="utf-8"))["groups"]
+    assert [record["type"] for record in _records(exported.read_text(encoding="utf-8"))] == ["hash", "group"]
     assert "apply" not in {command.name for command in app.registered_commands}
     after = {path.relative_to(source): (path.read_bytes(), path.stat().st_mtime_ns) for path in source.rglob("*") if path.is_file()}
     assert after == before
