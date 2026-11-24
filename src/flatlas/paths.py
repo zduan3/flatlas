@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import sqlite3
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -118,9 +122,73 @@ def scope_path(value: Path | str, *, follow: bool = True) -> Path:
     """
     raw = os.path.expanduser(os.fspath(value))
     if follow or raw.endswith(os.sep) or Path(raw).name in {"", ".", ".."}:
-        return Path(raw).resolve()
+        if ".." in raw.split(os.sep):
+            # ".." after a symlink means the target's parent; only resolve() knows.
+            return Path(raw).resolve()
+        return _resolve_directory(Path(os.path.abspath(raw)))
     absolute = Path(os.path.abspath(raw))
-    return absolute.parent.resolve() / absolute.name
+    return _resolve_directory(absolute.parent) / absolute.name
+
+
+@dataclass
+class _RealpathMemo:
+    prefixes: dict[str, str]
+    resolved: dict[str, Path]
+
+
+_REALPATH_MEMO: ContextVar[_RealpathMemo | None] = ContextVar("flatlas_realpath_memo", default=None)
+
+
+@contextmanager
+def shared_path_resolution() -> Iterator[None]:
+    """Resolve each directory prefix once for all paths looked up in this block.
+
+    ``realpath`` stats every component of every path; a command given thousands
+    of paths under one tree (``du --files0-from``) repeats the same ancestors,
+    which costs a metadata round trip each on network filesystems. Inside the
+    block a resolved prefix is reused, so symlinks changed meanwhile are not
+    noticed: use it for one command, not for a long-lived process.
+    """
+    token = _REALPATH_MEMO.set(_RealpathMemo({}, {}))
+    try:
+        yield
+    finally:
+        _REALPATH_MEMO.reset(token)
+
+
+def _resolve_directory(path: Path) -> Path:
+    """``path.resolve()`` for an absolute, lexically normal path, memoized per prefix when enabled."""
+    memo = _REALPATH_MEMO.get()
+    if memo is None or os.name == "nt":
+        return path.resolve()
+    key = os.fspath(path)
+    if (done := memo.resolved.get(key)) is not None:
+        return done
+    result = Path(_memo_realpath(key, memo.prefixes))
+    # Like Path.resolve(): non-strict realpath hides symlink loops, stat reveals them.
+    try:
+        result.stat()
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise RuntimeError(f"Symlink loop from {exc.filename!r}") from None
+    memo.resolved[key] = result
+    return result
+
+
+def _memo_realpath(path: str, memo: dict[str, str]) -> str:
+    # realpath(P/name) == realpath(realpath(P)/name): resolve the parent once,
+    # then only this component needs an lstat; links defer to realpath itself.
+    cached = memo.get(path)
+    if cached is not None:
+        return cached
+    parent, name = os.path.split(path)
+    if not name or parent == path:
+        result = os.path.realpath(path)
+    else:
+        candidate = os.path.join(_memo_realpath(parent, memo), name)
+        result = os.path.realpath(candidate) if os.path.islink(candidate) else candidate
+    memo[path] = result
+    return result
 
 
 def indexed_key(connection: sqlite3.Connection, value: Path) -> tuple[int, bytes] | None:

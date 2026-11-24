@@ -11,6 +11,7 @@
 - JSON/CSV 字段稳定、可解析；二进制 digest 以 hex 输出；`--output PATH` 写入文件（自动创建父目录）。
 - `--db PATH` 只是全局索引位置的显式覆盖。
 - 按路径定位条目（`du`、`find`、`ls` 等的 PATH，`scans PATH`、`rm PATH`）时，由已登记 root 的路径算出 `(root_id, path_key)` 走唯一索引；`path_display` 没有索引，只在这样查不到时（如非 UTF-8 名字）回退按显示路径全表查找。
+- PATH 的父级分量与 `realpath` 一样逐级解析 symlink。`du`、`find` 一条命令内按目录前缀记忆解析结果，同一前缀只 `lstat` 一次（`--files0-from` 给出数万个同一棵树下的路径时，逐个 `realpath` 会把公共祖先反复 stat；Lustre 上 2.97 万个路径 61 万次 `lstat`、21 s → 3.2 万次）；结果与 `Path.resolve()` 相同，含 symlink 环报错，`..` 跟在 symlink 后时仍交给 `resolve()`。记忆只在单条命令内有效。
 - `flatlas --version` 输出正在运行的包版本；可访问源码仓库时附加 Git 提交、提交日期和 `dirty` 状态，否则回退为纯包版本。该命令无需初始化或打开索引数据库。
 
 ### 大小显示

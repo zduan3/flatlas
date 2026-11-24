@@ -60,6 +60,7 @@ from flatlas.core import (
 from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError
 from flatlas.findexpr import is_expression_start, parse_find_expression
+from flatlas.paths import shared_path_resolution
 from flatlas.refresh import parse_refresh_before
 from flatlas.version import current_version
 
@@ -959,7 +960,7 @@ def du(
                 scopes.append(name)
     else:
         scopes = paths or ["."]
-    with _connection(db, write=False) as connection:
+    with _connection(db, write=False) as connection, shared_path_resolution():
         for path in scopes:
             try:
                 rows.extend(disk_usage(
@@ -1027,7 +1028,7 @@ def find_command(
     expression = parse_find_expression(arguments[split:])
     stream = sys.stdout.buffer
     failed = False
-    with _connection(db, write=False) as connection:
+    with _connection(db, write=False) as connection, shared_path_resolution():
         for start in starts:
             try:
                 for path, terminator in find_paths(connection, start, expression, follow_symlink=dereference_args):
