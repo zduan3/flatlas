@@ -171,6 +171,41 @@ jdupes -r D:\Archive\Photos\2025
 
 不要把 `flatlas dupes` 的导出结果直接管道到删除命令。dry-run plan 也只是候选建议快照；flatlas 没有 `apply`。
 
+## 脚本与自动化
+
+脚本使用机器输出：`--format jsonl` 每行一个记录，路径是绝对路径，字段与单位在各命令间一致，没有隐式行数上限；字段表见 [查询命令：机器输出](docs/design/queries.md#机器输出)。PATH 无法使用时退出码为 1（其余参数照常输出），用法错误为 2。不写用户配置时，用 `FLATLAS_DB` 指定索引，用 `FLATLAS_NO_CONFIG=1` 忽略个人保存的默认参数：
+
+```bash
+export FLATLAS_DB=/srv/indexes/flatlas/index.sqlite FLATLAS_NO_CONFIG=1
+```
+
+以下配方都只读索引（扫描之后执行），以 `/data/projects` 为例。
+
+**概览**：每个子目录的字节与条目数。目录的大小、文件数与条目数取索引中的子树合计，不额外遍历，数百行在一秒内返回：
+
+```bash
+flatlas find --format jsonl /data/projects -mindepth 1 -maxdepth 1 -type d \
+  | jq -r '[.entries, .logical_size, .status, .path] | @tsv' | sort -rn | head
+```
+
+**可重建候选**：按名字找出最外层的候选目录，带上各自大小；再算它们合起来删除能腾出多少（同一 inode 的 hardlink 只计一次，链接在范围外的不计入）：
+
+```bash
+names='( -name build -o -name __pycache__ -o -name .venv -o -name node_modules )'
+flatlas find --format jsonl /data/projects -type d $names -prune > candidates.jsonl
+flatlas find /data/projects -type d $names -prune -print0 > candidates.lst
+flatlas du --files0-from candidates.lst -c --freed --format jsonl | tail -1
+```
+
+名字只是线索：同名目录也可能是源码里的包或原始数据，删除前逐个核对。
+
+**删除后同步索引**：flatlas 不删除文件。按核对后的清单在 flatlas 之外删除，再用同一份清单从索引移除这些子树（一个事务，只重算受影响的父目录汇总）；也可以对仍存在的父目录重新扫描，由扫描确认删除：
+
+```bash
+xargs -0 rm -rf -- < reviewed.lst        # 在 flatlas 之外、核对之后执行
+flatlas rm --files0-from reviewed.lst --format json
+```
+
 ## 开发文档
 
 当前设计、开发计划、历史记录和调研资料均在[开发文档导航](docs/README.md)中分类；源码开发的环境准备和检查命令见[开发环境与依赖策略](docs/development.md)。
