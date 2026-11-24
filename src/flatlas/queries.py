@@ -6,8 +6,9 @@ import json
 import os
 import shutil
 import sqlite3
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -736,20 +737,41 @@ def duplicate_groups(
     )[:filters.limit]
 
 
+@dataclass(frozen=True)
+class FindHit:
+    """One print action of a ``find`` expression."""
+
+    path: str  # as GNU find prints it: the start point as given plus relative components
+    terminator: str
+    record: dict[str, Any] | None = None  # the entry record, when requested
+
+
+_FIND_COLUMNS = "p.id, p.path_key, p.name_raw, p.entry_kind, p.mode, p.state"
+_FIND_METADATA_COLUMNS = f"""{_FIND_COLUMNS}, p.parent_path_id, p.path_display, p.logical_size,
+    p.allocated_size, p.mtime_ns, p.first_seen_scan_id, p.last_seen_scan_id,
+    ds.path_id AS summary_id, ds.subtree_files, ds.subtree_entries, ds.subtree_logical_size,
+    ds.subtree_allocated_size, ds.self_completed_at_ns, ds.subtree_complete_through_ns,
+    ds.last_completed_scan_id"""
+_PARENT_CACHE_SIZE = 4096
+
+
 def find_paths(
     connection: sqlite3.Connection,
     start: str,
     expression: FindExpression,
     *,
     follow_symlink: bool = False,
-) -> Iterator[tuple[str, str]]:
+    records: bool = False,
+) -> Iterator[FindHit]:
     """Evaluate a GNU ``find`` expression over the present indexed tree under ``start``.
 
-    Yields ``(printed path, terminator)`` for each print action, in GNU order:
-    a directory before its entries. Printed paths are ``start`` as given plus
-    the relative components, like GNU find. Only the index is read; ``start``
-    must be indexed and present. A final symlink in ``start`` is examined
-    itself unless ``follow_symlink`` or a trailing ``/``.
+    Yields a :class:`FindHit` for each print action, in GNU order: a directory
+    before its entries. Printed paths are ``start`` as given plus the relative
+    components, like GNU find. Only the index is read; ``start`` must be
+    indexed and present. A final symlink in ``start`` is examined itself unless
+    ``follow_symlink`` or a trailing ``/``. With ``records`` each hit carries
+    the entry record (see :mod:`flatlas.records`); a directory's status, as in
+    ``ls``, describes whether the directory itself was completely enumerated.
     """
     selected = _scope_row(connection, start, follow=follow_symlink)
     root_id = int(selected["root_id"])
@@ -757,16 +779,89 @@ def find_paths(
     start_parts = start_key.count(b"\0")
     prefix = start if start.endswith("/") else start + "/"
     max_depth = expression.max_depth
+    metadata = records or expression.needs_metadata
+    columns = _FIND_METADATA_COLUMNS if metadata else _FIND_COLUMNS
+    source = "path p LEFT JOIN directory_summary ds ON ds.path_id=p.id" if metadata else "path p"
+    scopes = _scan_scopes(connection, root_id) if metadata else []
+    parents: OrderedDict[int, sqlite3.Row | None] = OrderedDict()
 
-    start_row = connection.execute("SELECT entry_kind, mode FROM path WHERE id=?", (int(selected["id"]),)).fetchone()
-    context = FindContext()
-    if expression.min_depth == 0:
+    def parent_summary(path_id: int | None) -> sqlite3.Row | None:
+        # Rows arrive in path order, so a parent was usually just seen; the
+        # cache keeps the recently used ones and falls back to a lookup.
+        if path_id is None:
+            return None
+        if path_id in parents:
+            parents.move_to_end(path_id)
+            return parents[path_id]
+        found = connection.execute(
+            "SELECT self_completed_at_ns, last_completed_scan_id FROM directory_summary WHERE path_id=?", (path_id,)
+        ).fetchone()
+        remember(path_id, found)
+        return found
+
+    def remember(path_id: int, summary: sqlite3.Row | None) -> None:
+        parents[path_id] = summary
+        if len(parents) > _PARENT_CACHE_SIZE:
+            parents.popitem(last=False)
+
+    def visit(row: sqlite3.Row, path: str, name: str, depth: int) -> tuple[FindContext, list[FindHit]]:
+        kind = str(row["entry_kind"])
+        context = FindContext()
+        if not metadata:
+            expression.evaluate(FindEntry(path, name, kind, row["mode"], depth), context)
+            return context, [FindHit(printed, terminator) for printed, terminator in context.output]
+        directory = kind in {"root", "directory"}
+        summary = row if row["summary_id"] is not None else None
+        if directory:
+            remember(int(row["id"]), summary)
+        status: list[str] = []
+
+        def status_of() -> str:
+            if not status:
+                status.append(_entry_scan_status(
+                    connection, row, kind, bytes(row["path_key"]), scopes, summary,
+                    parent_summary(row["parent_path_id"]), check_subtree=False,
+                ))
+            return status[0]
+
+        is_file = kind == "file"
+        if directory:
+            size = None if summary is None else row["subtree_logical_size"]
+            entries = None if summary is None else row["subtree_entries"]
+        else:
+            size, entries = (row["logical_size"] if is_file else None), 1
         expression.evaluate(
-            FindEntry(start, os.path.basename(start.rstrip("/")) or start, str(start_row["entry_kind"]),
-                      start_row["mode"], 0),
+            FindEntry(path, name, kind, row["mode"], depth, size=size, entries=entries,
+                      mtime_ns=row["mtime_ns"], status=status_of),
             context,
         )
-    yield from context.output
+        if not context.output:
+            return context, []
+        record = None
+        if records:
+            if directory:
+                files = None if summary is None else row["subtree_files"]
+                allocated = None if summary is None else row["subtree_allocated_size"]
+                complete = None if summary is None else row["subtree_complete_through_ns"]
+            else:
+                files = 1 if is_file else None
+                allocated = row["allocated_size"] if is_file else None
+                parent = parent_summary(row["parent_path_id"])
+                complete = None if parent is None else parent["self_completed_at_ns"]
+            record = entry_record(
+                path=str(row["path_display"]), kind=kind, status=status_of(), logical_size=size,
+                allocated_size=allocated, files=files, entries=entries, mtime_ns=row["mtime_ns"],
+                complete_through_ns=complete, depth=depth,
+            )
+        return context, [FindHit(printed, terminator, record) for printed, terminator in context.output]
+
+    start_row = connection.execute(
+        f"SELECT {columns} FROM {source} WHERE p.id=?", (int(selected["id"]),)
+    ).fetchone()
+    context = FindContext()
+    if expression.min_depth == 0:
+        context, hits = visit(start_row, start, os.path.basename(start.rstrip("/")) or start, 0)
+        yield from hits
     if context.prune or max_depth == 0:
         return
 
@@ -779,9 +874,9 @@ def find_paths(
     lower = start_key
     while True:
         rows = connection.execute(
-            f"""SELECT path_key, name_raw, entry_kind, mode, state FROM path
-                WHERE root_id=? AND path_key>? {'' if upper is None else 'AND path_key<?'}
-                ORDER BY path_key""",
+            f"""SELECT {columns} FROM {source}
+                WHERE p.root_id=? AND p.path_key>? {'' if upper is None else 'AND p.path_key<?'}
+                ORDER BY p.path_key""",
             (root_id, lower) if upper is None else (root_id, lower, upper),
         )
         skip_to: bytes | None = None
@@ -791,8 +886,7 @@ def find_paths(
             if leaf_skip is not None and key.startswith(leaf_skip):
                 continue
             leaf_skip = None
-            kind = str(row["entry_kind"])
-            is_directory = kind in {"root", "directory"}
+            is_directory = row["entry_kind"] in {"root", "directory"}
             if row["state"] != "present":
                 # The former walk descended through present rows only.
                 if is_directory:
@@ -806,9 +900,8 @@ def find_paths(
                 # Names never contain "/" or NUL, so one decode of the joined
                 # suffix equals decoding and joining each component.
                 path = prefix + os.fsdecode(key[len(start_key):-1].replace(b"\0", b"/"))
-                expression.evaluate(FindEntry(path, os.fsdecode(bytes(row["name_raw"])), kind, row["mode"], depth),
-                                    context)
-                yield from context.output
+                context, hits = visit(row, path, os.fsdecode(bytes(row["name_raw"])), depth)
+                yield from hits
             if context.prune or (max_depth is not None and depth >= max_depth):
                 if is_directory:
                     skip_to = key

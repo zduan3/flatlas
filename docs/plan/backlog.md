@@ -15,11 +15,6 @@
   目标：在 Windows 原生与 WSL 上各跑一次全量 pytest，修复问题并记入 [验证记录](../history/verification-log.md)。
   原因：自 `fix(du)` `12e3ce1` 之后的提交只在 Linux 验证过，其中涉及平台的有：查询输出直接写 `sys.stdout`（换行）、`realpath` 前缀记忆在 Windows 上回退 `Path.resolve()`、扫描由 `fsencode(name)` 拼接子条目 key、跨盘符的相对显示；`test_allocation.py` 中仅 Windows 运行的用例改为 `jsonl` 后未实际运行。在 `find --format` 之前清掉平台问题，之后出错容易定位。
 
-- **`find` 输出条目记录与新测试**
-  目标：`find --format jsonl|csv|table`；`-size`、`-entries`、`-mtime`、`-status`。
-  原因：概览与候选统计目前要多条命令、多次重开索引；一条 `find` 即可给出每个目录的子树字节与条目数。
-  → [proposals/automation.md](proposals/automation.md#find-作为自动化入口)
-
 - **索引位置与配置隔离**
   目标：`FLATLAS_DB`；`FLATLAS_NO_CONFIG` / `--no-config`。
   原因：agent 沙箱内 `~/.config` 只读；用户默认参数会改变脚本中 scan 的行为。

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -61,6 +62,7 @@ from flatlas.planning import (
     plan_operations,
 )
 from flatlas.queries import (
+    FindHit,
     disk_usage,
     duplicate_groups,
     filesystem_usage,
@@ -1103,33 +1105,72 @@ def find_command(
         bool,
         typer.Option("-H", help="Follow symlinks given as start points (GNU find -H); off by default."),
     ] = False,
+    format: Annotated[
+        str | None,
+        typer.Option("--format", help="Print entry records as table, jsonl or csv instead of GNU-style paths."),
+    ] = None,
+    # Long form only: click would read a short -h out of expression tokens such as -maxdepth.
+    human_readable: Annotated[
+        bool, typer.Option("--human-readable", help="Show table sizes in GNU -h style (1024-based, rounded up).")
+    ] = False,
+    output: output_option = None,
     db: db_option = None,
 ) -> None:
     """Find indexed entries with a GNU find expression; reads only the index.
 
-    Usage: flatlas find [--db DB] [-H] [PATH...] [EXPRESSION]. Options go before PATH.
-    Supported: -name -iname -path -ipath -type -maxdepth -mindepth -prune -print -print0
-    -true -false ! -not -a -and -o -or ( ). Pipe -print0 into 'flatlas du --files0-from=- -c --freed'
-    for sizes. A start point that fails is reported on stderr; the others are still printed, then exit 1.
+    Usage: flatlas find [--db DB] [-H] [--format F] [PATH...] [EXPRESSION]. Options go before PATH.
+    Supported: -name -iname -path -ipath -type -size -mtime -maxdepth -mindepth -prune -print -print0
+    -true -false ! -not -a -and -o -or ( ), plus -entries [+-]N and -status ok,new,part. -size and
+    -entries use a directory's indexed subtree totals. --format prints the entry record of every
+    printed path (absolute paths, sizes, entries, status). A start point that fails is reported on
+    stderr; the others are still printed, then exit 1.
     """
+    if format is not None:
+        check_format(format, ROW_FORMATS)
     arguments = list(ctx.args)
     split = next((index for index, token in enumerate(arguments) if is_expression_start(token)), len(arguments))
     starts = arguments[:split] or ["."]
     expression = parse_find_expression(arguments[split:])
-    stream = sys.stdout.buffer
     failed = False
-    with _connection(db, write=False) as connection, shared_path_resolution():
+
+    def hits(connection: Any) -> Iterator[FindHit]:
+        nonlocal failed
         for start in starts:
             try:
-                for path, terminator in find_paths(connection, start, expression, follow_symlink=dereference_args):
-                    stream.write(os.fsencode(path) + terminator.encode())
+                yield from find_paths(
+                    connection, start, expression, follow_symlink=dereference_args, records=format is not None
+                )
             except FlatlasError as exc:
-                stream.flush()
+                sys.stdout.flush()
                 typer.echo(f"error: {exc}", err=True)
                 failed = True
-    stream.flush()
+
+    with _connection(db, write=False) as connection, shared_path_resolution():
+        if format is None:
+            with contextlib.ExitStack() as stack:
+                stream = sys.stdout.buffer if output is None else stack.enter_context(_open_output(output))
+                for hit in hits(connection):
+                    stream.write(os.fsencode(hit.path) + hit.terminator.encode())
+                stream.flush()
+        elif format == "table":
+            found = list(hits(connection))
+            printed = {id(hit.record): hit.path for hit in found}
+            _print_usage(
+                [hit.record for hit in found if hit.record is not None], format, output,
+                display=lambda row: printed[id(row)], include_kind=True, include_status=True,
+                include_entries=True, human_readable=human_readable,
+            )
+        else:
+            write_records(
+                (hit.record for hit in hits(connection) if hit.record is not None), format, ENTRY_FIELDS, output
+            )
     if failed:
         raise typer.Exit(1)
+
+
+def _open_output(path: Path) -> Any:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path.open("wb")
 
 
 @app.command("ls")

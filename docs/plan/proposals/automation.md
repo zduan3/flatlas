@@ -22,13 +22,7 @@
 
 ## 0.2.0：新约定
 
-机器输出约定（格式、条目记录、上限与退出码）已实现，见 [查询命令：机器输出](../../design/queries.md#机器输出)。
-
-### `find` 作为自动化入口
-
-- 加 `--format`：`table`/`jsonl`/`csv` 输出[条目记录](../../design/queries.md#机器输出)；无 `--format` 时保持 GNU 风格逐行路径与 `-print0`。
-- 新增测试：`-size [+-]N[kMG]`（logical size；目录取子树合计）、`-entries [+-]N`（子树条目数，flatlas 独有）、`-mtime [+-]N`（天）、`-status WORD`。目录的子树值来自目录汇总缓存，不额外遍历。
-- 效果：「每个子目录的字节与条目数」是一条 `find DIR -mindepth 1 -maxdepth 1 -type d --format jsonl`；「候选及其大小」是一条带 `-prune` 的 `find --format jsonl`；hardlink 去重后的并集仍用 `du --files0-from -c --freed`。
+机器输出约定（格式、条目记录、上限与退出码）与 `find --format` 及元数据测试已实现，见 [查询命令](../../design/queries.md#机器输出)。
 
 ### 索引位置与配置隔离
 

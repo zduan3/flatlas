@@ -118,17 +118,20 @@ PATH 默认为当前目录，必须位于已登记的 namespace。命令实时�
 
 ## `find [PATH ...] [EXPRESSION]`
 
-用 GNU `find` 表达式查询索引中 PATH 下的 present 条目，只读 SQLite，不访问文件系统；未知 expression 报错（退出码 2），不静默忽略。命令自身的选项（`--db`、`-H`）必须写在 PATH 之前，第一个以 `-` 开头或为 `!`、`(`、`)` 的参数开始表达式。
+用 GNU `find` 表达式查询索引中 PATH 下的 present 条目，只读 SQLite，不访问文件系统；未知 expression 报错（退出码 2），不静默忽略。命令自身的选项（`--db`、`-H`、`--format`、`--human-readable`、`--output`）必须写在 PATH 之前，第一个以 `-` 开头或为 `!`、`(`、`)` 的参数开始表达式。人类可读大小只有长选项 `--human-readable`：短选项 `-h` 会被选项解析从 `-maxdepth` 这类表达式参数中拆出来。
 
 - 起点：省略时为 `.`；按 GNU 规则打印为给定形式加相对分量（`.` → `./a`，`a/` → `a/b`）。最后一级 symlink 默认作为条目本身处理，`-H` 或末尾 `/` 时跟随，规则与 `du` 相同。某个起点出错时写 stderr，其余照常输出，最后退出码 1。
 - 顺序：父目录在前的路径顺序（同一目录内按原始名字节排序），不是 `readdir` 顺序。
 - 测试：`-name`/`-iname`（basename）、`-path`/`-ipath`（别名 `-wholename`/`-iwholename`，匹配打印出的路径，`*` 也匹配 `/`）、`-type f|d|l|p|s|c|b`（可用逗号列出多个），以及 `-true`、`-false`。模式为 shell 通配（`fnmatch`），不对开头的 `.` 特殊处理。
+- 元数据测试：`-size [+-]N[cwbkMG]` 与 GNU 相同，默认单位为 512 字节块，大小先按单位向上取整再比较（因此 `-size -1M` 只匹配空文件）；`-mtime [+-]N` 按距命令开始时的整天数比较；`+N` 大于、`-N` 小于、`N` 等于。flatlas 另有 `-entries [+-]N`（条目数，含自身）与 `-status WORD[,WORD]`（`ok`、`new`、`part`）。与 GNU 不同，目录的 `-size`、`-entries` 取索引中的子树合计（目录汇总缓存，不额外遍历），而不是目录 inode 本身；未知值（特殊条目、无汇总的目录）不匹配。
 - 动作：`-print`、`-print0`、`-prune`（匹配的目录不再展开）；没有 `-print`/`-print0` 时与 GNU 一样对整个表达式隐式 `-print`。不提供 `-delete`、`-exec` 等修改或执行动作。
 - 运算符：`( )`、`!`/`-not`、`-a`/`-and`（可省略）、`-o`/`-or`，优先级同 GNU；全局选项 `-maxdepth N`、`-mindepth N`。
 - 结果是索引状态：未扫描或不完整的区域不会出现，扫描后的增删要重新扫描才反映。
+- `--format table|jsonl|csv` 改为输出每个被打印条目的[条目记录](#机器输出)（`-print` 与 `-print0` 的区别不再适用）；`depth` 相对起点。目录的 `status` 与 `ls` 相同，只描述目录自身是否完整枚举，子树是否新鲜看 `complete_through_ns`；`du` 的目录状态则要求整个子树完整。不给 `--format` 时按 GNU 逐行打印路径。`--output FILE` 写入文件。
 - 实现：`path_key` 由 NUL 结尾的分量拼成，起点下的子树正好是唯一索引 `(root_id, path_key)` 上的一段连续区间，且区间顺序就是上面的输出顺序。因此按区间顺序读取，不用递归 CTE，也不排序；遇到 `-prune` 命中的目录、到达 `-maxdepth` 的目录或已删除的目录时，从该子树的上界（把末尾 NUL 换成 `0x01`）重新开始区间查询，整棵子树一行都不读。打印路径对相对 key 只做一次解码。2026-11 在 380 万条目、4.6 GB 的索引上，`-type d -name build -prune` 从 41.5 s 降到 19.9 s（本地盘，CPU 为主）。
+- 需要元数据时（`--format` 或元数据测试）区间查询再按主键 join 目录汇总，父目录的汇总从刚经过的行缓存，状态按需计算；同一索引上 CPU 时间多出约 35–60%，前几层目录的概览（数百行）在 1 s 内。
 
-典型用法是找出最外层的可重建目录再汇总：`flatlas find projects -type d \( -name build -o -name __pycache__ \) -prune -print0 | flatlas du --files0-from=- -c --freed`。
+典型用法：每个子目录的字节与条目数 `flatlas find --format jsonl projects -mindepth 1 -maxdepth 1 -type d`；最外层的可重建目录及其大小 `flatlas find --format jsonl projects -type d \( -name build -o -name __pycache__ \) -prune`；它们合起来删除能腾出多少（hardlink 只计一次）用 `flatlas find projects ... -prune -print0 | flatlas du --files0-from=- -c --freed`。
 
 ## `largest [PATH]`
 

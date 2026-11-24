@@ -213,13 +213,15 @@ def test_deleted_entries_and_their_subtrees_are_not_listed(tree) -> None:
     ]
 
 
-def test_find_walks_the_path_key_range_without_sorting(tree) -> None:
+@pytest.mark.parametrize("records", [False, True])
+def test_find_walks_the_path_key_range_without_sorting(tree, records) -> None:
     db, source = tree
     connection = open_database(db)
     statements: list[str] = []
     try:
         connection.set_trace_callback(statements.append)
-        assert len(list(find_paths(connection, str(source), parse_find_expression(["-name", "build", "-prune"])))) == 2
+        expression = parse_find_expression(["-name", "build", "-prune"])
+        assert len(list(find_paths(connection, str(source), expression, records=records))) == 2
         connection.set_trace_callback(None)
         walks = [sql for sql in statements if "path_key>" in sql]
         assert walks

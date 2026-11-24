@@ -1876,7 +1876,7 @@ def test_index_queries_and_cached_duplicates_work_after_source_goes_offline(tmp_
         ensure_duplicate_hashes(connection, source)
         offline = tmp_path / "offline"
         source.rename(offline)
-        assert [Path(path) for path, _end in find_paths(connection, str(source), parse_find_expression([]))] == [
+        assert [Path(hit.path) for hit in find_paths(connection, str(source), parse_find_expression([]))] == [
             source,
             source / "a.bin",
             source / "b.bin",
