@@ -59,12 +59,6 @@
 - 新增测试：`-size [+-]N[kMG]`（logical size；目录取子树合计）、`-entries [+-]N`（子树条目数，flatlas 独有）、`-mtime [+-]N`（天）、`-status WORD`。目录的子树值来自目录汇总缓存，不额外遍历。
 - 效果：「每个子目录的字节与条目数」是一条 `find DIR -mindepth 1 -maxdepth 1 -type d --format jsonl`；「候选及其大小」是一条带 `-prune` 的 `find --format jsonl`；hardlink 去重后的并集仍用 `du --files0-from -c --freed`。
 
-### 删除的 0.1 残留
-
-- `paths`：被 `find` 覆盖，且不提供目录汇总。
-- `export` 命令组：`dupes --format jsonl --output FILE` 取代 `export dupes`。
-- `core.py`：测试改为直接引用各模块；脚本使用 CLI 的 `jsonl`，稳定的 Python 接口在 0.2.1 提供。
-
 ### 索引位置与配置隔离
 
 - 环境变量 `FLATLAS_DB` 指定索引文件；优先级 `--db` > `FLATLAS_DB` > 配置。agent 沙箱与批处理脚本不必写 `~/.config`。

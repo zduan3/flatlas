@@ -35,7 +35,7 @@ flatlas dupes D:\Archive
 flatlas du D:\Archive\2026
 flatlas ls D:\Archive\2026
 flatlas largest D:\Archive\2026 -n 50
-flatlas export dupes --format csv --output duplicates.csv
+flatlas dupes D:\Archive --format csv --output duplicates.csv
 flatlas plan create --root D:\Archive
 ```
 
@@ -56,14 +56,12 @@ flatlas scan PATH [--refresh-before VALUE | --full | --resume | --shallow]
 flatlas scan --resume-from ID
 flatlas scans [PATH] [--limit N] [--format table|json|csv]
 flatlas scan-info ID
-flatlas paths [PATH] [--limit N] [--format json|csv]
-flatlas rm PATH
+flatlas rm PATH... | --files0-from FILE
 flatlas du [PATH ... | --files0-from FILE] [-D] [-d N] [--sort KEY] [-n N] [--freed] [-c] [--format table|json|csv]
 flatlas find [--db DB] [-H] [PATH ...] [-name|-iname|-path|-ipath|-type|-maxdepth|-mindepth|-prune|-print|-print0|! -o -a ( )]
 flatlas ls [PATH] [--format table|json|csv]
 flatlas largest [PATH] [-n N|--limit N] [--format table|json|csv]
 flatlas dupes [PATH] [--absolute] [--min-size B] [--max-size B] [--min-count N] [--min-savings B] [-n N] [--format table|json|csv]
-flatlas export dupes [PATH] [--absolute] [dupes 筛选参数] --format json|csv --output PATH
 flatlas plan create --root PATH
 flatlas plan show [PLAN_ID]
 ```
@@ -142,15 +140,15 @@ ls 父目录              → 可以显示 gone，但不修改数据库
 scan 仍存在的父目录    → completed 后才将缺失路径标记 deleted
 ```
 
-已经不存在的目标不能直接扫描，必须扫描覆盖它的现存父目录。partial、failed、cancelled 或枚举错误不会确认删除。deleted 记录保留在 SQLite，但不参与 `paths`、`du`、`largest` 或 `dupes` 的当前状态结果；同一路径重新出现并被扫描时恢复为 present，旧 hash 在 metadata basis 不匹配时变为 stale。
+已经不存在的目标不能直接扫描，必须扫描覆盖它的现存父目录。partial、failed、cancelled 或枚举错误不会确认删除。deleted 记录保留在 SQLite，但不参与 `find`、`du`、`largest` 或 `dupes` 的当前状态结果；同一路径重新出现并被扫描时恢复为 present，旧 hash 在 metadata basis 不匹配时变为 stale。
 
 ## 实际清理
 
-`dupes` 与 `export dupes` 支持相同的筛选参数，大小与节省量使用字节整数：
+`dupes` 支持以下筛选参数，大小与节省量使用字节整数：
 
 ```powershell
 flatlas dupes D:\Archive --min-size 1048576 --max-size 1073741824 --min-count 3 --min-savings 2097152 -n 20
-flatlas export dupes D:\Archive --min-size 1048576 --limit 20 --format json --output duplicates.json
+flatlas dupes D:\Archive --min-size 1048576 --limit 20 --format json --output duplicates.json
 ```
 
 - `--min-size` / `--max-size`：文件 logical size 的闭区间，默认不额外限制大小；在同大小候选选择和 hash 前生效，区间外文件不读取内容，也不显示已有缓存结果。0 B 和已知占用为 0 的文件仍排除。
@@ -167,7 +165,7 @@ flatlas dupes D:\Archive\Photos\2025
 jdupes -r D:\Archive\Photos\2025
 ```
 
-不要把 `flatlas export dupes` 的结果直接管道到删除命令。dry-run plan 也只是候选建议快照；flatlas 没有 `apply`。
+不要把 `flatlas dupes` 的导出结果直接管道到删除命令。dry-run plan 也只是候选建议快照；flatlas 没有 `apply`。
 
 ## 开发文档
 

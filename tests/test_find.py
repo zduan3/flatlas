@@ -8,15 +8,17 @@ import pytest
 from typer.testing import CliRunner
 
 from flatlas.cli import app
-from flatlas.core import (
+from flatlas.db import open_database
+from flatlas.findexpr import parse_find_expression
+from flatlas.paths import (
     discover_namespace,
+    register_namespace,
+)
+from flatlas.queries import (
     disk_usage,
     find_paths,
-    open_database,
-    register_namespace,
-    scan_directory,
 )
-from flatlas.findexpr import parse_find_expression
+from flatlas.scanning import scan_directory
 
 pytestmark = [pytest.mark.query, pytest.mark.cli]
 

@@ -8,14 +8,13 @@ from pathlib import Path
 import pytest
 
 from flatlas import cli, scanning
-from flatlas.core import (
+from flatlas.db import CACHE_SIZE_KIB, open_database
+from flatlas.paths import (
     discover_namespace,
-    open_database,
+    parent_key,
     register_namespace,
-    scan_directory,
 )
-from flatlas.db import CACHE_SIZE_KIB
-from flatlas.paths import parent_key
+from flatlas.scanning import scan_directory
 
 pytestmark = pytest.mark.scan
 

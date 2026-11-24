@@ -7,12 +7,12 @@ from pathlib import Path
 import pytest
 
 from flatlas import lazystat, mounts, paths, scanning
-from flatlas.core import (
+from flatlas.db import open_database
+from flatlas.paths import (
     discover_namespace,
-    open_database,
     register_namespace,
-    scan_directory,
 )
+from flatlas.scanning import scan_directory
 
 pytestmark = pytest.mark.scan
 

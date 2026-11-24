@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from flatlas.core import (
+from flatlas.db import open_database
+from flatlas.paths import (
     discover_namespace,
-    open_database,
+    path_key,
     register_namespace,
-    scan_directory,
 )
-from flatlas.paths import path_key
+from flatlas.scanning import scan_directory
 
 pytestmark = [pytest.mark.scan, pytest.mark.safety]
 

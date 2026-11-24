@@ -11,15 +11,19 @@ from pathlib import Path
 import pytest
 
 from flatlas import scanning
-from flatlas.core import (
-    FlatlasError,
+from flatlas.db import open_database
+from flatlas.errors import FlatlasError
+from flatlas.paths import (
     discover_namespace,
-    disk_usage,
-    open_database,
     register_namespace,
+)
+from flatlas.queries import (
+    disk_usage,
+    scan_info,
+)
+from flatlas.scanning import (
     resume_selection,
     scan_directory,
-    scan_info,
 )
 
 pytestmark = [pytest.mark.scan, pytest.mark.safety]
@@ -89,7 +93,8 @@ KILLED_SCAN = textwrap.dedent(
     import os, sys
     from pathlib import Path
     from flatlas import scanning
-    from flatlas.core import open_database, scan_directory
+    from flatlas.db import open_database
+    from flatlas.scanning import scan_directory
     scanning.CHECKPOINT_INTERVAL_S = 0.0
     def die(progress):
         if progress.phase == "scanning" and progress.files_seen == 3:

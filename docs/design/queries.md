@@ -1,18 +1,18 @@
 # 查询命令
 
-> 状态：当前设计。描述 `ls`、`du`、`largest`、`roots`、`df`、`paths`、`rm`、`scans` / `scan-info`、`export`、`plan` 的现有行为；随代码更新。`dupes` 见 [惰性 Hash 与重复候选](hashing.md)，`scan` 见 [扫描与目录汇总](scanning.md)，`config` 见 [命令默认参数配置](config.md)。
+> 状态：当前设计。描述 `ls`、`du`、`find`、`largest`、`roots`、`df`、`rm`、`scans` / `scan-info`、`plan` 的现有行为；随代码更新。`dupes` 见 [惰性 Hash 与重复候选](hashing.md)，`scan` 见 [扫描与目录汇总](scanning.md)，`config` 见 [命令默认参数配置](config.md)。
 
 ## 通用约定
 
 - 除 `ls` 的一层实时枚举和 `df` 的实时容量查询外，查询只读取 SQLite 索引，不隐式遍历或更新文件系统；源目录离线时仍可使用。`dupes` 是唯一会读取文件内容的查询，且不改变 scan coverage。
-- 当前状态查询只使用 `state='present'` 的路径；deleted tombstone 不参与 `paths`、`du`、`largest` 或 `dupes`。
+- 当前状态查询只使用 `state='present'` 的路径；deleted tombstone 不参与 `find`、`du`、`largest` 或 `dupes`。
 - 未知值在表格中显示 `-`，在 JSON/CSV 中为 `null` / 空值，不能伪装为 0。
 - 用户可预期错误（未初始化、路径未索引、namespace 未登记、参数非法等）输出 `error: ...` 并返回退出码 2，不输出 traceback。
 - JSON/CSV 字段稳定、可解析；二进制 digest 以 hex 输出；`--output PATH` 写入文件（自动创建父目录）。
 - `--db PATH` 只是全局索引位置的显式覆盖。
 - 按路径定位条目（`du`、`find`、`ls` 等的 PATH，`scans PATH`、`rm PATH`）时，由已登记 root 的路径算出 `(root_id, path_key)` 走唯一索引；`path_display` 没有索引，只在这样查不到时（如非 UTF-8 名字）回退按显示路径全表查找。
 - PATH 的父级分量与 `realpath` 一样逐级解析 symlink。`du`、`find` 一条命令内按目录前缀记忆解析结果，同一前缀只 `lstat` 一次（`--files0-from` 给出数万个同一棵树下的路径时，逐个 `realpath` 会把公共祖先反复 stat；Lustre 上 2.97 万个路径 61 万次 `lstat`、21 s → 3.2 万次）；结果与 `Path.resolve()` 相同，含 symlink 环报错，`..` 跟在 symlink 后时仍交给 `resolve()`。记忆只在单条命令内有效。
-- 只读查询命令（`du`、`find`、`ls`、`largest`、`paths`、`scans` 等）整条命令在一个读事务内执行：看到同一快照，且 WAL 与库文件的锁只取一次。逐条自动提交时每条语句都要重新加解锁，Lustre 以 `flock` 挂载时每次加锁都是一次元数据服务器往返（`du` 3000 个路径 5.7 s → 0.5 s）。长时间输出的查询（如大子树的 `find`）期间写入者照常提交，只是 WAL checkpoint 不能越过该快照。
+- 只读查询命令（`du`、`find`、`ls`、`largest`、`scans` 等）整条命令在一个读事务内执行：看到同一快照，且 WAL 与库文件的锁只取一次。逐条自动提交时每条语句都要重新加解锁，Lustre 以 `flock` 挂载时每次加锁都是一次元数据服务器往返（`du` 3000 个路径 5.7 s → 0.5 s）。长时间输出的查询（如大子树的 `find`）期间写入者照常提交，只是 WAL checkpoint 不能越过该快照。
 - `flatlas --version` 输出正在运行的包版本；可访问源码仓库时附加 Git 提交、提交日期和 `dirty` 状态，否则回退为纯包版本。该命令无需初始化或打开索引数据库。
 
 ### 大小显示
@@ -145,10 +145,6 @@ mgs@tcp:/fs1             lustre  325T  284T    42T   88%  /lustre/fs1
 - 容量不可访问时显示 `-`，JSON/CSV 为 `null` 且 `status=unavailable`；可访问时 `status` 为 `ok`，root 被禁用时为 `disabled`。JSON/CSV 字段为 `filesystem`、`type`、`blocks_1k`、`used_1k`、`available_1k`、`use_percent`、`mounted_on`、`status`。
 - 容量不缓存进 SQLite，`df` 不承诺离线可用。filesystem used 与 `du` 的 indexed allocated 汇总不是同一指标，两者差值不能解释为“未索引文件”或“可回收空间”。
 
-## `paths [PATH]`
-
-列出当前 present 路径（PATH 给出时限定为该已索引 scope 及其后代），按显示路径排序，默认最多 500 行（`--limit`）。输出 `root_id`、`path_display`、`entry_kind`、`logical_size`、`allocated_size`、`mtime_ns`，格式为 JSON（默认）或 CSV。
-
 ## `rm PATH...` / `rm --files0-from FILE`
 
 只从 SQLite 递归移除该路径及其已索引后代，等价于对索引执行 `rm -r PATH`；它不访问、不验证也不改动实际文件。PATH 按词法转为绝对路径（不解析 symlink、不检查文件系统），必须与某个索引路径完全一致，否则报错。
@@ -167,10 +163,6 @@ mgs@tcp:/fs1             lustre  325T  284T    42T   88%  /lustre/fs1
 - `scans [PATH]` 每个 scope 一行，按 scan ID 降序，默认最多 50 行（`--limit`），格式为表格（默认）、JSON 或 CSV。表格列为 `ID`、`STATUS`、`STARTED`、`FINISHED`（本地时区 ISO 8601）、`FILES`、`DIRS`、`ERRORS`、`SCOPE`；scope 路径不在索引中时显示 `key:<hex>`。JSON/CSV 另含 `kind`、`duration_ns`、`refresh_before_ns`、`scanner_version`、`note`、scope 状态与计数等字段。
 - PATH 过滤同时包含覆盖该路径的祖先 scope 和位于该路径下的子树 scope；PATH 可以尚未索引，但必须位于已登记的 namespace。
 - `scan-info ID` 以 JSON 展示单次 scan 的字段、分阶段计时 `stats`（见 [分阶段计时](scanning.md#分阶段计时)）、全部 scope（含状态、时间、计数）以及 `scan_error` 明细（路径、operation、错误码与消息）。
-
-## `export dupes`
-
-`export dupes [PATH] --output FILE [--format json|csv]` 与 `dupes` 使用同一实现和筛选参数，默认 JSON，写入文件后在 stdout 打印输出路径；语义见 [惰性 Hash 与重复候选](hashing.md#输出)。
 
 ## `plan create` / `plan show`
 

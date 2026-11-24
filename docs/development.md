@@ -59,7 +59,7 @@ uv run pytest -q tests/test_dupes_filters.py::test_local_rescan_combines_new_and
 
 交付前再运行表中受影响范围，Python 改动另外运行 `uv run ruff check .`、`uv run pyright` 和 `git diff --check`。这些静态检查保持全项目范围，通常比测试便宜，也能发现调用方类型错误。范围通过后，没有新改动、失败或未解决疑点时，不额外补跑全量或重复同一检查。
 
-以下情况必须全量：schema/migration；`paths.py` 的路径身份、namespace 和 BLOB 编码；`config.py` 的全局配置与数据库定位；`core.py` 的公共 facade 或跨模块重构；依赖/构建；pytest 配置、共享 fixture 或测试分组调整；发布/里程碑验收；无法可靠确定影响范围。全量命令仍是 `uv run pytest -q`，0.1 冻结的发布验收要求不变。
+以下情况必须全量：schema/migration；`paths.py` 的路径身份、namespace 和 BLOB 编码；`config.py` 的全局配置与数据库定位；跨模块重构；依赖/构建；pytest 配置、共享 fixture 或测试分组调整；发布/里程碑验收；无法可靠确定影响范围。全量命令仍是 `uv run pytest -q`，0.1 冻结的发布验收要求不变。
 
 平台 API、metadata/身份、路径和跨平台 I/O（含 CSV 换行）变更，在 Windows 和 WSL 原生文件系统运行相同范围；平台无关的小改动通常只需当前开发平台的受影响范围。Windows 原生用例在 Linux 的跳过属于预期，不能算作 Windows 功能验证。日常无需两端重复全量，发布/里程碑验收再分别运行并记录全套结果。
 

@@ -276,7 +276,7 @@ CREATE INDEX idx_directory_summary_freshness
 → completed scope 将缺失路径及其已索引后代标记 deleted
 ```
 
-已经不存在的路径不能直接作为 `scan PATH`，必须扫描其仍存在的父目录。`paths`、`du`、`largest`、`dupes` 等当前状态查询只使用 `state='present'`；关联的 `file_hash` 可以保留，但 deleted path 不参与重复组。相同 `(root_id, path_key)` 后续重新出现时，upsert 将其恢复为 `present`、清除 `deleted_by_scope_id` / `deleted_at_ns`，并在身份、size、mtime 或可用 change/birth time 与旧 basis 不匹配时把 hash 标记为 stale。
+已经不存在的路径不能直接作为 `scan PATH`，必须扫描其仍存在的父目录。`find`、`du`、`largest`、`dupes` 等当前状态查询只使用 `state='present'`；关联的 `file_hash` 可以保留，但 deleted path 不参与重复组。相同 `(root_id, path_key)` 后续重新出现时，upsert 将其恢复为 `present`、清除 `deleted_by_scope_id` / `deleted_at_ns`，并在身份、size、mtime 或可用 change/birth time 与旧 basis 不匹配时把 hash 标记为 stale。
 
 `ls` 的 `gone` 与持久化 `deleted` 必须保持分离：`gone` 是一次成功实时枚举提供的现场缺失提示，可能附带最后已知文件大小或目录递归聚合；`deleted` 是 completed scan coverage 才能写入的当前状态 tombstone。
 
@@ -330,7 +330,7 @@ migration 4 的条目数统计 present 的全部类型（普通文件、目录�
 
 连接先只读检查 `schema_migration` 是否包含当前所需的全部版本；满足要求时跳过全部 migration 写操作，包括 application ID 设置和 DDL。已有 WAL 数据库也不重复设置 journal mode，因此扫描持有写事务时，`ls` 等查询可以读取已提交的索引。只有缺少迁移版本时才以 `BEGIN IMMEDIATE` 获取写锁，并在锁内重新检查版本，避免并发打开重复升级。待执行的 schema、回填数据与版本记录在同一事务中提交，失败则一起回滚；DDL 逐条执行而不用 `executescript`，以免隐式提交释放写锁。两个扫描仍会竞争同一数据库的写锁。
 
-调用者对索引没有写权限时（agent 沙箱、只读挂载、他人的索引），WAL 模式无法创建 `-shm` 或取得写锁，普通打开会失败。查询命令（`roots`、`df`、`scans`、`scan-info`、`paths`、`du`、`ls`、`largest`、`plan show`）此时改用 `db.open_database_readonly`：先以 `mode=ro` 打开，若有写入者正在运行（`-wal` 存在）即读取其已提交的快照；没有 `-wal` 且无法创建时以 `immutable=1` 打开，此时假定没有并发写入者。只读连接不执行 migration，schema 版本落后时报告领域错误，提示在可写处运行一次任意命令。会写入的命令（`init`、`scan`、`rm`、`dupes`、`plan create`）不回退，直接报告无法以写方式打开。
+调用者对索引没有写权限时（agent 沙箱、只读挂载、他人的索引），WAL 模式无法创建 `-shm` 或取得写锁，普通打开会失败。查询命令（`roots`、`df`、`scans`、`scan-info`、`du`、`find`、`ls`、`largest`、`plan show`）此时改用 `db.open_database_readonly`：先以 `mode=ro` 打开，若有写入者正在运行（`-wal` 存在）即读取其已提交的快照；没有 `-wal` 且无法创建时以 `immutable=1` 打开，此时假定没有并发写入者。只读连接不执行 migration，schema 版本落后时报告领域错误，提示在可写处运行一次任意命令。会写入的命令（`init`、`scan`、`rm`、`dupes`、`plan create`）不回退，直接报告无法以写方式打开。
 
 CLI 打开已有数据库并检测到待执行 migration 时，先在 stderr 输出 migration 版本与说明。目录回填期间交互式终端原地显示“已完成目录数 / 总目录数”，非交互式调用按进度里程碑输出；提交 migration 版本记录后再显示完成提示。stdout 不混入 migration 信息，以保持 JSON/CSV 可解析。新建空数据库的 schema 初始化默认静默。migration 中断时不写完成版本，下次打开数据库可幂等重试。
 

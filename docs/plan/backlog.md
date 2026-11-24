@@ -6,7 +6,7 @@
 
 - 0.2 保持只读：没有 plan apply，不删除、移动或创建 hardlink/reflink/symlink，也不持续监听文件系统。
 - 所有条目必须保持 [架构不变量](../design/architecture.md#不可破坏的语义)；新 schema 只允许向前 migration 并保留既有数据。
-- 0.1 的 JSON 形状与 `core.py` 不保留；机器输出以 [proposals/automation.md](proposals/automation.md) 为准。
+- 0.1 的 JSON 形状不保留（`paths`、`export`、`core.py` 已删除）；机器输出以 [proposals/automation.md](proposals/automation.md) 为准。
 - 除非用户明确要求且设计已更新，不实现 TUI、Rust/PyO3、并行扫描或执行器。
 
 ## 0.2.0
@@ -20,10 +20,6 @@
    目标：`find --format jsonl|csv|table`；`-size`、`-entries`、`-mtime`、`-status`。
    原因：概览与候选统计目前要多条命令、多次重开索引；一条 `find` 即可给出每个目录的子树字节与条目数。
    → [proposals/automation.md](proposals/automation.md#find-作为自动化入口)
-
-3. **删除 0.1 残留**
-   目标：删除 `paths`、`export` 命令组与 `core.py`；测试直接引用模块。
-   → [proposals/automation.md](proposals/automation.md#删除的-01-残留)
 
 4. **索引位置与配置隔离**
    目标：`FLATLAS_DB`；`FLATLAS_NO_CONFIG` / `--no-config`。

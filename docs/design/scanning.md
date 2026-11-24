@@ -142,7 +142,7 @@ CLI 在 POSIX 上把 `SIGTERM`（批处理调度器终止作业前发送）和 `
 
 - 只有 completed `scan_scope` 才能确认缺失路径为 `deleted`；partial、failed、cancelled、枚举错误、stat 错误或 allocated size 采集失败均不确认删除。
 - 普通扫描 completed 时，scope 后代中 `last_seen_scan_id` 不是本次 scan 的 present 路径标记为 deleted；`--refresh-before` 扫描只对完整枚举的目录、`--shallow` 只对 PATH 确认其直接缺失条目及其已索引后代。
-- deleted 行保留在 SQLite，不参与 `paths`、`du`、`largest` 或 `dupes` 的当前状态结果；同一路径重新出现并被扫描时恢复为 present，旧 hash 在 metadata basis 不匹配时变为 stale。
+- deleted 行保留在 SQLite，不参与 `find`、`du`、`largest` 或 `dupes` 的当前状态结果；同一路径重新出现并被扫描时恢复为 present，旧 hash 在 metadata basis 不匹配时变为 stale。
 - `ls` 现场发现缺失只显示 `gone`，不写数据库。
 
 相关提案：[按目录 mtime 的增量刷新](../plan/proposals/incremental-refresh.md)。

@@ -38,7 +38,7 @@ Python 3.12 实现按职责拆分：
 | `config.py` | 用户级配置与数据库定位，见 [命令默认参数配置](config.md) |
 | `cli.py`、`errors.py`、`version.py` | Typer CLI、领域错误渲染、版本展示 |
 
-`core.py` 仅保留兼容性 re-export 与既有故障注入入口。
+测试与调用方直接引用上述模块；故障注入直接 patch 所在模块（如 `flatlas.scanning.os.scandir`、`flatlas.hashing._validated_digest`）。
 
 ## 核心模型
 

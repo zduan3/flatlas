@@ -11,13 +11,14 @@ from pathlib import Path
 
 import pytest
 
-from flatlas.core import (
+from flatlas.db import open_database
+from flatlas.paths import (
     discover_namespace,
-    open_database,
+    display_path,
+    path_key,
     register_namespace,
-    scan_directory,
 )
-from flatlas.paths import display_path, path_key
+from flatlas.scanning import scan_directory
 
 pytestmark = [
     pytest.mark.scan,

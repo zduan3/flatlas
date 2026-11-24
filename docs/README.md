@@ -10,7 +10,7 @@
 - [数据库结构](design/schema.md)：schema v3 的表、索引、扫描与删除语义、migration 历史与执行机制。
 - [扫描与目录汇总](design/scanning.md)：metadata 扫描、元数据成本、目录汇总与 freshness、`--refresh-before`、中断与续扫、删除确认。
 - [惰性 Hash 与重复候选](design/hashing.md)：size → quick → full 流水线、basis 校验、dupes 筛选、分组与输出。
-- [查询命令](design/queries.md)：`ls`、`du`、`largest`、`roots` / `df`、`paths`、`rm`、`scans` / `scan-info`、`export`、`plan`。
+- [查询命令](design/queries.md)：`ls`、`du`、`find`、`largest`、`roots` / `df`、`rm`、`scans` / `scan-info`、`plan`。
 - [命令默认参数配置](design/config.md)：`config.toml` 与 `flatlas config`。
 - [平台差异](design/platform.md)：Windows 占用空间采集；Linux / Lustre 元数据实测。
 

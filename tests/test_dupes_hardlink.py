@@ -5,16 +5,18 @@ from pathlib import Path
 
 import pytest
 
-from flatlas.core import (
-    create_dry_run_plan,
+from flatlas.db import open_database
+from flatlas.hashing import ensure_duplicate_hashes
+from flatlas.paths import (
     discover_namespace,
-    duplicate_groups,
-    ensure_duplicate_hashes,
-    open_database,
-    plan_operations,
     register_namespace,
-    scan_directory,
 )
+from flatlas.planning import (
+    create_dry_run_plan,
+    plan_operations,
+)
+from flatlas.queries import duplicate_groups
+from flatlas.scanning import scan_directory
 
 pytestmark = [
     pytest.mark.hash,

@@ -9,13 +9,13 @@ from typer.testing import CliRunner
 
 from flatlas import cli, paths, queries
 from flatlas.cli import app
-from flatlas.core import (
-    discover_namespace,
-    open_database,
-    register_namespace,
-    scan_directory,
-)
+from flatlas.db import open_database
 from flatlas.mounts import MountEntry
+from flatlas.paths import (
+    discover_namespace,
+    register_namespace,
+)
+from flatlas.scanning import scan_directory
 
 pytestmark = [pytest.mark.cli, pytest.mark.output, pytest.mark.query]
 

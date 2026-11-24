@@ -8,7 +8,11 @@ from typer.testing import CliRunner
 
 from flatlas import db
 from flatlas.cli import app
-from flatlas.core import discover_namespace, register_namespace, scan_directory
+from flatlas.paths import (
+    discover_namespace,
+    register_namespace,
+)
+from flatlas.scanning import scan_directory
 
 pytestmark = pytest.mark.db
 

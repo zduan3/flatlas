@@ -10,14 +10,14 @@ from typer.testing import CliRunner
 
 from flatlas import allocation, hashing
 from flatlas.cli import app
-from flatlas.core import (
-    discover_namespace,
-    duplicate_groups,
-    open_database,
-    register_namespace,
-    scan_directory,
-)
+from flatlas.db import open_database
 from flatlas.hashing import ensure_duplicate_hashes
+from flatlas.paths import (
+    discover_namespace,
+    register_namespace,
+)
+from flatlas.queries import duplicate_groups
+from flatlas.scanning import scan_directory
 
 pytestmark = [pytest.mark.hash, pytest.mark.allocation]
 
@@ -90,7 +90,7 @@ def test_dupes_filters_zero_allocation_before_grouping_and_hashing(tmp_path: Pat
         elif format == "csv":
             assert next(iter(csv.DictReader(result.stdout.splitlines())))["count"] == "2"
     output = tmp_path / "dupes.json"
-    result = runner.invoke(app, ["export", "dupes", str(source), "--output", str(output), "--db", str(database)])
+    result = runner.invoke(app, ["dupes", str(source), "--format", "json", "--output", str(output), "--db", str(database)])
     assert result.exit_code == 0, result.output
     assert json.loads(output.read_text(encoding="utf-8"))["groups"][0]["count"] == 2
 

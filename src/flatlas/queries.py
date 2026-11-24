@@ -130,24 +130,6 @@ def _blocks_1k(byte_count: int) -> int:
     return (byte_count + 1023) // 1024
 
 
-def query_paths(connection: sqlite3.Connection, *, scope: Path | None = None, limit: int = 500) -> list[dict[str, Any]]:
-    if scope is None:
-        rows = connection.execute(
-            "SELECT root_id, path_display, entry_kind, logical_size, allocated_size, mtime_ns FROM path WHERE state='present' ORDER BY path_display LIMIT ?", (limit,)
-        )
-    else:
-        selected = _scope_row(connection, scope)
-        rows = connection.execute(
-            """WITH RECURSIVE descendants(id) AS (
-                SELECT id FROM path WHERE id=? UNION ALL
-                SELECT p.id FROM descendants d CROSS JOIN path p ON p.parent_path_id=d.id
-            ) SELECT root_id, path_display, entry_kind, logical_size, allocated_size, mtime_ns
-            FROM path WHERE state='present' AND id IN descendants ORDER BY path_display LIMIT ?""",
-            (selected["id"], limit),
-        )
-    return [dict(row) for row in rows]
-
-
 def list_scans(
     connection: sqlite3.Connection,
     *,

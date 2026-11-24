@@ -25,44 +25,53 @@ from flatlas.config import (
     resolve_database,
     set_default,
 )
-from flatlas.core import (
-    HashProgress,
-    HashSummary,
+from flatlas.db import (
     MigrationProgress,
-    ScanProgress,
-    create_dry_run_plan,
-    discover_namespace,
-    disk_usage,
-    duplicate_groups,
-    ensure_duplicate_hashes,
-    export_rows,
-    filesystem_usage,
-    find_paths,
-    get_root,
-    hardlink_usage,
-    indexed_scope_ids,
-    largest_files,
-    list_child_directories,
-    list_plans,
-    list_roots,
-    list_scans,
     open_database,
     open_database_readonly,
-    plan_operations,
-    query_paths,
-    register_namespace,
-    remove_indexed_subtree,
-    remove_indexed_subtrees,
-    resume_selection,
-    resume_selection_from_scan,
-    scan_directory,
-    scan_info,
 )
 from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError
 from flatlas.findexpr import is_expression_start, parse_find_expression
-from flatlas.paths import shared_path_resolution
+from flatlas.hashing import (
+    HashProgress,
+    HashSummary,
+    ensure_duplicate_hashes,
+)
+from flatlas.output import export_rows
+from flatlas.paths import (
+    discover_namespace,
+    get_root,
+    register_namespace,
+    remove_indexed_subtree,
+    remove_indexed_subtrees,
+    shared_path_resolution,
+)
+from flatlas.planning import (
+    create_dry_run_plan,
+    list_plans,
+    plan_operations,
+)
+from flatlas.queries import (
+    disk_usage,
+    duplicate_groups,
+    filesystem_usage,
+    find_paths,
+    hardlink_usage,
+    indexed_scope_ids,
+    largest_files,
+    list_child_directories,
+    list_roots,
+    list_scans,
+    scan_info,
+)
 from flatlas.refresh import parse_refresh_before
+from flatlas.scanning import (
+    ScanProgress,
+    resume_selection,
+    resume_selection_from_scan,
+    scan_directory,
+)
 from flatlas.version import current_version
 
 app = typer.Typer(help="Persistent, read-only filesystem indexing and duplicate analysis.", no_args_is_help=True)
@@ -888,19 +897,6 @@ def scan_info_command(
     _print(result)
 
 
-@app.command("paths")
-def paths_command(
-    path: Annotated[Path | None, typer.Argument(help="Optional indexed directory scope.")] = None,
-    limit: Annotated[int, typer.Option("--limit", min=1)] = 500,
-    format: data_format_option = "json",
-    output: output_option = None,
-    db: db_option = None,
-) -> None:
-    """Browse current indexed paths; it remains available while sources are offline."""
-    with _connection(db, write=False) as connection:
-        _print(query_paths(connection, scope=path, limit=limit), format, output)
-
-
 @app.command("rm")
 def rm(
     paths: Annotated[
@@ -1160,31 +1156,6 @@ def dupes(
         groups = _duplicate_display_paths(duplicate_groups(connection, scope=path, filters=filters), path, absolute=absolute)
     _warn_incomplete_hashes(hash_summary)
     _print_duplicate_groups(groups, format, output, hash_summary)
-
-
-export_app = typer.Typer(help="Export read-only query results.")
-app.add_typer(export_app, name="export")
-
-
-@export_app.command("dupes")
-def export_dupes(
-    output: Annotated[Path, typer.Option("--output")],
-    path: Annotated[Path, typer.Argument(help="Indexed directory whose duplicate groups are exported.")] = Path("."),
-    absolute: Annotated[bool, typer.Option("--absolute", help="Show absolute paths instead of paths relative to PATH.")] = False,
-    format: data_format_option = "json",
-    db: db_option = None,
-    min_size: min_size_option = 0,
-    max_size: max_size_option = None,
-    min_count: min_count_option = 2,
-    min_savings: min_savings_option = 0,
-    limit: group_limit_option = None,
-) -> None:
-    dupes(
-        path=path, absolute=absolute, format=format, output=output, db=db,
-        min_size=min_size, max_size=max_size, min_count=min_count,
-        min_savings=min_savings, limit=limit,
-    )
-    typer.echo(output)
 
 
 plan_app = typer.Typer(help="Create and inspect immutable dry-run plans; never applies filesystem changes.")

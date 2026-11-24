@@ -8,13 +8,13 @@ from typer.testing import CliRunner
 
 from flatlas import lazystat, paths
 from flatlas.cli import app
-from flatlas.core import (
+from flatlas.db import open_database
+from flatlas.paths import (
     discover_namespace,
-    open_database,
     register_namespace,
-    scan_directory,
-    scan_info,
 )
+from flatlas.queries import scan_info
+from flatlas.scanning import scan_directory
 
 pytestmark = [pytest.mark.scan]
 

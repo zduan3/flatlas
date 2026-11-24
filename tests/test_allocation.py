@@ -11,15 +11,17 @@ from typer.testing import CliRunner
 
 from flatlas import allocation, scanning
 from flatlas.cli import app
-from flatlas.core import (
+from flatlas.db import open_database
+from flatlas.paths import (
     discover_namespace,
+    register_namespace,
+)
+from flatlas.queries import (
     disk_usage,
     list_child_directories,
-    open_database,
-    register_namespace,
-    scan_directory,
     scan_info,
 )
+from flatlas.scanning import scan_directory
 
 pytestmark = pytest.mark.allocation
 

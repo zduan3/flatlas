@@ -8,12 +8,14 @@ import pytest
 from typer.testing import CliRunner
 
 from flatlas.cli import app
-from flatlas.core import (
-    FlatlasError,
+from flatlas.db import open_database
+from flatlas.errors import FlatlasError
+from flatlas.paths import (
     discover_namespace,
-    disk_usage,
-    open_database,
     register_namespace,
+)
+from flatlas.queries import disk_usage
+from flatlas.scanning import (
     resume_selection,
     resume_selection_from_scan,
     scan_directory,

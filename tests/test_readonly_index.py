@@ -11,14 +11,16 @@ import pytest
 from typer.testing import CliRunner
 
 from flatlas.cli import app
-from flatlas.core import (
-    FlatlasError,
-    discover_namespace,
+from flatlas.db import (
     open_database,
     open_database_readonly,
-    register_namespace,
-    scan_directory,
 )
+from flatlas.errors import FlatlasError
+from flatlas.paths import (
+    discover_namespace,
+    register_namespace,
+)
+from flatlas.scanning import scan_directory
 
 pytestmark = [
     pytest.mark.cli,

@@ -7,26 +7,34 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from flatlas import cli, core
+from flatlas import cli, errors, hashing, scanning
 from flatlas.cli import app
-from flatlas.core import (
-    create_dry_run_plan,
+from flatlas.db import open_database
+from flatlas.findexpr import parse_find_expression
+from flatlas.hashing import ensure_duplicate_hashes
+from flatlas.paths import (
     discover_namespace,
-    disk_usage,
-    duplicate_groups,
-    ensure_duplicate_hashes,
-    largest_files,
-    list_child_directories,
-    list_plans,
-    list_scans,
-    open_database,
-    plan_operations,
     register_namespace,
     remove_indexed_subtree,
+)
+from flatlas.planning import (
+    create_dry_run_plan,
+    list_plans,
+    plan_operations,
+)
+from flatlas.queries import (
+    disk_usage,
+    duplicate_groups,
+    find_paths,
+    largest_files,
+    list_child_directories,
+    list_scans,
+    scan_info,
+)
+from flatlas.scanning import (
     resume_selection,
     resume_selection_from_scan,
     scan_directory,
-    scan_info,
 )
 from flatlas.summaries import refresh_directory_summaries
 from flatlas.version import VersionInfo
@@ -348,7 +356,7 @@ def test_du_uses_ls_coverage_status_for_partial_directory(tmp_path: Path, monkey
             return real_scandir(path)
 
         with monkeypatch.context() as failed_scan:
-            failed_scan.setattr("flatlas.core.os.scandir", fail_nested)
+            failed_scan.setattr("flatlas.scanning.os.scandir", fail_nested)
             assert scan_directory(connection, source)["status"] == "partial"
 
         ls_status = next(row["status"] for row in list_child_directories(connection, scope=source) if row["name"] == "nested")
@@ -457,7 +465,7 @@ def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch
             return real_scandir(path)
 
         with monkeypatch.context() as partial_scan:
-            partial_scan.setattr("flatlas.core.os.scandir", fail_nested)
+            partial_scan.setattr("flatlas.scanning.os.scandir", fail_nested)
             assert scan_directory(connection, nested)["status"] == "partial"
 
         empty.rmdir()
@@ -508,7 +516,7 @@ def test_ls_does_not_treat_equal_scan_times_as_completed_coverage(tmp_path: Path
     try:
         assert scan_directory(connection, source)["status"] == "completed"
         with monkeypatch.context() as partial_scan:
-            partial_scan.setattr("flatlas.core.os.scandir", fail_child)
+            partial_scan.setattr("flatlas.scanning.os.scandir", fail_child)
             assert scan_directory(connection, source)["status"] == "partial"
 
         scans = connection.execute("SELECT id, started_at_ns FROM scan ORDER BY id").fetchall()
@@ -546,7 +554,7 @@ def test_ls_refresh_status_uses_directory_itself_without_descendant_checks(tmp_p
         scan_directory(connection, source)
         monkeypatch.setattr("flatlas.scanning.now_ns", lambda: previous_time + 10)
         with monkeypatch.context() as partial_scan:
-            partial_scan.setattr("flatlas.core.os.scandir", fail_child)
+            partial_scan.setattr("flatlas.scanning.os.scandir", fail_child)
             assert scan_directory(connection, source, refresh_before_ns=previous_time + 5)["status"] == "partial"
         assert list_child_directories(connection, scope=source)[0]["status"] == "scanned"
         assert list_child_directories(connection, scope=parent)[0]["status"] == "incomplete"
@@ -604,7 +612,7 @@ def test_scan_progress_truncates_long_directory_prefix_by_display_width(monkeypa
     monkeypatch.setattr(cli.typer, "echo", lambda message="", **_kwargs: output.append(message))
 
     display = cli._ScanProgressDisplay(enabled=True, interval=0)
-    display.update(core.ScanProgress("scanning", 0, 1, 0, "目录" * 20))
+    display.update(scanning.ScanProgress("scanning", 0, 1, 0, "目录" * 20))
 
     assert len(output) == 1
     assert output[0].startswith("\r\x1b[2KScanning: 0 files · 1 dirs · 0 B · 目")
@@ -623,9 +631,9 @@ def test_scan_progress_uses_current_directory_on_timed_refresh(monkeypatch) -> N
     monkeypatch.setattr(cli.typer, "echo", lambda message="", **_kwargs: output.append(message))
 
     display = cli._ScanProgressDisplay(enabled=True, interval=0.1)
-    display.update(core.ScanProgress("scanning", 0, 1, 0, "."))
-    display.update(core.ScanProgress("scanning", 0, 2, 0, "first"))
-    display.update(core.ScanProgress("scanning", 0, 3, 0, "second"))
+    display.update(scanning.ScanProgress("scanning", 0, 1, 0, "."))
+    display.update(scanning.ScanProgress("scanning", 0, 2, 0, "first"))
+    display.update(scanning.ScanProgress("scanning", 0, 3, 0, "second"))
 
     assert len(output) == 2
     assert output[0].endswith(" · .")
@@ -732,14 +740,14 @@ def test_lazy_hashing_is_scoped_reads_small_files_once_and_reuses_cache(tmp_path
         (directory / "b.bin").write_bytes(b"same")
     try:
         scan_directory(connection, source)
-        original = core._validated_digest
+        original = hashing._validated_digest
         reads: list[tuple[Path, bool]] = []
 
         def tracked(candidate, *, full):
             reads.append((Path(candidate["path_display"]), full))
             return original(candidate, full=full)
 
-        monkeypatch.setattr(core, "_validated_digest", tracked)
+        monkeypatch.setattr(hashing, "_validated_digest", tracked)
         summary = ensure_duplicate_hashes(connection, inside)
         assert summary.as_dict() == {
             "candidate_files": 2,
@@ -768,20 +776,20 @@ def test_lazy_hashing_is_scoped_reads_small_files_once_and_reuses_cache(tmp_path
 def test_quick_hash_avoids_full_reads_for_different_large_files(tmp_path: Path, monkeypatch, external_file_allocation) -> None:
     connection, source = make_connection(tmp_path)
     try:
-        size = core.QUICK_SAMPLE_BYTES * 2 + 1
+        size = hashing.QUICK_SAMPLE_BYTES * 2 + 1
         (source / "a.bin").write_bytes(b"a" * size)
         (source / "b.bin").write_bytes(b"b" * size)
         (source / "c.bin").write_bytes(b"c" * size)
         (source / "d.bin").write_bytes(b"c" * size)
         scan_directory(connection, source)
-        original = core._validated_digest
+        original = hashing._validated_digest
         phases: list[bool] = []
 
         def tracked(candidate, *, full):
             phases.append(full)
             return original(candidate, full=full)
 
-        monkeypatch.setattr(core, "_validated_digest", tracked)
+        monkeypatch.setattr(hashing, "_validated_digest", tracked)
         summary = ensure_duplicate_hashes(connection, source)
         assert summary.content_files_read == 4
         assert phases == [False, False, False, False, True, True]
@@ -995,7 +1003,7 @@ def test_ls_skips_recursive_checks_after_cancellation_and_keeps_cached_usage(
             raise KeyboardInterrupt
 
     try:
-        monkeypatch.setattr("flatlas.core.os.scandir", sorted_scandir)
+        monkeypatch.setattr("flatlas.scanning.os.scandir", sorted_scandir)
         scan_directory(connection, source)
         try:
             scan_directory(connection, source, on_progress=interrupt_active)
@@ -1004,7 +1012,7 @@ def test_ls_skips_recursive_checks_after_cancellation_and_keeps_cached_usage(
         else:
             raise AssertionError("scan should be cancelled in the active branch")
 
-        monkeypatch.setattr("flatlas.core.os.scandir", real_scandir)
+        monkeypatch.setattr("flatlas.scanning.os.scandir", real_scandir)
         assert disk_usage(connection, scope=completed)[0]["status"] == "scanned"
         cached_usage = connection.execute(
             """SELECT subtree_files, subtree_logical_size, subtree_complete_through_ns
@@ -1103,7 +1111,7 @@ def test_directory_summary_records_partial_and_complete_scan_freshness(tmp_path:
         return real_scandir(path)
 
     try:
-        monkeypatch.setattr("flatlas.core.os.scandir", fail_nested)
+        monkeypatch.setattr("flatlas.scanning.os.scandir", fail_nested)
         assert scan_directory(connection, source)["status"] == "partial"
         rows = {
             row["path_display"]: row
@@ -1120,7 +1128,7 @@ def test_directory_summary_records_partial_and_complete_scan_freshness(tmp_path:
         assert rows[str(source)]["subtree_files"] == 0
         assert rows[str(source)]["subtree_logical_size"] == 0
 
-        monkeypatch.setattr("flatlas.core.os.scandir", real_scandir)
+        monkeypatch.setattr("flatlas.scanning.os.scandir", real_scandir)
         assert scan_directory(connection, source)["status"] == "completed"
         completed = connection.execute(
             """SELECT ds.subtree_files, ds.subtree_logical_size,
@@ -1139,7 +1147,7 @@ def test_directory_summary_records_partial_and_complete_scan_freshness(tmp_path:
             (str(nested),),
         ).fetchone()[0]
 
-        monkeypatch.setattr("flatlas.core.os.scandir", fail_nested)
+        monkeypatch.setattr("flatlas.scanning.os.scandir", fail_nested)
         assert scan_directory(connection, source)["status"] == "partial"
         invalidated = connection.execute(
             """SELECT p.path_display, ds.self_completed_at_ns, ds.subtree_complete_through_ns
@@ -1246,7 +1254,7 @@ def test_partial_refresh_never_confirms_missing_entries(tmp_path: Path, monkeypa
                 raise PermissionError("injected refresh failure")
             return real_scandir(path)
 
-        monkeypatch.setattr("flatlas.core.os.scandir", fail_one_directory)
+        monkeypatch.setattr("flatlas.scanning.os.scandir", fail_one_directory)
         result = scan_directory(connection, source, refresh_before_ns=cutoff)
 
         assert result["status"] == "partial"
@@ -1316,7 +1324,7 @@ def test_reappeared_directory_does_not_reuse_previous_success_time(tmp_path: Pat
                 raise PermissionError("injected reappearance failure")
             return real_scandir(path)
 
-        monkeypatch.setattr("flatlas.core.os.scandir", fail_reappeared)
+        monkeypatch.setattr("flatlas.scanning.os.scandir", fail_reappeared)
         assert scan_directory(connection, source)["status"] == "partial"
         summary = connection.execute(
             """SELECT ds.self_completed_at_ns, ds.subtree_complete_through_ns
@@ -1365,7 +1373,7 @@ def test_subtree_scan_refreshes_cached_ancestor_totals_without_rescanning_ancest
 @pytest.mark.cli
 def test_cli_main_renders_domain_errors_without_traceback(monkeypatch, capsys) -> None:
     def fail() -> None:
-        raise core.FlatlasError("path is not currently indexed")
+        raise errors.FlatlasError("path is not currently indexed")
 
     monkeypatch.setattr(cli, "app", fail)
     assert cli.main() == 2
@@ -1468,14 +1476,14 @@ def test_partial_or_cancelled_scan_never_confirms_missing_paths(tmp_path: Path, 
         scan_directory(connection, source)
         vanished.unlink()
         real_scandir = os.scandir
-        monkeypatch.setattr("flatlas.core.os.scandir", lambda _path: (_ for _ in ()).throw(OSError("injected")))
+        monkeypatch.setattr("flatlas.scanning.os.scandir", lambda _path: (_ for _ in ()).throw(OSError("injected")))
         assert scan_directory(connection, source)["status"] == "partial"
         assert connection.execute(
             "SELECT state FROM path WHERE path_display=?", (str(vanished),)
         ).fetchone()["state"] == "present"
 
-        monkeypatch.setattr("flatlas.core.os.scandir", real_scandir)
-        monkeypatch.setattr("flatlas.core._observation", lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
+        monkeypatch.setattr("flatlas.scanning.os.scandir", real_scandir)
+        monkeypatch.setattr("flatlas.scanning._observation", lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
         try:
             scan_directory(connection, source)
         except KeyboardInterrupt:
@@ -1556,7 +1564,7 @@ def test_resume_uses_original_start_and_skips_completed_directories(tmp_path: Pa
             raise KeyboardInterrupt
 
     try:
-        monkeypatch.setattr("flatlas.core.os.scandir", sorted_scandir)
+        monkeypatch.setattr("flatlas.scanning.os.scandir", sorted_scandir)
         try:
             scan_directory(connection, source, on_progress=interrupt_before_remaining)
         except KeyboardInterrupt:
@@ -1581,7 +1589,7 @@ def test_resume_uses_original_start_and_skips_completed_directories(tmp_path: Pa
                 scanned[directory] += 1
             return real_scandir(path)
 
-        monkeypatch.setattr("flatlas.core.os.scandir", count_scandir)
+        monkeypatch.setattr("flatlas.scanning.os.scandir", count_scandir)
         result = scan_directory(connection, source, refresh_before_ns=selection.refresh_before_ns)
 
         assert result["status"] == "completed"
@@ -1712,9 +1720,9 @@ def test_scan_audit_queries_filter_scopes_and_include_errors(tmp_path: Path, mon
                 raise PermissionError("injected scan audit failure")
             return real_scandir(path)
 
-        monkeypatch.setattr("flatlas.core.os.scandir", fail_second)
+        monkeypatch.setattr("flatlas.scanning.os.scandir", fail_second)
         second_scan = scan_directory(connection, second)
-        monkeypatch.setattr("flatlas.core.os.scandir", real_scandir)
+        monkeypatch.setattr("flatlas.scanning.os.scandir", real_scandir)
 
         rows = list_scans(connection, scope=second, limit=20)
         assert [row["scan_id"] for row in rows] == [second_scan["scan_id"], root_scan["scan_id"]]
@@ -1857,7 +1865,7 @@ def test_index_queries_and_cached_duplicates_work_after_source_goes_offline(tmp_
         ensure_duplicate_hashes(connection, source)
         offline = tmp_path / "offline"
         source.rename(offline)
-        assert [row["path_display"] for row in core.query_paths(connection, scope=source)] == [
+        assert [path for path, _end in find_paths(connection, str(source), parse_find_expression([]))] == [
             str(source),
             str(source / "a.bin"),
             str(source / "b.bin"),
@@ -1892,7 +1900,7 @@ def test_json_csv_output_and_read_only_commands_preserve_user_files(tmp_path: Pa
         connection.close()
 
     runner = CliRunner()
-    for command in ("paths", "du", "ls", "largest", "dupes"):
+    for command in ("du", "ls", "largest", "dupes"):
         arguments = [command, str(source), "--format", "json", "--db", str(database)]
         result = runner.invoke(app, arguments)
         assert result.exit_code == 0, result.output
@@ -1909,7 +1917,9 @@ def test_json_csv_output_and_read_only_commands_preserve_user_files(tmp_path: Pa
     assert plan.exit_code == 0
     assert runner.invoke(app, ["plan", "show", plan.stdout.strip(), "--db", str(database)]).exit_code == 0
     exported = tmp_path / "dupes.json"
-    assert runner.invoke(app, ["export", "dupes", "--output", str(exported), str(source), "--db", str(database)]).exit_code == 0
+    assert runner.invoke(
+        app, ["dupes", "--format", "json", "--output", str(exported), str(source), "--db", str(database)]
+    ).exit_code == 0
     assert json.loads(exported.read_text(encoding="utf-8"))["groups"]
     assert "apply" not in {command.name for command in app.registered_commands}
     after = {path.relative_to(source): (path.read_bytes(), path.stat().st_mtime_ns) for path in source.rglob("*") if path.is_file()}

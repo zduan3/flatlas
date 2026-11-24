@@ -7,7 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 from flatlas import cli, config, refresh
-from flatlas.core import open_database
+from flatlas.db import open_database
 from flatlas.errors import FlatlasError
 
 pytestmark = pytest.mark.cli

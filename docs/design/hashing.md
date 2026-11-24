@@ -1,10 +1,10 @@
 # 惰性 Hash 与重复候选
 
-> 状态：当前设计。描述 `dupes` / `export dupes` 的惰性 hash 流水线、缓存复用、筛选和分组语义；随代码更新。
+> 状态：当前设计。描述 `dupes` 的惰性 hash 流水线、缓存复用、筛选和分组语义；随代码更新。
 
 ## 流水线
 
-`scan` 只采集 metadata；内容 hash 只在 `dupes PATH`（及 `export dupes PATH`）执行时、只为 PATH 子树内的候选文件计算。PATH 默认为当前目录，必须是已索引的目录或 namespace root。
+`scan` 只采集 metadata；内容 hash 只在 `dupes PATH` 执行时、只为 PATH 子树内的候选文件计算。PATH 默认为当前目录，必须是已索引的目录或 namespace root。
 
 1. **size**：单次范围查询选出 PATH 后代中仍为 `present`、普通文件、logical size 大于 0、未被大小筛选排除，且同大小文件数大于 1 的候选。0 B 文件不进入候选、不计算 hash、也不显示为重复组。
 2. **quick BLAKE3**：读取文件头 64 KiB 与尾 64 KiB 计算 quick digest。不超过 128 KiB 的文件读取全文，quick 即覆盖全文，直接写为 `full_ready`（full digest 与 quick 相同）；已有的小文件 quick 缓存也直接提升为 `full_ready`，不重复读取。
@@ -38,7 +38,7 @@
 
 ## 筛选参数
 
-`dupes` 与 `export dupes` 共用以下参数，大小与节省量均为字节整数：
+`dupes` 的筛选参数如下，大小与节省量均为字节整数：
 
 | 参数 | 默认 | 语义与应用时机 |
 |---|---|---|
@@ -56,10 +56,10 @@
 - **CSV**：每组一行，并在行内重复 `hash` 摘要字段；零组时为空文件，没有独立摘要。
 - hash 不完整时 stderr 输出 `warning: duplicate analysis incomplete: ...`。
 
-`hash.complete` 仅描述该候选范围的 hash 处理状态，不保证 scan coverage 完整，也不表示筛选范围外没有重复。`export dupes` 以同一实现写入 `--output` 文件（默认 JSON），并在 stdout 打印输出路径。
+`hash.complete` 仅描述该候选范围的 hash 处理状态，不保证 scan coverage 完整，也不表示筛选范围外没有重复。`--output FILE` 把同样的内容写入文件。
 
 ## 结果的使用边界
 
-`dupes` 输出的是基于完整 BLAKE3 的重复内容候选和理论 logical savings，不是删除授权。需要实际去重时，应选择值得处理的较小目录，让 jdupes 重新扫描、独立验证并由用户显式执行；不要把 `export dupes` 的结果直接管道到删除命令。
+`dupes` 输出的是基于完整 BLAKE3 的重复内容候选和理论 logical savings，不是删除授权。需要实际去重时，应选择值得处理的较小目录，让 jdupes 重新扫描、独立验证并由用户显式执行；不要把 `dupes` 的导出结果直接管道到删除命令。
 
 相关提案：[lazy-hash 后续能力](../plan/proposals/lazy-hash.md)。

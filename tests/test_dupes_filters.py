@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from flatlas import core, hashing
+from flatlas import db, hashing, paths, queries, scanning
 from flatlas.cli import app, main
 from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError
@@ -36,16 +36,16 @@ def indexed(tmp_path: Path, monkeypatch):
         lambda path, _metadata: 0 if path.name == "zero" else None if path.name == "medium-1" else 4096,
     )
     database = tmp_path / "index.sqlite"
-    with core.open_database(database) as connection:
-        root_id = core.register_namespace(connection, core.discover_namespace(scope))
-        core.scan_directory(connection, scope.parent)
+    with db.open_database(database) as connection:
+        root_id = paths.register_namespace(connection, paths.discover_namespace(scope))
+        scanning.scan_directory(connection, scope.parent)
     return scope, database, root_id
 
 
 @pytest.mark.parametrize("cached", [False, True])
 def test_size_filters_bound_reads_and_cached_groups(indexed, monkeypatch, cached) -> None:
     scope, database, _ = indexed
-    with core.open_database(database) as connection:
+    with db.open_database(database) as connection:
         if cached:
             hashing.ensure_duplicate_hashes(connection, scope.parent)
         before_paths = [tuple(row) for row in connection.execute("SELECT * FROM path ORDER BY id")]
@@ -66,7 +66,7 @@ def test_size_filters_bound_reads_and_cached_groups(indexed, monkeypatch, cached
         assert summary.candidate_bytes == 40
         assert summary.content_files_read == (0 if cached else 5)
         assert sorted(reads) == ([] if cached else ["medium-0", "medium-1", "medium-2", "other-0", "other-1"])
-        groups = core.duplicate_groups(connection, scope=scope, filters=filters)
+        groups = queries.duplicate_groups(connection, scope=scope, filters=filters)
         assert [(group["count"], group["theoretical_savings"]) for group in groups] == [(3, 16), (2, 8)]
         assert all(group["logical_size"] == 8 for group in groups)
         assert all("outside" not in path["path_display"] for group in groups for path in group["paths"])
@@ -88,20 +88,20 @@ def test_size_filters_bound_reads_and_cached_groups(indexed, monkeypatch, cached
 ])
 def test_group_filters_follow_full_grouping_and_stable_sort(indexed, filters, expected) -> None:
     scope, database, _ = indexed
-    with core.open_database(database) as connection:
+    with db.open_database(database) as connection:
         hashing.ensure_duplicate_hashes(connection, scope)
-        groups = core.duplicate_groups(connection, scope=scope, filters=filters)
+        groups = queries.duplicate_groups(connection, scope=scope, filters=filters)
         assert [(group["logical_size"], group["count"]) for group in groups] == expected
         assert all(len(group["paths"]) == group["count"] for group in groups)
 
 
 def test_size_filters_apply_to_root_and_global_queries(indexed) -> None:
     scope, database, root_id = indexed
-    with core.open_database(database) as connection:
+    with db.open_database(database) as connection:
         hashing.ensure_duplicate_hashes(connection, scope.parent)
         filters = DuplicateFilters(min_size=8, max_size=8, min_count=3, limit=1)
         for kwargs in ({}, {"root_id": root_id}):
-            groups = core.duplicate_groups(connection, filters=filters, **kwargs)
+            groups = queries.duplicate_groups(connection, filters=filters, **kwargs)
             assert len(groups) == 1
             assert groups[0]["logical_size"] == 8
             assert groups[0]["count"] == 4
@@ -111,24 +111,24 @@ def test_size_filters_apply_to_root_and_global_queries(indexed) -> None:
 def test_empty_candidate_filters_do_not_read_or_create_hashes(indexed, monkeypatch, filters) -> None:
     scope, database, _ = indexed
     monkeypatch.setattr(hashing, "_validated_digest", lambda *_args, **_kwargs: pytest.fail("no candidates to read"))
-    with core.open_database(database) as connection:
+    with db.open_database(database) as connection:
         summary = hashing.ensure_duplicate_hashes(connection, scope, filters=filters)
         assert summary.complete and summary.candidate_files == summary.content_files_read == 0
-        assert core.duplicate_groups(connection, scope=scope, filters=filters) == []
+        assert queries.duplicate_groups(connection, scope=scope, filters=filters) == []
         assert connection.execute("SELECT count(*) FROM file_hash").fetchone()[0] == 0
 
 
 def test_equal_savings_and_size_use_digest_tie_breaker(indexed) -> None:
     scope, database, _ = indexed
     (scope / "other-2").write_bytes(b"o" * 8)
-    with core.open_database(database) as connection:
-        core.scan_directory(connection, scope)
+    with db.open_database(database) as connection:
+        scanning.scan_directory(connection, scope)
         hashing.ensure_duplicate_hashes(connection, scope)
         filters = DuplicateFilters(min_size=8, max_size=8, min_count=3)
-        groups = core.duplicate_groups(connection, scope=scope, filters=filters)
+        groups = queries.duplicate_groups(connection, scope=scope, filters=filters)
         assert len(groups) == 2
         assert [group["digest"] for group in groups] == sorted(group["digest"] for group in groups)
-        assert core.duplicate_groups(connection, scope=scope, filters=DuplicateFilters(8, 8, 3, limit=1)) == groups[:1]
+        assert queries.duplicate_groups(connection, scope=scope, filters=DuplicateFilters(8, 8, 3, limit=1)) == groups[:1]
 
 
 @pytest.mark.scan
@@ -136,14 +136,14 @@ def test_equal_savings_and_size_use_digest_tie_breaker(indexed) -> None:
 def test_local_rescan_combines_new_and_existing_hashes_under_filters(indexed) -> None:
     scope, database, _ = indexed
     filters = DuplicateFilters(min_size=8, max_size=8, min_count=3)
-    with core.open_database(database) as connection:
+    with db.open_database(database) as connection:
         hashing.ensure_duplicate_hashes(connection, scope)
         (scope / "nested" / "medium-2").unlink()
         (scope / "nested" / "other-2").write_bytes(b"o" * 8)
-        assert core.scan_directory(connection, scope / "nested")["status"] == "completed"
+        assert scanning.scan_directory(connection, scope / "nested")["status"] == "completed"
         summary = hashing.ensure_duplicate_hashes(connection, scope, filters=filters)
         assert summary.complete and summary.content_files_read == 1
-        groups = core.duplicate_groups(connection, scope=scope, filters=filters)
+        groups = queries.duplicate_groups(connection, scope=scope, filters=filters)
         assert len(groups) == 1 and groups[0]["count"] == 3
         assert {Path(path["path_display"]).name for path in groups[0]["paths"]} == {"other-0", "other-1", "other-2"}
         deleted = [row[0] for row in connection.execute("SELECT path_display FROM path WHERE state='deleted'")]
@@ -154,16 +154,16 @@ def test_local_rescan_combines_new_and_existing_hashes_under_filters(indexed) ->
 @pytest.mark.safety
 def test_group_filter_does_not_hide_hash_errors_or_change_coverage(indexed, monkeypatch) -> None:
     scope, database, _ = indexed
-    digest = core._validated_digest
+    digest = hashing._validated_digest
 
     def fail_one(candidate, *, full):
         if Path(candidate["path_display"]).name == "other-0":
             raise OSError("injected read error")
         return digest(candidate, full=full)
 
-    monkeypatch.setattr(core, "_validated_digest", fail_one)
     monkeypatch.setattr(hashing, "_validated_digest", fail_one)
-    with core.open_database(database) as connection:
+    monkeypatch.setattr(hashing, "_validated_digest", fail_one)
+    with db.open_database(database) as connection:
         before = [tuple(row) for row in connection.execute("SELECT * FROM scan_scope ORDER BY id")]
     result = CliRunner().invoke(app, [
         "dupes", str(scope), "--db", str(database), "--format", "json",
@@ -174,7 +174,7 @@ def test_group_filter_does_not_hide_hash_errors_or_change_coverage(indexed, monk
     assert payload["hash"]["complete"] is False and payload["hash"]["errors"] == 1
     assert len(payload["groups"]) == 1 and payload["groups"][0]["count"] == 3
     assert "incomplete" in result.stderr
-    with core.open_database(database) as connection:
+    with db.open_database(database) as connection:
         assert [tuple(row) for row in connection.execute("SELECT * FROM scan_scope ORDER BY id")] == before
         assert connection.execute("SELECT count(*) FROM path WHERE state='deleted'").fetchone()[0] == 0
 
@@ -203,7 +203,7 @@ def test_cli_and_export_share_filters_and_paths(indexed, tmp_path: Path, fmt) ->
     else:
         assert "1 duplicate group" in result.stdout and "2 redundant files" in result.stdout
     output = tmp_path / f"groups.{fmt}"
-    exported = runner.invoke(app, ["export", "dupes", str(scope), *options, "--absolute", "--output", str(output)])
+    exported = runner.invoke(app, ["dupes", str(scope), *options, "--absolute", "--output", str(output)])
     assert exported.exit_code == 0, exported.output
     assert "medium-0" in output.read_text(encoding="utf-8")
     if fmt == "table":
@@ -221,7 +221,7 @@ def test_empty_filtered_export_preserves_existing_format(indexed, tmp_path: Path
     scope, database, _ = indexed
     output = tmp_path / "empty-output"
     result = CliRunner().invoke(app, [
-        "export", "dupes", str(scope), "--db", str(database), "--format", fmt,
+        "dupes", str(scope), "--db", str(database), "--format", fmt,
         "--max-size", "0", "--output", str(output),
     ])
     assert result.exit_code == 0, result.output
@@ -241,11 +241,11 @@ def test_empty_filtered_export_preserves_existing_format(indexed, tmp_path: Path
     ["--min-size", "9", "--max-size", "8"],
     ["--min-size", str(2**63)], ["--max-size", str(2**63)],
 ])
-@pytest.mark.parametrize("export", [False, True])
+@pytest.mark.parametrize("to_file", [False, True])
 @pytest.mark.cli
-def test_invalid_filters_fail_before_opening_database(options, export, tmp_path: Path, monkeypatch, capsys) -> None:
+def test_invalid_filters_fail_before_opening_database(options, to_file, tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setattr("flatlas.cli._open_database", lambda *_args, **_kwargs: pytest.fail("must validate before opening database"))
-    command = ["export", "dupes", "--output", str(tmp_path / "unused")] if export else ["dupes"]
+    command = ["dupes", "--output", str(tmp_path / "unused")] if to_file else ["dupes"]
     monkeypatch.setattr("sys.argv", ["flatlas", *command, *options])
     try:
         code = main()
