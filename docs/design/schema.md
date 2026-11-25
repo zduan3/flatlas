@@ -1,6 +1,6 @@
 # SQLite 数据库结构
 
-> 状态：当前设计。描述 schema v3（`db.SCHEMA_VERSION = 3`）的持久化模型、迁移与查询约束；随代码更新。
+> 状态：当前设计。描述 schema v7（`db.SCHEMA_VERSION = 7`）的持久化模型、迁移与查询约束；随代码更新。
 
 ## 目标与范围
 
@@ -49,7 +49,7 @@ path.parent_path_id ── path.id
 - `directory_summary`：每个当前 root 或普通目录的派生汇总与扫描 freshness，见 [扫描与目录汇总](scanning.md)。
 - `plan` / `plan_operation`：不可变的 dry-run 候选建议快照；只创建和导出，不执行，也不构成删除或替换授权。
 
-## DDL（schema v3）
+## DDL（schema v7）
 
 以下为语义等价的可读版本；实际语句见 `db.py` 的 `DDL` 与 `DIRECTORY_SUMMARY_MIGRATION`（均使用 `IF NOT EXISTS`）。
 

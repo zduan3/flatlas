@@ -7,7 +7,7 @@
 只描述当前行为与不变量，按主题组织，随代码一起更新。
 
 - [架构与边界](design/architecture.md)：产品定位、分层流水线、代码组织、核心模型、跨平台边界与不可破坏的语义。
-- [数据库结构](design/schema.md)：schema v3 的表、索引、扫描与删除语义、migration 历史与执行机制。
+- [数据库结构](design/schema.md)：schema v7 的表、索引、扫描与删除语义、migration 历史与执行机制。
 - [扫描与目录汇总](design/scanning.md)：metadata 扫描、元数据成本、目录汇总与 freshness、`--refresh-before`、中断与续扫、删除确认。
 - [惰性 Hash 与重复候选](design/hashing.md)：size → quick → full 流水线、basis 校验、dupes 筛选、分组与输出。
 - [查询命令](design/queries.md)：`ls`、`du`、`find`、`largest`、`roots` / `df`、`rm`、`scans` / `scan-info`、`plan`。
@@ -28,10 +28,11 @@
 
 ## history/：冻结记录
 
-已发布版本的记录，只修正链接，不修改内容。
+发布记录与验证结果。已发布版本的记录只修正链接。
 
 - [0.1 功能范围与验收基线](history/0.1-acceptance.md)
 - [0.1 实现状态](history/0.1-implementation.md)
+- [0.2.0 发布记录](history/0.2.0-release.md)
 - [验证记录](history/verification-log.md)：按日期追加的跨平台验证结果。
 
 ## research/：调研

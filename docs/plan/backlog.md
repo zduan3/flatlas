@@ -11,15 +11,35 @@
 
 ## 0.2.0
 
-- **0.2.0 验收（Windows 与机械硬盘）**
-  目标：Windows 原生与 WSL 各跑一次全量 pytest，修复问题并记入 [验证记录](../history/verification-log.md)；中途发现的 Windows 问题已由 `eb8395b`、`b20d227` 修复，其后新增的 `find --format`、元数据测试与 `FLATLAS_DB` / `--no-config`（含 `test_find_records.py`、`test_config.py` 新用例）尚未在 Windows 上运行。另记录机械硬盘性能基线：在 Windows 归档盘（索引放在同一块硬盘上）记录全量扫描、`--refresh-before` 刷新、大子树 `find -prune` 与 `find --format`、`du --files0-from -c --freed` 的耗时与 `scan-info` 分阶段计时。
-  原因：0.2 的改动只在 Linux 上验证过，性能只在 Lustre 与本地 SSD 上测过；按 `path_key` 顺序回表等访问模式在硬盘上的代价未知。基线只记录、不设门槛，供 0.2.2 对比。
+Windows 原生与 WSL 发布验收已记入 [验证记录](../history/verification-log.md#020-发布验收2026-11-25)。
+
+### 发布后采集机械硬盘基线
+
+0.2.0 发布后，在具备 Windows 机械硬盘的环境检出 `v0.2.0` 采集基线，供 0.2.2 对比。优先观察重复刷新中的目录枚举和大子树查询首次运行时的索引页读取。源目录与 SQLite 索引放在同一块机械盘上，查询输出写到另一块盘。记录受测提交、盘型号及连接方式、文件系统、目录和条目数，以及完整命令、扫描范围、刷新 cutoff 与输入清单。
+
+最小测试清单：
+
+- **已有索引的刷新**。从相同的索引起点分别测试目录树无变化、少量目录有增删两种情形。用 `--refresh-before` 选中相同的旧目录范围，记录总耗时及 `readdir`、`observe`、`refresh_query`、`db_write` 的耗时和调用次数，并核对更新后的条目数与 coverage。
+- **大子树查询**。运行 `find -prune`、`find --format jsonl` 和固定清单的 `du --files0-from -c --freed`。分别记录首次运行耗时及三次连续运行的中位数，核对输出行数和关键汇总。记录首次运行前的缓存准备方法；仅重启进程时仍称为首次运行。
+- **新索引全量扫描**。从空索引扫描同一棵树，记录总耗时、条目数和完成后的索引体积。用 `scan-info ID --format json` 保存分阶段计时，重点看 `readdir`、`observe`、`db_write`、`commit` 和 `summaries`。刷新同样保存该输出。
+
+保留 0.2.0 的原始索引和查询结果。0.2.2 使用独立索引，在同一块盘、同一棵树和相同输入下复测。若补测大批外部删除，在可丢弃副本上记录 `mark_missing` 和实际缺失规模，单列结果。基线与复测结果记入 [验证记录](../history/verification-log.md)。
 
 ## 0.2.1
 
-- **只读 Python API（`flatlas.api`）**，CLI 改为其薄层。
-- **`scan --shallow --files0-from`**：一次扫描覆盖多个父目录，以重新观察确认删除。
-  → [proposals/automation.md](proposals/automation.md#021后续)
+- **只读 Python API（`flatlas.api`）**：一次打开索引、多次查询，默认以 SQLite 只读模式打开。首批覆盖 `find`、`du`、`largest`、`roots`、`scans`、`scan_info`，与 CLI 共用查询逻辑和机器记录约定。
+  → [Python API 契约](proposals/automation.md#只读-python-api)
+
+- **`scan --shallow --files0-from`**：一次 CLI 调用处理多个父目录，每个父目录独立记录 `scan_id` 和 `scope_id`。批次报告逐目录结果，只有 completed scope 才确认删除。
+  → [批量浅扫描](proposals/automation.md#批量浅扫描)
+
+- **扫描报告确认删除的条数**：`scan` 输出和 `scan.stats_json` 增加本次实际从 `present` 转为 `deleted` 的路径数。`entries_per_s` 说明按观测到的条目计算，便于核对重扫结果和写入成本。
+  → [删除计数](proposals/automation.md#删除计数与-rm-帮助)
+
+- **`rm` 帮助文字**：明确单个 PATH 也会立即移除索引中的对应子树，并提示先用 `du PATH` 查看规模。
+
+- **schema v7 无迁移验收**：在 Windows 原生与 WSL 上，用 0.2.0 生成的 v7 索引验证只读打开、API 与 CLI 的记录一致性、批量浅扫的删除边界和历史扫描的读取。0.2.1 沿用 schema v7。
+  → [发布验收](proposals/automation.md#schema-v7-无迁移验收)
 
 ## 0.2.2
 
@@ -33,22 +53,14 @@
   原因：每行约 960 B、完整路径存三份；480 万条目的索引 4.6 GB，放在 Lustre 上冷读代价高。
 
 - **机械硬盘验收**
-  目标：在 0.2.0 基线的同一块硬盘、同一棵目录树上重测同一组操作，确认增量刷新与更小的索引在硬盘上确有收益、查询没有退化，结果记入验证记录。
+  目标：按 [0.2.0 发布后采集的机械硬盘基线](#发布后采集机械硬盘基线) 重测，核对增量刷新减少的枚举次数、索引体积与查询耗时，并验证查询结果一致。
   原因：这两项降低的正是随机元数据读与索引页读，硬盘上收益应最明显，也最容易暴露访问模式问题。
 
 ## 0.2.x
 
-- **扫描报告确认删除的条数**
-  目标：`scan` 输出与 `scan.stats_json` 增加本次标记为 deleted 的路径数；`entries_per_s` 注明只按观测到的条目计算，或另给不含 `mark_missing` 的速率。
-  原因：清理后重扫时，这个数正是要核对的结果，现在只能对比前后两次 `du`；一次删除 368 万条目后的重扫只观测到 23 万条目，报告 336 条目/s，而时间主要花在没有计数的 `mark_missing` 上（[扫描](../design/scanning.md#元数据成本)）。
-
 - **清理 tombstone 与压缩索引**
   目标：只移除某个现存目录下 `state='deleted'` 的后代、保留 present 行（如 `rm --deleted PATH`），以及按需回收空间的 `VACUUM` 入口或说明。依赖 [待决策清单](decisions.md#索引与历史) 中 deleted 记录的保留策略。
   原因：现在的 `rm` 只能删整棵子树，要清 tombstone 得先拿到被删路径的清单；扫描确认的大批删除留下的 tombstone 会一直占索引，后续完整扫描的删除确认也要走过它们。删行后 SQLite 文件不缩小。
-
-- **`rm` 帮助文字**
-  目标：说明单个 PATH 同样立即删除，并给出先用 `du PATH` 查看规模的提示。
-  原因：帮助中「One PATH prints that path's counts」容易被读成只显示计数的预览。
 
 - **重复目录树候选**
   目标：只读索引，按目录内相对路径与 size 的集合找出结构相同或几乎相同的目录树，按组报告条目数与字节，作为 inode 清理的候选（不是删除授权）。需要独立设计：相似度定义、规模阈值、与文件级 `dupes` 的关系。
