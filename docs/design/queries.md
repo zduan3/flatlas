@@ -173,11 +173,11 @@ mgs@tcp:/fs1             lustre  325T  284T    42T   88%  /lustre/fs1
 
 只从 SQLite 递归移除该路径及其已索引后代，等价于对索引执行 `rm -r PATH`；它不访问、不验证也不改动实际文件。PATH 按词法转为绝对路径（不解析 symlink、不检查文件系统），必须与某个索引路径完全一致，否则报错。
 
-- 路径行被物理删除，其 `file_hash` 与 `directory_summary` 随外键级联删除；这与扫描写入的 `deleted` tombstone 不同。
+- 路径行被物理删除，其 `file_hash` 与 `directory_summary` 随外键级联删除；这与扫描写入的 `deleted` tombstone 不同。区间内不区分 `state`，已是 tombstone 的子树同样被物理删除，可用来清理扫描留下的 tombstone。
 - 若子树被 dry-run plan 引用，整个 plan 一并移除，避免保留失效计划。
 - 删除后只重算仍存在的父目录及其祖先的汇总（由各子目录已缓存的汇总得出），不重算父目录下的其它子树。
 - 子树按 `path_key` 区间删除：后代 key 以该路径 key 为前缀，即唯一索引上的一段区间。条件必须保持单一区间（`path_key>=? AND path_key<?`）；写成 `path_key=? OR (...)` 时 SQLite 放弃区间、每条语句扫整个 root。
-- 多个 PATH 或 `--files0-from`（格式同 `du`）时在一个事务内删除，嵌套的路径随外层一起删除，未索引的 PATH 写 stderr 并跳过、最后退出码 1；汇总只在最后对所有受影响的父目录与祖先重算一次。用于文件系统上批量删除后同步索引，例如 `flatlas find ... -prune -print0 > list`，按 list 删除文件后 `flatlas rm --files0-from list`。2026-11 实测 2.97 万个目录、122 万行 36 s；此前逐个 `rm` 每次都重算父目录整棵子树，在 79 万条目的目录下删一个子目录就要重算整个该目录。
+- 多个 PATH 或 `--files0-from`（格式同 `du`）时在一个事务内删除，嵌套的路径随外层一起删除，未索引的 PATH 写 stderr 并跳过、最后退出码 1；汇总只在最后对所有受影响的父目录与祖先重算一次。用于文件系统上批量删除后同步索引，例如 `flatlas find ... -prune -print0 > list`，按 list 删除文件后 `flatlas rm --files0-from list`。2026-11 实测 2.97 万个目录、122 万行 36 s；此前逐个 `rm` 每次都重算父目录整棵子树，在 79 万条目的目录下删一个子目录就要重算整个该目录。同月在 Lustre 上的 4.8 GB 索引中，225 个子树共 350 万行（均已是 tombstone）用时 5.4 min。
 - 输出（`--format table|json`）：单个 PATH 为 `path`、`paths_removed`、`plans_removed`；批量为 `scopes`（实际删除的最外层路径数）、`paths_removed`、`plans_removed`。
 
 ## `scans [PATH]` 与 `scan-info ID`

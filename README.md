@@ -146,6 +146,14 @@ scan 仍存在的父目录    → completed 后才将缺失路径标记 deleted
 
 已经不存在的目标不能直接扫描，必须扫描覆盖它的现存父目录。partial、failed、cancelled 或枚举错误不会确认删除。deleted 记录保留在 SQLite，但不参与 `find`、`du`、`largest` 或 `dupes` 的当前状态结果；同一路径重新出现并被扫描时恢复为 present，旧 hash 在 metadata basis 不匹配时变为 stale。
 
+两种同步方式的取舍：
+
+- **手里有删除清单**（按 `find` 结果核对后删除的情况）：用 `flatlas rm --files0-from 清单` 从索引物理移除这些子树，不访问文件系统，见「脚本与自动化」的配方。
+- **不知道具体删了什么**：扫描仍存在的父目录，由扫描确认删除。扫描把每一条缺失路径改写为 deleted 记录，代价与被删条目数成正比，删得多时这一步会远长于遍历本身；这些记录也不会自动清除，索引不会因此变小。
+- 扫描已经写下的 deleted 记录同样可以用 `rm` 移除：对已删除的子树执行 `flatlas rm PATH`（或 `--files0-from`）会物理删除这些记录。
+- `rm` 只给一个 PATH 时也会立即删除，输出该路径的计数，不是预览；想先看规模，用 `du PATH`。
+- SQLite 删除行后文件不缩小，空出的页由以后的写入复用。
+
 ## 实际清理
 
 `dupes` 支持以下筛选参数，大小与节省量使用字节整数：
@@ -198,6 +206,16 @@ flatlas du --files0-from candidates.lst -c --freed --format jsonl | tail -1
 ```
 
 名字只是线索：同名目录也可能是源码里的包或原始数据，删除前逐个核对。
+
+**按标记文件找候选**：有些可重建目录名字不固定，但里面有约定的标记文件，例如虚拟环境的 `pyvenv.cfg`、缓存目录的 `CACHEDIR.TAG`，或自己的工具写下的来源标记。找到标记文件后取其所在目录（`sed -z` 需要 GNU sed）：
+
+```bash
+flatlas find /data/projects -type f \( -name pyvenv.cfg -o -name CACHEDIR.TAG \) -print0 \
+  | sed -z 's#/[^/]*$##' \
+  | flatlas du --files0-from - -c --freed --format jsonl | tail -1
+```
+
+清理按 inode 计数的配额时，先用 `du -d 2 --sort entries` 看条目数排名，而不只看字节：同一份源码树的多份副本（构建快照、测试运行冻结的源码）每份数万个小文件，名字常是 `src`、`source` 这类通用词，按名字的候选找不到它们。
 
 **删除后同步索引**：flatlas 不删除文件。按核对后的清单在 flatlas 之外删除，再用同一份清单从索引移除这些子树（一个事务，只重算受影响的父目录汇总）；也可以对仍存在的父目录重新扫描，由扫描确认删除：
 
