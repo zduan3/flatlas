@@ -52,7 +52,7 @@ flatlas config unset scan.refresh-before
 flatlas config list [-a|--all]
 flatlas roots [-h] [--format table|jsonl|csv]
 flatlas df [-h] [-T] [FILE ...] [--format table|jsonl|csv]
-flatlas scan PATH [--refresh-before VALUE | --full | --resume | --shallow] [--format table|json]
+flatlas scan PATH [--refresh-before VALUE | --full | --resume | --shallow | --purge-deleted] [--format table|json]
 flatlas scan --resume-from ID
 flatlas scans [PATH] [-n N] [--format table|jsonl|csv]
 flatlas scan-info ID [--format table|json]
@@ -149,7 +149,8 @@ scan 仍存在的父目录    → completed 后才将缺失路径标记 deleted
 两种同步方式的取舍：
 
 - **手里有删除清单**（按 `find` 结果核对后删除的情况）：用 `flatlas rm --files0-from 清单` 从索引物理移除这些子树，不访问文件系统，见「脚本与自动化」的配方。
-- **不知道具体删了什么**：扫描仍存在的父目录，由扫描确认删除。`scan` 的 `paths_deleted` 报告本次新增的 deleted 记录数，包括已索引的缺失后代。缺失条目多时，确认删除可能比遍历本身更耗时。
+- **不知道具体删了什么**：扫描仍存在的父目录，由扫描确认删除。`scan` 的 `paths_deleted` 报告本次确认缺失的路径数，包括已索引的缺失后代。
+- **完整重扫后直接清理索引**：运行 `flatlas scan PATH --purge-deleted`（`-p`）。完整扫描成功后，直接移除本次确认缺失的路径和范围内的旧 tombstone，`paths_purged` 报告实际移除的行数。中断或遇到扫描错误时保留旧行。该选项覆盖配置里的刷新默认值。[完整扫描并清理删除记录](docs/design/scanning.md#完整扫描并清理删除记录)
 - **清理扫描留下的 deleted 记录**：运行 `flatlas rm --deleted PATH`，移除指定现存索引目录下的 tombstone，保留 present 记录与目录汇总。空出的 SQLite 页供后续写入复用，按需缩小数据库文件见 [压缩索引](docs/design/queries.md#rm---deleted-path)。
 - `flatlas rm PATH` 即使只有一个 PATH 也会立即移除整个索引子树。想先看规模，用 `flatlas du PATH`。
 

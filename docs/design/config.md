@@ -46,11 +46,11 @@ refresh-before = "7d"
 ## 优先级和扫描语义
 
 1. 显式 `--refresh-before VALUE` 使用指定值。
-2. `--full` 使用完整扫描；`--resume` / `--resume-from` 使用历史记录的 scope 与 cutoff。
+2. `--full` 或 `--purge-deleted`（`-p`）使用完整扫描；`--resume` / `--resume-from` 使用历史记录的 scope 与 cutoff。
 3. 普通 scan 使用保存的 `scan.refresh-before`。
 4. 未设置时使用既有完整扫描行为。
 
-四个显式选项互斥；配置默认值不参与互斥判断。`--db` 只覆盖数据库位置，普通扫描仍使用用户级默认参数。
+显式模式的兼容规则见 [扫描与目录汇总](scanning.md)，配置默认值不参与互斥判断。`--db` 只覆盖数据库位置，普通扫描仍使用用户级默认参数。
 
 全局选项 `flatlas --no-config ...` 或环境变量 `FLATLAS_NO_CONFIG`（`1`、`yes` 等；空、`0`、`false`、`no`、`off` 视为未设置）让命令忽略保存的命令默认参数，例如脚本中的 `scan` 不会因个人配置的 `scan.refresh-before` 变成刷新扫描。它只影响命令默认参数：索引位置（`index.dir`、`database`）照常从配置读取，`config get` / `list` 仍显示已保存的值。`--no-config` 只作用于本次调用。显式选项可覆盖非法的刷新默认值；配置文件本身必须能正常解析，才能定位全局数据库。
 

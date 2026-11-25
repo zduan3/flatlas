@@ -296,20 +296,10 @@ def remove_deleted_descendants(connection: sqlite3.Connection, value: Path) -> d
             if key is None or selected is None:
                 raise PathError(f"path is not a present indexed directory: {display}")
             root_id, scope_key = key
-            condition, keys = _key_range(scope_key)
-            parameters = (root_id, *keys)
-            plans_removed = connection.execute(
-                f"""DELETE FROM plan WHERE id IN (
-                    SELECT po.plan_id FROM plan_operation po
-                    JOIN path p ON p.id IN (po.canonical_path_id, po.replacement_path_id)
-                    WHERE p.root_id=? AND p.state='deleted' AND {condition.replace("path_key", "p.path_key")}
-                )""",
-                parameters,
-            ).rowcount
-            paths_removed = connection.execute(
-                f"DELETE FROM path WHERE root_id=? AND state='deleted' AND {condition}",
-                parameters,
-            ).rowcount
+            condition, keys = _key_range(scope_key, column="p.path_key")
+            paths_removed, plans_removed = _delete_paths_and_plans(
+                connection, f"p.root_id=? AND {condition} AND p.state='deleted'", (root_id, *keys)
+            )
     except sqlite3.IntegrityError as exc:
         if exc.sqlite_errorcode == sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY:
             raise FlatlasError(f"cannot purge tombstones under {display}: retained paths reference them") from exc
@@ -317,6 +307,27 @@ def remove_deleted_descendants(connection: sqlite3.Connection, value: Path) -> d
     except sqlite3.OperationalError as exc:
         raise FlatlasError(f"cannot purge tombstones under {display}: {exc}") from exc
     return {"path": display, "paths_removed": paths_removed, "plans_removed": plans_removed}
+
+
+def _delete_paths_and_plans(
+    connection: sqlite3.Connection, condition: str, parameters: tuple[object, ...],
+) -> tuple[int, int]:
+    """Delete matching paths (aliased as p) and their plans in the caller's transaction."""
+    # Each reference is a primary-key lookup. Using the subtree index inside
+    # these subqueries would rescan the range for every plan operation.
+    plans_removed = connection.execute(
+        f"""DELETE FROM plan WHERE id IN (
+            SELECT po.plan_id FROM plan_operation po
+            WHERE EXISTS (
+                SELECT 1 FROM path p NOT INDEXED WHERE p.id=po.canonical_path_id AND {condition}
+            ) OR EXISTS (
+                SELECT 1 FROM path p NOT INDEXED WHERE p.id=po.replacement_path_id AND {condition}
+            )
+        )""",
+        parameters * 2,
+    ).rowcount
+    paths_removed = connection.execute(f"DELETE FROM path AS p WHERE {condition}", parameters).rowcount
+    return paths_removed, plans_removed
 
 
 def _removal_row(connection: sqlite3.Connection, value: Path) -> sqlite3.Row:
@@ -336,8 +347,10 @@ def _removal_row(connection: sqlite3.Connection, value: Path) -> sqlite3.Row:
     return selected
 
 
-def _key_range(key: bytes) -> tuple[str, tuple[bytes, ...]]:
-    """SQL condition and parameters for ``key`` and every key under it.
+def _key_range(
+    key: bytes, *, descendants_only: bool = False, column: str = "path_key",
+) -> tuple[str, tuple[bytes, ...]]:
+    """SQL condition and parameters for the keys under ``key``.
 
     A key is its parent's key plus one NUL-terminated name, so a subtree is one
     range of the (root_id, path_key) index; 0x01 never ends a stored key.
@@ -345,9 +358,10 @@ def _key_range(key: bytes) -> tuple[str, tuple[bytes, ...]]:
     # Keep it one plain range: with "path_key=? OR (...)" SQLite gave up the
     # range and scanned the whole root for every statement (0.65 s each on a
     # 4.8M-row index). The key itself is >= key, its descendants < the bound.
+    lower = f"{column}>?" if descendants_only else f"{column}>=?"
     if not key:
-        return "path_key>=?", (key,)
-    return "path_key>=? AND path_key<?", (key, key[:-1] + b"\x01")
+        return lower, (key,)
+    return f"{lower} AND {column}<?", (key, key[:-1] + b"\x01")
 
 
 def _remove_rows(connection: sqlite3.Connection, rows: list[sqlite3.Row]) -> dict[str, Any]:

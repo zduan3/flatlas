@@ -645,6 +645,7 @@ class _ScanProgressDisplay(_ProgressLine):
             "saving": "Saving observed data",
             "completed": "Completed",
             "partial": "Partial",
+            "failed": "Failed",
             "cancelled": "Cancelled; observed data saved",
         }[progress.phase]
         line = (
@@ -888,10 +889,19 @@ def scan(
             help="Re-list only PATH's direct entries and confirm the missing ones; subdirectories are not entered.",
         ),
     ] = False,
+    purge_deleted: Annotated[
+        bool,
+        typer.Option(
+            "--purge-deleted", "-p",
+            help="Fully scan PATH, then purge missing paths and old tombstones from the index on success.",
+        ),
+    ] = False,
     format: object_format_option = "table",
     db: db_option = None,
 ) -> None:
     """Scan metadata for a complete namespace or one subtree and update the persistent index."""
+    if purge_deleted and (shallow or resume or resume_from is not None or refresh_before is not None):
+        raise typer.BadParameter("--purge-deleted requires a full scan and cannot be combined with --shallow, --resume, --resume-from, or --refresh-before")
     if shallow and (full or resume or resume_from is not None or refresh_before is not None):
         raise typer.BadParameter("--shallow is mutually exclusive with --full, --resume, --resume-from, and --refresh-before")
     if sum((resume, resume_from is not None, refresh_before is not None)) > 1:
@@ -904,7 +914,7 @@ def scan(
         raise typer.BadParameter("PATH is required unless --resume-from is used")
     check_format(format, OBJECT_FORMATS)
     cutoff = None
-    if not (resume or resume_from is not None or full or shallow):
+    if not (resume or resume_from is not None or full or shallow or purge_deleted):
         value = refresh_before if refresh_before is not None else _command_default(ctx, "scan.refresh-before")
         cutoff = _parse_refresh_before(value) if value is not None else None
     with _connection(db) as connection, _ScanProgressDisplay(enabled=_stderr_is_tty()) as progress:
@@ -918,7 +928,7 @@ def scan(
             cutoff = resume_selection(connection, path).refresh_before_ns
         assert scan_path is not None
         result = scan_directory(
-            connection, scan_path, refresh_before_ns=cutoff, shallow=shallow,
+            connection, scan_path, refresh_before_ns=cutoff, shallow=shallow, purge_deleted=purge_deleted,
             # Without a terminal the line is never drawn; skip the per-entry callback.
             on_progress=progress.update if progress.enabled else None,
         )

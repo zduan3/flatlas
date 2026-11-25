@@ -72,7 +72,7 @@ hash 复用在两个平台均采取保守规则：仅在当前文件身份、siz
 
 **扫描与删除判定**
 
-- 只在 `scan_scope.status='completed'` 时，才可以将该 scope 中未在本次 scan 观察到的旧 path 标记为 `deleted`。
+- 只在 `scan_scope.status='completed'` 时，才可以确认该 scope 中未在本次 scan 观察到的旧 path 已删除，并标记为 `deleted` 或在 `--purge-deleted` 模式直接移除。
 - 遍历权限错误、I/O 错误、hash 错误、过滤排除、取消或中断均不得被解释为“路径已删除”；相应 scope 必须是 partial、failed 或 cancelled。
 - `inotify` 或其他平台事件只能提示 dirty path，不能作为事实来源。
 - 用户在外部删除条目后，`ls` 只能显示 `gone`；只有覆盖该路径的 completed scan scope 才能持久化 `deleted`。deleted 行作为 tombstone 保留并被当前状态查询排除；路径重现后恢复为 `present`，不可靠的旧 hash basis 必须 stale。

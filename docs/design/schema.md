@@ -261,8 +261,8 @@ CREATE INDEX idx_directory_summary_freshness
 2. 枚举到路径时，以 `(root_id, path_key)` upsert `path`，更新 metadata、`state='present'` 和 `last_seen_scan_id`。Windows 使用 UTF-8 编码的原生 Unicode path；Linux 保留原始字节。任何已用于 hash 的 identity、size、mtime、change/birth time 变化或不可可靠比较时，将对应 `file_hash.state` 标记为 `stale`。
 3. scan 不读取普通文件内容，也不创建新的 `file_hash`。已有 hash 的依据随 metadata 变化时标为 `stale`。
 4. 遍历或 stat 失败时插入 `scan_error`，并将 scope 标为 `partial` 或 `failed`。
-5. **仅当某个 `scan_scope.status='completed'` 时**，利用 `parent_path_id` 的递归 CTE 找到该 scope 后代，将其中 `last_seen_scan_id <> 当前 scan` 的 `present` 路径更新为 `deleted`，再填充 `deleted_by_scope_id` 与 `deleted_at_ns`。
-6. scope 只要是 `partial`、`failed` 或 `cancelled`，绝不依据本次扫描修改任何旧路径为 `deleted`。最后才汇总 `scan.status`。
+5. **仅当某个 `scan_scope.status='completed'` 时**，在完整扫描的 `path_key` 区间或局部扫描实际覆盖的目录中确认缺失路径。普通扫描将其更新为 `deleted`，填充 `deleted_by_scope_id` 与 `deleted_at_ns`；[`--purge-deleted`](scanning.md#完整扫描并清理删除记录) 在完整扫描收尾直接移除缺失路径与历史 tombstone。
+6. scope 为 `partial`、`failed` 或 `cancelled` 时保留旧路径及其删除状态。最后汇总 `scan.status`。
 
 这满足关键安全要求：中断扫描、权限错误和扫描中改名均不得被解释为“文件已删除”。最终事务同时在 `scan.stats_json.paths_deleted` 记录本次确认删除的行数。`deleted` 行可通过 [`flatlas rm --deleted PATH`](queries.md#rm---deleted-path) 连同其 hash 显式移除，已知索引子树也可用 `rm PATH` 或 `rm --files0-from` 整体移除。
 

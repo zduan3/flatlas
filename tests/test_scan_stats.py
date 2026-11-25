@@ -4,6 +4,7 @@ import json
 import shutil
 import sqlite3
 from contextlib import closing
+from itertools import count
 from pathlib import Path
 
 import pytest
@@ -54,7 +55,9 @@ def test_scan_reports_and_persists_phase_timing(tmp_path: Path) -> None:
 
 @pytest.mark.safety
 @pytest.mark.parametrize("mode", ["full", "shallow", "refresh"])
-def test_paths_deleted_counts_only_new_tombstones(tmp_path: Path, mode: str) -> None:
+def test_paths_deleted_counts_only_new_tombstones(tmp_path: Path, mode: str, monkeypatch) -> None:
+    ticks = count(now_ns())
+    monkeypatch.setattr(scanning, "now_ns", lambda: next(ticks))
     source = _tree(tmp_path)
     database = tmp_path / "index.sqlite"
     (source / "keep").mkdir()
@@ -68,12 +71,12 @@ def test_paths_deleted_counts_only_new_tombstones(tmp_path: Path, mode: str) -> 
         shutil.rmtree(source / "nested")
         (source / "b.bin").unlink()
         (source / "keep" / "later.bin").unlink()
-        cutoff = now_ns() if mode == "refresh" else None
+        cutoff = next(ticks) if mode == "refresh" else None
         result = scan_directory(connection, source, shallow=mode == "shallow", refresh_before_ns=cutoff)
         expected = 3 if mode == "shallow" else 4
         assert result["paths_deleted"] == result["stats"]["paths_deleted"] == expected
         assert scan_info(connection, result["scan_id"])["stats"]["paths_deleted"] == expected
-        cutoff = now_ns() if mode == "refresh" else None
+        cutoff = next(ticks) if mode == "refresh" else None
         retry = scan_directory(connection, source, shallow=mode == "shallow", refresh_before_ns=cutoff)
         assert retry["paths_deleted"] == 0
 
@@ -98,7 +101,7 @@ def test_scan_cli_reports_partial_zero_and_keeps_legacy_stats_unknown(tmp_path: 
 
         with monkeypatch.context() as patch:
             patch.setattr(scanning.os, "scandir", deny_nested)
-            result = CliRunner().invoke(app, ["scan", str(source), "--format", "json", "--db", str(database)])
+            result = CliRunner().invoke(app, ["--no-config", "scan", str(source), "--format", "json", "--db", str(database)])
         assert result.exit_code == 0, result.output
         output = json.loads(result.stdout)
         assert output["status"] == "partial"
@@ -107,7 +110,7 @@ def test_scan_cli_reports_partial_zero_and_keeps_legacy_stats_unknown(tmp_path: 
         assert scan_info(connection, output["scan_id"])["stats"]["paths_deleted"] == 0
         assert scan_info(connection, old_id)["stats"] == {"wall_s": 1}
 
-        result = CliRunner().invoke(app, ["scan", str(source), "--db", str(database)])
+        result = CliRunner().invoke(app, ["--no-config", "scan", str(source), "--db", str(database)])
         assert result.exit_code == 0, result.output
         assert "paths_deleted: 1\n" in result.stdout
 

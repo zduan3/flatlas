@@ -22,6 +22,8 @@ from flatlas.errors import FlatlasError
 from flatlas.lazystat import ExactFallbacks, lazy_lstat, uses_lazy_metadata
 from flatlas.paths import (
     Namespace,
+    _delete_paths_and_plans,
+    _key_range,
     _sqlite_integer,
     discover_namespace,
     display_path,
@@ -255,13 +257,46 @@ def _mark_missing(connection: sqlite3.Connection, root_id: int, scan_id: int, sc
     index; walking that range is about twice as fast as a recursive CTE over
     parent links. The scope itself was observed by this scan.
     """
-    bounds = "path_key>?" if not scope_key else "path_key>? AND path_key<?"
+    bounds, keys = _key_range(scope_key, descendants_only=True)
     cursor = connection.execute(
         f"""UPDATE path SET state='deleted', deleted_by_scope_id=?, deleted_at_ns=?
             WHERE root_id=? AND {bounds} AND state='present' AND last_seen_scan_id <> ?""",
-        (scope_id, now_ns(), root_id, scope_key, *(() if not scope_key else (scope_key[:-1] + b"\x01",)), scan_id),
+        (scope_id, now_ns(), root_id, *keys, scan_id),
     )
     return cursor.rowcount
+
+
+def _overlapping_scans(
+    connection: sqlite3.Connection, root_id: int, scope_key: bytes, scan_id: int, *, starting: bool = False,
+) -> sqlite3.Cursor:
+    condition = "s.id<? AND s.status='running'" if starting else "s.id>?"
+    return connection.execute(
+        f"""SELECT s.id, s.started_at_ns, s.heartbeat_at_ns, s.owner_json
+           FROM scan s JOIN scan_scope ss ON ss.scan_id=s.id
+           WHERE s.root_id=? AND {condition}
+             AND (ss.scope_path_key=? OR substr(ss.scope_path_key, 1, length(?))=?
+                  OR substr(?, 1, length(ss.scope_path_key))=ss.scope_path_key)""",
+        (root_id, scan_id, scope_key, scope_key, scope_key, scope_key),
+    )
+
+
+def _purge_missing(
+    connection: sqlite3.Connection, root_id: int, scan_id: int, scope_key: bytes,
+) -> tuple[int, int]:
+    """Remove missing rows and tombstones together in the completed scope's transaction."""
+    bounds, keys = _key_range(scope_key, descendants_only=True, column="p.path_key")
+    condition = f"p.root_id=? AND {bounds} AND (p.state='deleted' OR p.last_seen_scan_id<>?)"
+    parameters = (root_id, *keys, scan_id)
+    newly_missing, matched = connection.execute(
+        f"SELECT count(CASE WHEN p.state='present' THEN 1 END), count(*) FROM path p WHERE {condition}",
+        parameters,
+    ).fetchone()
+    if matched == 0:
+        return 0, 0
+    # Delete both states in one statement: a historical tombstone can still
+    # reference a directory that this scan just confirmed missing.
+    purged, _ = _delete_paths_and_plans(connection, condition, parameters)
+    return int(newly_missing), purged
 
 
 def _mark_missing_direct_children(
@@ -363,21 +398,23 @@ def _claim_running_scan(connection: sqlite3.Connection, scan_id: int, assignment
         raise ScanTakenOverError(f"scan {scan_id} was finalized by another process; stopping without saving")
 
 
-def _finalize_abandoned(connection: sqlite3.Connection, row: sqlite3.Row) -> None:
-    """Mark a running scan whose owner is gone as cancelled, keeping its checkpoints."""
+def _finalize_abandoned(connection: sqlite3.Connection, row: sqlite3.Row, *, reason: str = "resume") -> None:
+    """Cancel an abandoned scan in the caller's transaction, keeping its checkpoints."""
     finished = int(row["heartbeat_at_ns"] or row["started_at_ns"])
-    note = f"abandoned by {row['owner_json'] or 'unknown owner'}; finalized on resume by {json.dumps(scan_owner(), sort_keys=True)}"
-    with connection:
-        connection.execute(
-            "UPDATE scan_scope SET status='cancelled', finished_at_ns=? WHERE scan_id=? AND status='running'",
-            (finished, row["id"]),
-        )
-        connection.execute(
-            """UPDATE scan SET status='cancelled', finished_at_ns=?, note=?, stats_json=?,
-                      errors_seen=(SELECT coalesce(sum(error_count), 0) FROM scan_scope WHERE scan_id=?)
-               WHERE id=? AND status='running'""",
-            (finished, note, json.dumps({"paths_deleted": 0}), row["id"], row["id"]),
-        )
+    note = (
+        f"abandoned by {row['owner_json'] or 'unknown owner'}; "
+        f"finalized on {reason} by {json.dumps(scan_owner(), sort_keys=True)}"
+    )
+    connection.execute(
+        "UPDATE scan_scope SET status='cancelled', finished_at_ns=? WHERE scan_id=? AND status='running'",
+        (finished, row["id"]),
+    )
+    connection.execute(
+        """UPDATE scan SET status='cancelled', finished_at_ns=?, note=?, stats_json=?,
+                  errors_seen=(SELECT coalesce(sum(error_count), 0) FROM scan_scope WHERE scan_id=?)
+           WHERE id=? AND status='running'""",
+        (finished, note, json.dumps({"paths_deleted": 0}), row["id"], row["id"]),
+    )
 
 
 def resume_selection(
@@ -443,7 +480,8 @@ def _resume_selection_from_row(connection: sqlite3.Connection, row: sqlite3.Row,
                 f"(owner {row['owner_json'] or 'unknown'}, last checkpoint {age}s ago); cannot resume it"
             )
         # The owner crashed or was killed: keep its checkpoints and resume from them.
-        _finalize_abandoned(connection, row)
+        with connection:
+            _finalize_abandoned(connection, row)
     refresh_before = row["refresh_before_ns"]
     return ResumeSelection(
         scan_id=int(row["id"]),
@@ -498,11 +536,13 @@ def scan_directory(
     refresh_before_ns: int | None = None,
     on_progress: Callable[[ScanProgress], None] | None = None,
     shallow: bool = False,
+    purge_deleted: bool = False,
 ) -> dict[str, Any]:
     """Scan ``value``; ``shallow`` re-lists only its direct entries.
 
     A complete shallow scan confirms missing direct entries (with their indexed
     descendants) but neither enters nor refreshes subdirectories.
+    A complete purge scan physically removes missing rows and prior tombstones.
 
     The running scan is committed first and its observations are checkpointed
     every ``CHECKPOINT_INTERVAL_S``; only the final transaction confirms
@@ -511,6 +551,11 @@ def scan_directory(
     """
     if shallow and refresh_before_ns is not None:
         raise ValueError("a shallow scan cannot use refresh_before_ns")
+    if purge_deleted and (shallow or refresh_before_ns is not None):
+        raise ValueError("purge_deleted requires a full scan")
+    empty_deletion_counts = {"paths_deleted": 0}
+    if purge_deleted:
+        empty_deletion_counts["paths_purged"] = 0
     namespace = discover_namespace(value)
     root = get_root(connection, namespace)
     if root is None:
@@ -540,6 +585,14 @@ def scan_directory(
             "INSERT INTO scan_scope(scan_id, root_id, scope_path_key, status, started_at_ns) VALUES (?, ?, ?, 'running', ?)",
             (scan_id, root_id, scope_key, started),
         ))
+        if purge_deleted:
+            # Hold the write lock while excluding active overlapping scans.
+            # Finalizing an abandoned owner fences off all its future checkpoints.
+            for overlap in _overlapping_scans(connection, root_id, scope_key, scan_id, starting=True).fetchall():
+                heartbeat = int(overlap["heartbeat_at_ns"] or overlap["started_at_ns"])
+                if owner_is_alive(overlap["owner_json"], heartbeat):
+                    raise FlatlasError(f"cannot purge deleted paths: overlapping scan {overlap['id']} is still running")
+                _finalize_abandoned(connection, overlap, reason="purge")
         try:
             scope_path_id = _ensure_ancestors(connection, namespace, root_id, scan_id, scope, lazy=lazy)
             scope_first_seen = int(connection.execute(
@@ -548,7 +601,7 @@ def scan_directory(
         except OSError as exc:
             _record_error(connection, scope_id, scope_key, "stat", exc)
             connection.execute("UPDATE scan_scope SET status='failed', finished_at_ns=? WHERE id=?", (now_ns(), scope_id))
-            stats = timer.as_dict(0) | {"checkpoints": 0, "paths_deleted": 0}
+            stats = timer.as_dict(0) | {"checkpoints": 0} | empty_deletion_counts
             connection.execute(
                 "UPDATE scan SET status='failed', finished_at_ns=?, errors_seen=1, stats_json=? WHERE id=?",
                 (now_ns(), json.dumps(stats), scan_id),
@@ -561,7 +614,7 @@ def scan_directory(
                 "logical_bytes_seen": 0,
                 "refresh_before_ns": refresh_before_ns,
                 "errors_seen": 1,
-                "paths_deleted": 0,
+                **empty_deletion_counts,
                 "stats": stats,
             }
     files_seen = 0
@@ -731,7 +784,7 @@ def scan_directory(
         """Discard the uncommitted batch and end the scan with its checkpointed counts."""
         connection.rollback()
         files, dirs, logical_bytes = committed_counts
-        stats = timer.as_dict(files + dirs) | {"checkpoints": checkpoints, "paths_deleted": 0}
+        stats = timer.as_dict(files + dirs) | {"checkpoints": checkpoints} | empty_deletion_counts
         with connection:
             connection.execute(
                 "UPDATE scan_scope SET status=?, finished_at_ns=? WHERE id=? AND status='running'",
@@ -758,41 +811,61 @@ def scan_directory(
         raise
 
     scope_status = "cancelled" if cancelled else "partial" if failed else "completed"
-    paths_deleted = 0
+    deletion_counts = empty_deletion_counts.copy()
+    purge_conflict = None
     try:
         report("saving")
         # The first interrupt keeps everything observed so far, as before checkpoints.
         checkpoint()
         with connection:
+            if scope_status == "completed" and purge_deleted:
+                # Last-seen IDs may be overwritten while the write lock is
+                # released between checkpoints. Check under the final write lock.
+                connection.execute("BEGIN IMMEDIATE")
+                overlap = _overlapping_scans(connection, root_id, scope_key, scan_id).fetchone()
+                if overlap is not None:
+                    purge_conflict = (
+                        f"cannot purge deleted paths: scan {overlap['id']} overlapped this scope; rerun the full scan"
+                    )
+                    scope_status = "failed"
+                    connection.execute("UPDATE scan SET note=? WHERE id=?", (purge_conflict, scan_id))
             connection.execute(
                 "UPDATE scan_scope SET status=?, finished_at_ns=?, paths_seen=? WHERE id=?",
                 (scope_status, now_ns(), files_seen + dirs_seen, scope_id),
             )
             if scope_status == "completed":
-                with timer.phase("mark_missing"):
-                    if shallow:
-                        paths_deleted = _mark_missing_direct_children(connection, root_id, scan_id, scope_id, scope_path_id)
+                with timer.phase("purge_missing" if purge_deleted else "mark_missing"):
+                    if purge_deleted:
+                        if scope_first_seen != scan_id:
+                            newly_missing, purged = _purge_missing(connection, root_id, scan_id, scope_key)
+                            deletion_counts.update(paths_deleted=newly_missing, paths_purged=purged)
+                    elif shallow:
+                        deletion_counts["paths_deleted"] = _mark_missing_direct_children(
+                            connection, root_id, scan_id, scope_id, scope_path_id,
+                        )
                     elif refresh_before_ns is None:
                         if scope_first_seen != scan_id:
                             # A scope first recorded by this scan had no indexed
                             # descendants (a child row needs its parent row), so
                             # nothing can be missing; skip the whole-subtree pass.
-                            paths_deleted = _mark_missing(connection, root_id, scan_id, scope_id, scope_key)
+                            deletion_counts["paths_deleted"] = _mark_missing(connection, root_id, scan_id, scope_id, scope_key)
                     else:
                         for directory_id in completed_directories:
-                            paths_deleted += _mark_missing_direct_children(connection, root_id, scan_id, scope_id, directory_id)
+                            deletion_counts["paths_deleted"] += _mark_missing_direct_children(
+                                connection, root_id, scan_id, scope_id, directory_id,
+                            )
             with timer.phase("summaries"):
                 refresh_directory_summaries(
                     connection,
                     root_id,
                     scope_path_id,
-                    completed_directories=completed_directories,
+                    completed_directories=completed_directories if purge_conflict is None else None,
                     max_depth=1 if shallow else None,
                 )
             errors = int(
                 connection.execute("SELECT error_count FROM scan_scope WHERE id=?", (scope_id,)).fetchone()["error_count"]
             )
-            stats = timer.as_dict(files_seen + dirs_seen) | {"checkpoints": checkpoints, "paths_deleted": paths_deleted}
+            stats = timer.as_dict(files_seen + dirs_seen) | {"checkpoints": checkpoints} | deletion_counts
             _claim_running_scan(
                 connection, scan_id,
                 "status=?, finished_at_ns=?, files_seen=?, dirs_seen=?, logical_bytes_seen=?, errors_seen=?, "
@@ -812,6 +885,8 @@ def scan_directory(
             abandon("failed")
         raise
     report(scope_status)
+    if purge_conflict is not None:
+        raise FlatlasError(purge_conflict)
     if cancelled:
         raise KeyboardInterrupt
     return {
@@ -822,6 +897,6 @@ def scan_directory(
         "logical_bytes_seen": logical_bytes_seen,
         "refresh_before_ns": refresh_before_ns,
         "errors_seen": errors,
-        "paths_deleted": paths_deleted,
+        **deletion_counts,
         "stats": stats,
     }

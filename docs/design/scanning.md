@@ -26,8 +26,9 @@
 每次扫描把各阶段耗时写入 `scan.stats_json`（migration 5），`scan` 输出与 `scan-info ID` 的 `stats` 字段展示：
 
 - `wall_s`、`entries_per_s`：本次扫描的总耗时与条目速率。速率的分子为本次观测的文件数加目录数，总耗时包含删除确认。
-- `paths_deleted`：最终事务提交的 `present` → `deleted` 路径数，包含缺失目录的已索引后代，每条路径只计一次。该字段也显示在 `scan` 的顶层输出中；确认零条时为 `0`，旧扫描缺少该字段时为未知。
-- `phases`：`readdir`（枚举目录）、`observe`（每个条目的 stat，含 lazy 回退）、`db_write`（path upsert）、`refresh_query`（`--refresh-before`/续扫的逐目录查询）、`progress`（进度回调）、`checkpoint`（批次的目录汇总与计数更新）、`commit`（checkpoint 提交）、`mark_missing`、`summaries`，各含秒数与调用次数；`unaccounted_s` 为未归入任何阶段的时间。阶段在单个操作外计时，递归不会重复计入。
+- `paths_deleted`：最终事务提交的本次缺失路径数，包含缺失目录的已索引后代，每条路径只计一次。普通扫描将这些行标记为 `deleted`，`--purge-deleted` 则直接移除这些行。该字段也显示在 `scan` 的顶层输出中；确认零条时为 `0`，旧扫描缺少该字段时为未知。
+- `paths_purged`：`--purge-deleted` 实际从索引移除的路径数，包括本次缺失路径和旧 tombstone。该字段也显示在该模式的 `scan` 顶层输出中，无移除时为 `0`。
+- `phases`：`readdir`（枚举目录）、`observe`（每个条目的 stat，含 lazy 回退）、`db_write`（path upsert）、`refresh_query`（`--refresh-before`/续扫的逐目录查询）、`progress`（进度回调）、`checkpoint`（批次的目录汇总与计数更新）、`commit`（checkpoint 提交）、`mark_missing` 或 `purge_missing`（按模式确认删除）、`summaries`，各含秒数与调用次数；`unaccounted_s` 为未归入任何阶段的时间。阶段在单个操作外计时，递归不会重复计入。
 - `exact_stat_fallbacks`、`exact_stat_fallback_s`：lazy root 上因 `blocks×512 < size` 回退到精确 `lstat` 的次数与耗时（包含在 `observe` 内）。
 - `checkpoints`：本次提交的 checkpoint 数（含收尾前的最后一个）。
 - 进入收尾、初始化失败或收尾回滚时写入统计。partial、failed、cancelled 的删除计数为 `0`。被杀后接管的扫描只记录删除计数 `0`；尚未收尾的扫描可能没有统计，migration 5 之前的扫描为 `null`。
@@ -142,9 +143,17 @@ CLI 在 POSIX 上把 `SIGTERM`（批处理调度器终止作业前发送）和 `
 
 ## 删除确认规则
 
-- 只有 completed `scan_scope` 才能确认缺失路径为 `deleted`；partial、failed、cancelled、枚举错误、stat 错误或 allocated size 采集失败均不确认删除。
+- 只有 completed `scan_scope` 才能确认缺失路径并标记为 `deleted` 或直接移除索引行；partial、failed、cancelled、枚举错误、stat 错误或 allocated size 采集失败均不确认删除。
 - 普通扫描 completed 时，scope 后代中 `last_seen_scan_id` 不是本次 scan 的 present 路径标记为 deleted；`--refresh-before` 扫描只对完整枚举的目录、`--shallow` 只对 PATH 确认其直接缺失条目及其已索引后代。
 - deleted 行保留在 SQLite，不参与 `find`、`du`、`largest` 或 `dupes` 的当前状态结果；同一路径重新出现并被扫描时恢复为 present，旧 hash 在 metadata basis 不匹配时变为 stale。
 - `ls` 现场发现缺失只显示 `gone`，不写数据库。
+
+### 完整扫描并清理删除记录
+
+`flatlas scan PATH --purge-deleted`（`-p`）完整遍历 PATH，覆盖配置里的 `scan.refresh-before`，与 `--refresh-before`、`--shallow`、`--resume` 和 `--resume-from` 互斥。中断后可重新运行该选项完成一次完整扫描。
+
+checkpoint 照常提交观测。scope 完整完成后，在最终事务按 `path_key` 区间直接移除本次缺失的路径及历史 tombstone。关联的 hash、缓存汇总及引用被移除路径的 dry-run plan 随之清理。重新观测到的路径、仍有效的 hash、其余 plan 和扫描审计保留。目录汇总与状态、计数在同一事务提交。
+
+开始时发现同一 namespace 的重叠扫描仍在运行会报错；判定为已遗弃的重叠扫描先按 owner 规则记为 `cancelled`，再启动本次扫描。如果新重叠扫描在遍历期间启动，收尾仍刷新已提交观测对应的目录与祖先汇总，将本次记为 `failed` 并保留原行。
 
 相关提案：[按目录 mtime 的增量刷新](../plan/proposals/incremental-refresh.md)。
