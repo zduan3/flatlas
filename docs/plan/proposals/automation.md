@@ -1,59 +1,29 @@
-# 自动化存储评估：机器输出约定与查询入口
+# 自动化存储评估：0.2.1 后续入口
 
-> 状态：提案。0.2.0 部分已实现并验收（见 [0.2.0 发布记录](../../history/0.2.0-release.md)），0.2.1 部分未实现。版本划分见 [路线图](../roadmap.md)，当前行为见 [查询命令](../../design/queries.md)。不保留 0.1 的 JSON 形状与 `core.py`，不考虑向后兼容。
+> 状态：提案（0.2.1 未实现）。0.2.0 的机器输出约定、`find --format`、`FLATLAS_DB` 与 `--no-config` 已发布，见 [查询命令](../../design/queries.md#机器输出)、[配置](../../design/config.md) 和 [0.2.0 发布记录](../../history/0.2.0-release.md)。0.2.1 不变更 schema（沿用 v7）。
 
-## 动机
-
-0.1 的命令面向人工逐条查询：表格贴近 GNU，JSON 是表格的副产品。在 Lustre 上对百万级条目做存储评估与清理时，流程是脚本化的：
-
-1. 扫描（后台、可续扫）；
-2. 生成概览：每个顶层目录和项目的字节与条目数、按目录名初筛的可重建候选及 hardlink 去重后可腾出的空间；
-3. 逐项目下钻，产出删除清单（引用核对在 flatlas 之外）；
-4. 在文件系统上删除后同步索引，重新生成概览，记录前后数值；
-5. 重复内容导出给 fclones 复核。
-
-0.1 的接口在这些步骤上出现的问题：
-
-- **同名字段含义不同**：`path` 在 `du` 中相对当前目录，在 `largest` 中相对 PATH，`ls` 只有 `name`，`paths` 叫 `path_display` 且目录大小为空；状态在 JSON 中是 `scanned`，在表格中是 `ok`。脚本必须固定工作目录才能解析结果。
-- **静默截断**：`paths` 默认 500 行、`largest` 10 行、`scans` 50 行，机器输出不说明截断。
-- **一项统计要多条命令**：找候选与算大小要 `find` 加 `du --files0-from` 两次读取；概览表对每个目录各起两个进程、每次重开 4.6 GB 索引（8.6 min）；另一种做法是直接 import 内部函数，而它们没有任何约定。
-- **整数组 JSON**：百万行结果必须整体缓冲。
-- **环境不可控**：索引位置只能写在 `~/.config`，agent 沙箱内只读；用户配置的 `scan.refresh-before` 会悄悄改变脚本中 scan 的行为。
-
-## 0.2.0：新约定
-
-机器输出约定（格式、条目记录、上限与退出码）与 `find --format` 及元数据测试已实现，见 [查询命令](../../design/queries.md#机器输出)；`FLATLAS_DB` 与 `--no-config` 见 [配置](../../design/config.md)。
-
-用新接口在数百万条目的真实索引上重建按目录的字节、条目数与可重建候选汇总表：两条 `find --format jsonl`（全部行、全部候选）加本地分组，只有按 inode 去重的「合删腾出」每行一次 `du --files0-from -c --freed`；结果与旧接口逐字节一致，与当前目录无关。
-
-## 0.2.1：后续
-
-### 只读 Python API
-
-- `flatlas.api` 提供可用 `with` 管理的索引对象，一次打开数据库后可执行多次查询。默认以 SQLite 只读模式打开已有索引。索引不存在或需要升级时抛出 `FlatlasError`，迁移由独立的可写入口触发。
-- 首批稳定入口为 `find`、`du`、`largest`、`roots`、`scans`、`scan_info`。多记录查询返回可迭代的记录，`find` 保持流式。单对象查询返回与 CLI 对应的对象。字段、单位、状态与未知值沿用 CLI 的机器输出约定。绝对 `path` 是显示字段，路径身份仍由索引中的 BLOB key 表示。
-- 默认每次查询使用一个一致的读快照。多次查询需要观察同一个索引状态时，调用方可显式使用跨查询的读快照。流式结果在对应读快照和索引对象的作用域内消费。
-- 对应 CLI 查询复用 API 的查询逻辑和记录，负责参数解析、渲染和退出码，并保留已有的索引打开兼容行为。首批 API 面向离线索引查询。实时读取的 `ls`、`df`，以及会写入索引的 `scan`、常规 `dupes` 和 `rm`，留在各自的 CLI 入口。
-
-### 批量浅扫描
-
-`scan --shallow --files0-from PARENTS` 在一次 CLI 调用中处理多个父目录，支持多个已登记的 namespace。每个父目录复用单目录浅扫描，独立记录 `scan_id` 和 `scope_id`。按索引中的目录身份去重；同时指定父子目录时，两者分别扫描自己的直接条目。
-
-批次报告逐目录的 scan 和 scope 标识、状态、错误与确认删除数。无法开始的输入报告对应错误，取消后区分已完成和未处理项。每个 scope 独立提交，只有 completed scope 才确认缺失直接条目及其已索引的后代，保留 `deleted_by_scope_id` 审计。失败、部分完成或取消的 scope 不确认删除，其他已提交的结果仍有效。
+## 0.2.1 计划
 
 ### 删除计数与 `rm` 帮助
 
-- `scan` 输出和 `scan.stats_json` 增加 `paths_deleted`，统计最终事务实际从 `present` 转为 `deleted` 并提交的路径数，包含缺失目录的后代，排除已有 tombstone。批次总数汇总已提交的逐目录结果。旧扫描缺少字段时表示未知，新扫描已确认零条时报告 `0`。
-- `entries_per_s` 继续按本次观测到的条目计算，并说明用时包含删除确认。一次清理后重扫观测到约 23 万条目、确认删除约 368 万条目，耗时主要花在 `mark_missing`。两项计数帮助报告脚本解释这类扫描的吞吐。见 [扫描元数据成本](../../design/scanning.md#元数据成本)。
-- `rm --help` 明确单个 PATH 也会立即移除对应的索引子树，并提示先用 `du PATH` 查看规模。`rm --files0-from` 继续用于显式移除不再关心或登记错误的索引子树，批量浅扫描则根据文件系统观测记录 tombstone。
+- `scan` 输出和 `scan.stats_json` 增加 `paths_deleted`，统计最终事务实际从 `present` 转为 `deleted` 并提交的路径数（包含缺失目录的后代，排除已有 tombstone）。旧扫描缺少该字段时表示未知，新扫描确认零条时报告 `0`。
+- `entries_per_s` 继续按本次观测到的条目计算，说明总耗时包含删除确认。
+- `rm --help` 明确单个 PATH 同样立即移除索引子树，并提示先用 `du PATH` 查看规模。
 
-### Schema v7 无迁移验收
+### 只读 Python API
 
-- 0.2.1 沿用 schema v7，使用已有的 `scan`、`scan_scope` 和 `scan.stats_json` 表达批次内各目录的扫描和计数。验收从 0.2.0 创建的 v7 索引开始，确认只读查询和可写扫描均可直接使用，schema 定义和 migration 记录保持原样，既有路径、扫描、coverage、错误、hash 与 plan 数据可继续读取。
-- 验证只读 API 在索引目录不可写时仍可查询，并在相同输入和索引状态下与 CLI 的机器记录一致。覆盖连接复用、`find` 流式消费、读快照及旧扫描缺少 `paths_deleted` 的情况。
-- 验证重复父目录、同时指定父子目录和跨 namespace 的批次。注入枚举错误和取消，核对每个 scope 的状态、已提交的删除计数、`deleted_by_scope_id`，以及失败、部分完成或取消 scope 下原有路径的状态。确认这些 scope 不会把未观测路径标记为 `deleted`。在 Windows 原生与 WSL 上运行发布回归。
+- `flatlas.api` 作为 `queries.py` 之上的薄只读门面，提供 `with open_index(db) as idx:` 一次打开索引、多次查询，取代报告脚本反复启动子进程或直接引用内部模块。
+- 默认以 SQLite 只读模式打开已有索引（复用现有 `open_database_readonly`）；索引不存在或 schema 落后需要迁移时抛出 `FlatlasError`。
+- 首批覆盖 `find`、`du`、`largest`、`roots`、`scans`、`scan_info`。字段、单位与状态沿用 CLI 的机器输出约定，`find` 保持流式迭代；实时读取的 `ls`、`df` 与写入命令留在各自 CLI 入口。
+- 与 CLI 共用底层查询函数和记录转换，不需要额外的跨查询读快照抽象或反向重构既有 CLI 的打开兼容逻辑。
+
+### 批量浅扫描
+
+- `scan --shallow --files0-from PARENTS` 在一次调用中复用连接，顺序对清单中的每个父目录执行单目录浅扫描。
+- 保持既有删除安全不变量：每个父目录各自记录 `scan_id` / `scope_id` 并独立提交；只有 `completed` scope 才确认直接缺失条目及其已索引后代为 `deleted`；`partial`、`failed` 或 `cancelled` 不确认删除，且不影响其他已提交目录。
+- 已知删除清单且不需要保留 tombstone 时，仍优先使用 `rm --files0-from`。
 
 ## 不在本提案内
 
-- 交互参数（GNU `ls`/`du`/`df` 选项）仍按 [查询命令 GNU 兼容规划](query-cli.md)，排在本提案之后。
+- 交互参数（GNU `ls`/`du`/`df` 选项）按 [查询命令 GNU 兼容规划](query-cli.md) 后置。
 - 扫描前后两次结果的差异报告、`find -printf`、非 UTF-8 路径在机器输出中的无损表示：见 [待决策清单](../decisions.md)。
