@@ -198,12 +198,12 @@ def indexed_key(connection: sqlite3.Connection, value: Path) -> tuple[int, bytes
 
     Computed from the root table without touching the filesystem, so lookups
     use the ``(root_id, path_key)`` unique index; ``path_display`` has no index
-    and filtering on it scans every path row. ``None`` when no root contains
-    ``value`` or its root display text is not a plain path (callers fall back).
+    and filtering on it scans every path row. Returns ``None`` if no registered
+    root contains ``value``.
     """
     best: tuple[int, int] | None = None
-    for root in connection.execute("SELECT id, root_path_display FROM root"):
-        root_parts = Path(str(root["root_path_display"])).parts
+    for root in connection.execute("SELECT id, root_path_raw FROM root"):
+        root_parts = Path(os.fsdecode(root["root_path_raw"])).parts
         if value.parts[: len(root_parts)] == root_parts and (best is None or len(root_parts) > best[1]):
             best = (int(root["id"]), len(root_parts))
     if best is None:
@@ -276,6 +276,47 @@ def remove_indexed_subtrees(
                 raise
             on_error(value, exc)
     return _remove_rows(connection, rows)
+
+
+def remove_deleted_descendants(connection: sqlite3.Connection, value: Path) -> dict[str, Any]:
+    """Purge tombstones beneath a present indexed directory in one transaction."""
+    absolute = _lexical_absolute_path(value)
+    display = display_path(absolute)
+    try:
+        with connection:
+            # Reserve the write lock before checking the scope and its plan references.
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
+            key = indexed_key(connection, absolute)
+            selected = None if key is None else connection.execute(
+                """SELECT 1 FROM path WHERE root_id=? AND path_key=? AND state='present'
+                   AND entry_kind IN ('root', 'directory')""",
+                key,
+            ).fetchone()
+            if key is None or selected is None:
+                raise PathError(f"path is not a present indexed directory: {display}")
+            root_id, scope_key = key
+            condition, keys = _key_range(scope_key)
+            parameters = (root_id, *keys)
+            plans_removed = connection.execute(
+                f"""DELETE FROM plan WHERE id IN (
+                    SELECT po.plan_id FROM plan_operation po
+                    JOIN path p ON p.id IN (po.canonical_path_id, po.replacement_path_id)
+                    WHERE p.root_id=? AND p.state='deleted' AND {condition.replace("path_key", "p.path_key")}
+                )""",
+                parameters,
+            ).rowcount
+            paths_removed = connection.execute(
+                f"DELETE FROM path WHERE root_id=? AND state='deleted' AND {condition}",
+                parameters,
+            ).rowcount
+    except sqlite3.IntegrityError as exc:
+        if exc.sqlite_errorcode == sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY:
+            raise FlatlasError(f"cannot purge tombstones under {display}: retained paths reference them") from exc
+        raise
+    except sqlite3.OperationalError as exc:
+        raise FlatlasError(f"cannot purge tombstones under {display}: {exc}") from exc
+    return {"path": display, "paths_removed": paths_removed, "plans_removed": plans_removed}
 
 
 def _removal_row(connection: sqlite3.Connection, value: Path) -> sqlite3.Row:

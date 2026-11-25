@@ -264,7 +264,7 @@ CREATE INDEX idx_directory_summary_freshness
 5. **仅当某个 `scan_scope.status='completed'` 时**，利用 `parent_path_id` 的递归 CTE 找到该 scope 后代，将其中 `last_seen_scan_id <> 当前 scan` 的 `present` 路径更新为 `deleted`，再填充 `deleted_by_scope_id` 与 `deleted_at_ns`。
 6. scope 只要是 `partial`、`failed` 或 `cancelled`，绝不依据本次扫描修改任何旧路径为 `deleted`。最后才汇总 `scan.status`。
 
-这满足关键安全要求：中断扫描、权限错误和扫描中改名均不得被解释为“文件已删除”。`deleted` 行不自动物理清理；只有显式 `flatlas rm PATH` 会从索引中物理删除路径行及其 hash。
+这满足关键安全要求：中断扫描、权限错误和扫描中改名均不得被解释为“文件已删除”。最终事务同时在 `scan.stats_json.paths_deleted` 记录本次确认删除的行数。`deleted` 行可通过 [`flatlas rm --deleted PATH`](queries.md#rm---deleted-path) 连同其 hash 显式移除，已知索引子树也可用 `rm PATH` 或 `rm --files0-from` 整体移除。
 
 删除状态的用户可见流程如下：
 

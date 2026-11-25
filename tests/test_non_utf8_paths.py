@@ -7,6 +7,7 @@ UnicodeEncodeError mid-transaction and rolled back the entire scan.
 
 import os
 import sys
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from flatlas.paths import (
     display_path,
     path_key,
     register_namespace,
+    remove_deleted_descendants,
 )
 from flatlas.scanning import scan_directory
 
@@ -67,6 +69,28 @@ def test_scan_indexes_non_utf8_names_and_completes(tmp_path: Path) -> None:
         ).fetchone()["state"] == "deleted"
     finally:
         connection.close()
+
+
+@pytest.mark.safety
+def test_purge_uses_raw_namespace_identity_when_display_paths_collide(tmp_path: Path, monkeypatch) -> None:
+    raw = _make(tmp_path, b"root\xff", directory=True)
+    literal = _make(tmp_path, b"root\\xff", directory=True)
+    assert display_path(raw) == display_path(literal)
+    original_ismount = os.path.ismount
+    monkeypatch.setattr(os.path, "ismount", lambda path: path in (raw, literal) or original_ismount(path))
+    with closing(open_database(tmp_path / "index.sqlite")) as connection:
+        raw_id = register_namespace(connection, discover_namespace(raw))
+        register_namespace(connection, discover_namespace(literal))
+        for root in (raw, literal):
+            file = _make(root, b"file")
+            scan_directory(connection, root)
+            file.unlink()
+            scan_directory(connection, root)
+
+        assert remove_deleted_descendants(connection, literal)["paths_removed"] == 1
+        tombstones = connection.execute("SELECT root_id FROM path WHERE state='deleted'").fetchall()
+        assert [row["root_id"] for row in tombstones] == [raw_id]
+        assert remove_deleted_descendants(connection, raw)["paths_removed"] == 1
 
 
 @pytest.mark.skipif(sys.platform == "linux" and os.geteuid() == 0, reason="root can enumerate a mode-000 directory")

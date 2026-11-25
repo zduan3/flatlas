@@ -19,17 +19,18 @@
 - 按父目录查子项（递归遍历子树、目录汇总刷新、删除确认）走 `idx_path_parent`（migration 5）。此前这些查询只能用以 `root_id` 开头的索引，SQLite 每次都为全表临时建自动索引；在 122 万行的索引上，TensorRT-LLM（5.6k 目录）重扫的汇总刷新从 8.1 s 降到 0.7 s。
 - 递归 CTE 一律写成 `FROM <cte> x CROSS JOIN path p ON ...`，外层也从 CTE 按主键回查 `path`。索引里没有 `sqlite_stat1`，计划只取决于 SQL 与索引：带 `p.root_id=?` 条件时 SQLite 会把 `path` 放在外层、按 `root_id` 扫整个 root，递归每取一行就扫一遍，浅扫描确认 41.5 万条删除因此跑不完；改后 3.7 s。`tests/test_query_plans.py` 对全部递归查询检查计划。
 - 完整扫描的删除确认按 `path_key` 区间更新：子条目 key 是父 key 加一个分量，scope 的后代正好是唯一索引上的一段区间，比沿 `parent_path_id` 的递归 CTE 快约一倍（380 万行 6.6 s → 3.5 s）。scope 行由本次扫描首次记录时（`first_seen_scan_id` 为本次）不可能有已索引的后代，整段跳过；首次全量扫描 480 万条目时这一步原本要 94 s。
-- 删除确认的成本与被改写的行数成正比：每条缺失路径都要更新行本身和含 `state` 的两个索引。2026-11 在 Lustre 上（索引 4.8 GB，也放在 Lustre）重扫一棵 391 万行、其中 368 万条已在外部删除的子树，总计 688 s，`mark_missing` 占 523 s，`readdir` + `observe` 只有 92 s。tombstone 不会自动清除，以后对该子树的完整扫描仍要在区间里走过这些行；已知删除清单时用 `rm --files0-from` 同步，见 [查询命令](queries.md#rm-path--rm---files0-from-file)。
+- 删除确认的成本与被改写的行数成正比：每条缺失路径都要更新行本身和含 `state` 的两个索引。2026-11 在 Lustre 上（索引 4.8 GB，也放在 Lustre）重扫一棵 391 万行、其中 368 万条已在外部删除的子树，总计 688 s，`mark_missing` 占 523 s，`readdir` + `observe` 只有 92 s。tombstone 不会自动清除，以后对该子树的完整扫描仍要在区间里走过这些行；已知删除清单时用 `rm --files0-from` 同步，已有 tombstone 时可用 [`rm --deleted PATH`](queries.md#rm---deleted-path) 清理。
 
 ### 分阶段计时
 
 每次扫描把各阶段耗时写入 `scan.stats_json`（migration 5），`scan` 输出与 `scan-info ID` 的 `stats` 字段展示：
 
-- `wall_s`、`entries_per_s`：本次扫描的总耗时与条目速率（文件 + 目录）。
+- `wall_s`、`entries_per_s`：本次扫描的总耗时与条目速率。速率的分子为本次观测的文件数加目录数，总耗时包含删除确认。
+- `paths_deleted`：最终事务提交的 `present` → `deleted` 路径数，包含缺失目录的已索引后代，每条路径只计一次。该字段也显示在 `scan` 的顶层输出中；确认零条时为 `0`，旧扫描缺少该字段时为未知。
 - `phases`：`readdir`（枚举目录）、`observe`（每个条目的 stat，含 lazy 回退）、`db_write`（path upsert）、`refresh_query`（`--refresh-before`/续扫的逐目录查询）、`progress`（进度回调）、`checkpoint`（批次的目录汇总与计数更新）、`commit`（checkpoint 提交）、`mark_missing`、`summaries`，各含秒数与调用次数；`unaccounted_s` 为未归入任何阶段的时间。阶段在单个操作外计时，递归不会重复计入。
 - `exact_stat_fallbacks`、`exact_stat_fallback_s`：lazy root 上因 `blocks×512 < size` 回退到精确 `lstat` 的次数与耗时（包含在 `observe` 内）。
 - `checkpoints`：本次提交的 checkpoint 数（含收尾前的最后一个）。
-- 扫描走到收尾（completed、partial、cancelled，含收尾被中断的 cancelled）时写入；early-fail 与被杀后接管的扫描没有记录，migration 5 之前的扫描为 `null`。
+- 进入收尾、初始化失败或收尾回滚时写入统计。partial、failed、cancelled 的删除计数为 `0`。被杀后接管的扫描只记录删除计数 `0`；尚未收尾的扫描可能没有统计，migration 5 之前的扫描为 `null`。
 
 ### Lustre 上的 lazy 元数据
 

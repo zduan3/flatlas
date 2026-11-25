@@ -52,6 +52,7 @@ from flatlas.paths import (
     display_path,
     get_root,
     register_namespace,
+    remove_deleted_descendants,
     remove_indexed_subtree,
     remove_indexed_subtrees,
     scope_path,
@@ -965,16 +966,30 @@ def rm(
             help="Read NUL-separated PATHs from FILE ('-' for stdin), e.g. the list just deleted on disk.",
         ),
     ] = None,
+    deleted: Annotated[
+        bool,
+        typer.Option("--deleted", help="Purge only confirmed deleted descendants of one present indexed directory."),
+    ] = False,
     format: object_format_option = "table",
     db: db_option = None,
 ) -> None:
     """Remove indexed path subtrees; never checks or changes filesystem entries.
 
-    One PATH prints that path's counts; several PATHs or --files0-from remove
-    them in one transaction and print the totals. A PATH that is not indexed is
-    reported and skipped, and the exit status is then 1.
+    A plain 'rm PATH' immediately removes its entire indexed subtree. Run
+    'flatlas du PATH' first to check its indexed size.
+
+    Several PATHs or --files0-from remove their subtrees in one transaction and
+    print the totals. A PATH that is not indexed is reported and skipped, and
+    the exit status is then 1.
     """
     check_format(format, OBJECT_FORMATS)
+    if deleted:
+        if files0_from is not None or paths is None or len(paths) != 1:
+            raise FlatlasError("--deleted requires exactly one PATH and cannot be combined with --files0-from")
+        with _connection(db) as connection:
+            result = remove_deleted_descendants(connection, paths[0])
+        _print_object(result, format)
+        return
     if files0_from is not None:
         if paths:
             raise FlatlasError("--files0-from cannot be combined with PATH arguments")

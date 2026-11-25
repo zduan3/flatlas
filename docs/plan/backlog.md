@@ -11,13 +11,7 @@
 
 ## 0.2.1
 
-0.2.0 已于 `v0.2.0` 发布（验收见 [验证记录](../history/verification-log.md#020-发布验收2026-11-25)）。本批条目**实现明确、不改 schema（沿用 v7）**，适合在下次实际清理前直接落地：
-
-- **扫描报告确认删除的条数**：`scan` 输出与 `scan.stats_json` 增加 `paths_deleted`，说明 `entries_per_s` 按观测条目计算。→ [proposals/automation.md](proposals/automation.md#删除计数与-rm-帮助)
-- **`rm` 帮助文字**：明确单个 PATH 同样立即移除索引子树，并提示先用 `du PATH` 查看规模。
-- **清理 tombstone 与压缩索引**：显式移除现存目录下 `state='deleted'` 的后代（如 `rm --deleted PATH`）、保留 present 行（不重算目录汇总），并补充按需 `VACUUM` 入口或说明。自动保留策略后置，见 [待决策清单](decisions.md#待实操回答的问题)。
-- **只读 Python API（`flatlas.api`）**：`with open_index(db)` 复用只读连接执行 `find`/`du`/`largest`/`roots`/`scans`/`scan_info`，返回与 `jsonl` 一致的记录；也便于先用脚本原型验证后续分析需求。→ [proposals/automation.md](proposals/automation.md#只读-python-api)
-- **`scan --shallow --files0-from`（按需可选）**：单次调用复用连接顺序浅扫多个父目录，每个父目录仍按独立 completed scope 确认删除；若日常清理以清单 + `rm --files0-from` 为主可后置。→ [proposals/automation.md](proposals/automation.md#批量浅扫描)
+- **`scan --shallow --files0-from`（按需可选）**：一次调用复用连接，按 NUL 分隔的清单顺序浅扫多个父目录。每个目录各有独立的 scan 与 scope 并独立提交，只有 completed scope 才确认缺失的直接条目及其后代。若日常清理以清单 + `rm --files0-from` 为主可后置。
 
 ## 0.2.2
 

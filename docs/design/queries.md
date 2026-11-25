@@ -173,12 +173,25 @@ mgs@tcp:/fs1             lustre  325T  284T    42T   88%  /lustre/fs1
 
 只从 SQLite 递归移除该路径及其已索引后代，等价于对索引执行 `rm -r PATH`；它不访问、不验证也不改动实际文件。PATH 按词法转为绝对路径（不解析 symlink、不检查文件系统），必须与某个索引路径完全一致，否则报错。
 
+- 单个 PATH 同样立即移除整个索引子树。可先用 `flatlas du PATH` 查看当前索引规模。
 - 路径行被物理删除，其 `file_hash` 与 `directory_summary` 随外键级联删除；这与扫描写入的 `deleted` tombstone 不同。区间内不区分 `state`，已是 tombstone 的子树同样被物理删除，可用来清理扫描留下的 tombstone。
 - 若子树被 dry-run plan 引用，整个 plan 一并移除，避免保留失效计划。
 - 删除后只重算仍存在的父目录及其祖先的汇总（由各子目录已缓存的汇总得出），不重算父目录下的其它子树。
 - 子树按 `path_key` 区间删除：后代 key 以该路径 key 为前缀，即唯一索引上的一段区间。条件必须保持单一区间（`path_key>=? AND path_key<?`）；写成 `path_key=? OR (...)` 时 SQLite 放弃区间、每条语句扫整个 root。
 - 多个 PATH 或 `--files0-from`（格式同 `du`）时在一个事务内删除，嵌套的路径随外层一起删除，未索引的 PATH 写 stderr 并跳过、最后退出码 1；汇总只在最后对所有受影响的父目录与祖先重算一次。用于文件系统上批量删除后同步索引，例如 `flatlas find ... -prune -print0 > list`，按 list 删除文件后 `flatlas rm --files0-from list`。2026-11 实测 2.97 万个目录、122 万行 36 s；此前逐个 `rm` 每次都重算父目录整棵子树，在 79 万条目的目录下删一个子目录就要重算整个该目录。同月在 Lustre 上的 4.8 GB 索引中，225 个子树共 350 万行（均已是 tombstone）用时 5.4 min。
 - 输出（`--format table|json`）：单个 PATH 为 `path`、`paths_removed`、`plans_removed`；批量为 `scopes`（实际删除的最外层路径数）、`paths_removed`、`plans_removed`。
+
+## `rm --deleted PATH`
+
+从一个在索引中仍为 `present` 的目录或 namespace 根下，物理移除所有 `state='deleted'` 的后代。命令按索引中的绝对路径定位 PATH，源目录离线时也可执行。该模式只接受一个 PATH。输出与单个 `rm PATH` 相同，没有可清理记录时两个计数均为 0。
+
+路径行、关联的 hash 和被引用路径牵涉的整个 dry-run plan 在同一个事务内移除。现存路径、现存目录的汇总、扫描与错误审计保留；若现存行仍引用一个待清理的 tombstone，事务回滚并报告错误。
+
+清理释放出的 SQLite 页会被后续写入复用。需要缩小数据库文件时，关闭使用该索引的 flatlas 命令和 Python 会话，确认有足够临时磁盘空间，再用 Python 3.12 自带的 SQLite CLI 对实际的索引文件执行：
+
+```text
+python -m sqlite3 "/path/to/index.sqlite" "VACUUM;"
+```
 
 ## `scans [PATH]` 与 `scan-info ID`
 
@@ -187,6 +200,30 @@ mgs@tcp:/fs1             lustre  325T  284T    42T   88%  /lustre/fs1
 - `scans [PATH]` 每个 scope 一行，按 scan ID 降序；表格默认最多 50 行，机器格式默认不限（`-n/--limit`）。表格列为 `ID`、`STATUS`、`STARTED`、`FINISHED`（本地时区 ISO 8601）、`FILES`、`DIRS`、`ERRORS`、`SCOPE`；scope 路径不在索引中时显示 `key:<hex>`。机器输出为 `type: scan` 的记录，另含 `kind`、`duration_ns`、`refresh_before_ns`、`scanner_version`、`note`、scope 状态与计数等字段。
 - PATH 过滤同时包含覆盖该路径的祖先 scope 和位于该路径下的子树 scope；PATH 可以尚未索引，但必须位于已登记的 namespace。
 - `scan-info ID` 展示（表格为 `key: value` 行，`--format json` 为一个 JSON 对象）单次 scan 的字段、分阶段计时 `stats`（见 [分阶段计时](scanning.md#分阶段计时)）、全部 scope（含状态、时间、计数）以及 `scan_error` 明细（路径、operation、错误码与消息）。
+
+## 只读 Python API
+
+`flatlas.api.open_index(db=None)` 以 SQLite 只读模式打开现有索引。显式 `db` 接受路径对象或字符串；省略时按 [索引位置](config.md#索引位置) 查找。数据库不存在或需要迁移时抛出 `flatlas.errors.FlatlasError`。同一个 `with` 块内复用连接与 SQLite 读事务，退出时关闭连接。
+
+```python
+from flatlas.api import open_index
+
+with open_index() as idx:
+    for row in idx.find("/data/projects", ("-type", "f", "-name", "*.log")):
+        print(row["path"], row["logical_size"])
+    largest = idx.largest("/data/projects", limit=10)
+```
+
+| 方法 | 结果 |
+|---|---|
+| `find(path=".", expression=(), *, follow_symlink=False)` | 按表达式的打印动作流式产生条目字典。表达式以 token 序列传递，迭代须在 `with` 块内完成。 |
+| `du(path=".", *, follow_symlink=False, freed=False, max_depth=0)` | 一个路径及指定深度内子目录的用量记录列表。 |
+| `largest(path=".", *, limit=None)` | 按大小排序的普通文件记录列表。 |
+| `roots()` | 已登记 namespace 的记录列表。 |
+| `scans(path=None, *, limit=None)` | 扫描 scope 的记录列表，可按关联路径过滤。 |
+| `scan_info(scan_id)` | 单次扫描的详情字典。 |
+
+字段、单位、路径和状态使用 CLI 的机器输出约定。多行查询对应 `jsonl`，`scan_info` 对应 `scan-info --format json`。行数上限须显式指定。
 
 ## `plan create` / `plan show`
 

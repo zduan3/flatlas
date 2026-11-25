@@ -37,7 +37,7 @@ File Atlas 首先服务于寻找大文件、大目录和重复内容，以减少
 | 版本 | 目标 | 内容 |
 |---|---|---|
 | 0.2.0（已发布，`v0.2.0`） | 脚本可以直接依赖的查询接口 | lazy 元数据、checkpoint 续扫、机器输出约定、`find --format`、`du --files0-from`、批量 `rm`、`FLATLAS_DB` / `--no-config` 与双平台验收。见 [发布记录](../history/0.2.0-release.md) |
-| 0.2.1（当前） | 清理闭环与脚本复用 | 扫描确认删除计数、`rm` 帮助澄清、薄只读 Python API（`flatlas.api`）、按目录清理 tombstone 与批量浅扫描。见 [backlog](backlog.md#021) 和 [自动化提案](proposals/automation.md) |
+| 0.2.1（当前） | 清理闭环与脚本复用 | [扫描确认删除计数](../design/scanning.md#分阶段计时)、`rm` 帮助澄清、[按目录清理 tombstone](../design/queries.md#rm---deleted-path) 与 [只读 Python API](../design/queries.md#只读-python-api)。批量浅扫描见 [可选待办](backlog.md#021) |
 | 0.2.2 | 降低重复评估的成本 | 按目录 mtime 增量刷新（[proposals/incremental-refresh.md](proposals/incremental-refresh.md)）、索引存储布局精简（`path_display` 由 root 与 key 推导，需 migration），并在机械硬盘上对比 `v0.2.0` 基线 |
 | 0.2.x | 按需推进的其余 0.2 能力 | 重复目录树候选、lazy-hash 后续能力（[proposals/lazy-hash.md](proposals/lazy-hash.md)）、交互用 GNU 参数（[proposals/query-cli.md](proposals/query-cli.md)）、跨平台与数据真实性 |
 

@@ -56,7 +56,7 @@ flatlas scan PATH [--refresh-before VALUE | --full | --resume | --shallow] [--fo
 flatlas scan --resume-from ID
 flatlas scans [PATH] [-n N] [--format table|jsonl|csv]
 flatlas scan-info ID [--format table|json]
-flatlas rm PATH... | --files0-from FILE [--format table|json]
+flatlas rm PATH... | --files0-from FILE | --deleted PATH [--format table|json]
 flatlas du [PATH ... | --files0-from FILE] [-D] [-d N] [--sort KEY] [-n N] [--freed] [-c] [--format table|jsonl|csv]
 flatlas find [--db DB] [-H] [--format table|jsonl|csv] [PATH ...] [-name|-iname|-path|-ipath|-type|-size|-mtime|-entries|-status|-maxdepth|-mindepth|-prune|-print|-print0|! -o -a ( )]
 flatlas ls [PATH] [--format table|jsonl|csv]
@@ -149,10 +149,9 @@ scan 仍存在的父目录    → completed 后才将缺失路径标记 deleted
 两种同步方式的取舍：
 
 - **手里有删除清单**（按 `find` 结果核对后删除的情况）：用 `flatlas rm --files0-from 清单` 从索引物理移除这些子树，不访问文件系统，见「脚本与自动化」的配方。
-- **不知道具体删了什么**：扫描仍存在的父目录，由扫描确认删除。扫描把每一条缺失路径改写为 deleted 记录，代价与被删条目数成正比，删得多时这一步会远长于遍历本身；这些记录也不会自动清除，索引不会因此变小。
-- 扫描已经写下的 deleted 记录同样可以用 `rm` 移除：对已删除的子树执行 `flatlas rm PATH`（或 `--files0-from`）会物理删除这些记录。
-- `rm` 只给一个 PATH 时也会立即删除，输出该路径的计数，不是预览；想先看规模，用 `du PATH`。
-- SQLite 删除行后文件不缩小，空出的页由以后的写入复用。
+- **不知道具体删了什么**：扫描仍存在的父目录，由扫描确认删除。`scan` 的 `paths_deleted` 报告本次新增的 deleted 记录数，包括已索引的缺失后代。缺失条目多时，确认删除可能比遍历本身更耗时。
+- **清理扫描留下的 deleted 记录**：运行 `flatlas rm --deleted PATH`，移除指定现存索引目录下的 tombstone，保留 present 记录与目录汇总。空出的 SQLite 页供后续写入复用，按需缩小数据库文件见 [压缩索引](docs/design/queries.md#rm---deleted-path)。
+- `flatlas rm PATH` 即使只有一个 PATH 也会立即移除整个索引子树。想先看规模，用 `flatlas du PATH`。
 
 ## 实际清理
 
@@ -186,6 +185,8 @@ jdupes -r D:\Archive\Photos\2025
 ```bash
 export FLATLAS_DB=/srv/indexes/flatlas/index.sqlite FLATLAS_NO_CONFIG=1
 ```
+
+Python 脚本可通过 `with flatlas.api.open_index() as idx:` 复用一个只读连接，直接调用 `find`、`du`、`largest`、`roots`、`scans` 和 `scan_info` 获取相同的机器记录。用法见 [只读 Python API](docs/design/queries.md#只读-python-api)。
 
 以下配方都只读索引（扫描之后执行），以 `/data/projects` 为例。
 

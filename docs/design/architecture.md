@@ -19,7 +19,7 @@ metadata 扫描/更新索引 → 查询范围内惰性 hash 与重复候选 → 
 - 扫描只采集 metadata，不读取普通文件内容，见 [扫描与目录汇总](scanning.md)。
 - `dupes` 在指定范围内以 size → quick BLAKE3 → full BLAKE3 惰性分级检测重复内容并复用可靠缓存，见 [惰性 Hash 与重复候选](hashing.md)。
 - 空间、路径、审计查询与导出只读取索引（`ls` 另做一层实时枚举），见 [查询命令](queries.md)。
-- `rm PATH` 是显式索引维护操作：仅从 SQLite 递归删除已索引路径及其 hash，不读取、验证或修改实际文件系统；这不构成文件删除能力。
+- `rm` 是显式索引维护操作：`rm PATH` 移除整个索引子树，`rm --deleted PATH` 只移除已确认删除的后代。两者都只操作 SQLite。
 
 ## 代码组织
 
@@ -33,6 +33,7 @@ Python 3.12 实现按职责拆分：
 | `allocation.py` | 平台占用空间采集，见 [平台差异](platform.md) |
 | `hashing.py`、`duplicate_filters.py` | 惰性 hash 与 dupes 筛选 |
 | `queries.py` | 只读查询 |
+| `api.py` | 复用只读查询与机器记录的 Python 接口 |
 | `planning.py` | dry-run plan |
 | `output.py` | JSON/CSV 导出 |
 | `config.py` | 用户级配置与数据库定位，见 [命令默认参数配置](config.md) |

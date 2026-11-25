@@ -247,7 +247,7 @@ def _ensure_ancestors(
     return scope_id
 
 
-def _mark_missing(connection: sqlite3.Connection, root_id: int, scan_id: int, scope_id: int, scope_key: bytes) -> None:
+def _mark_missing(connection: sqlite3.Connection, root_id: int, scan_id: int, scope_id: int, scope_key: bytes) -> int:
     """Mark every present descendant of the scope not seen by this scan as deleted.
 
     A path key is its parent's key plus one NUL-terminated name, so the scope's
@@ -256,11 +256,12 @@ def _mark_missing(connection: sqlite3.Connection, root_id: int, scan_id: int, sc
     parent links. The scope itself was observed by this scan.
     """
     bounds = "path_key>?" if not scope_key else "path_key>? AND path_key<?"
-    connection.execute(
+    cursor = connection.execute(
         f"""UPDATE path SET state='deleted', deleted_by_scope_id=?, deleted_at_ns=?
             WHERE root_id=? AND {bounds} AND state='present' AND last_seen_scan_id <> ?""",
         (scope_id, now_ns(), root_id, scope_key, *(() if not scope_key else (scope_key[:-1] + b"\x01",)), scan_id),
     )
+    return cursor.rowcount
 
 
 def _mark_missing_direct_children(
@@ -269,7 +270,7 @@ def _mark_missing_direct_children(
     scan_id: int,
     scope_id: int,
     directory_id: int,
-) -> None:
+) -> int:
     """Confirm missing direct entries and their descendants for one complete directory."""
 
     connection.execute(
@@ -285,6 +286,8 @@ def _mark_missing_direct_children(
            WHERE id IN missing""",
         (root_id, directory_id, scan_id, root_id, scope_id, now_ns()),
     )
+    # sqlite3.Cursor.rowcount is -1 for an UPDATE prefixed by WITH.
+    return int(connection.execute("SELECT changes()").fetchone()[0])
 
 
 def _directory_refresh_state(
@@ -370,10 +373,10 @@ def _finalize_abandoned(connection: sqlite3.Connection, row: sqlite3.Row) -> Non
             (finished, row["id"]),
         )
         connection.execute(
-            """UPDATE scan SET status='cancelled', finished_at_ns=?, note=?,
+            """UPDATE scan SET status='cancelled', finished_at_ns=?, note=?, stats_json=?,
                       errors_seen=(SELECT coalesce(sum(error_count), 0) FROM scan_scope WHERE scan_id=?)
                WHERE id=? AND status='running'""",
-            (finished, note, row["id"], row["id"]),
+            (finished, note, json.dumps({"paths_deleted": 0}), row["id"], row["id"]),
         )
 
 
@@ -545,7 +548,11 @@ def scan_directory(
         except OSError as exc:
             _record_error(connection, scope_id, scope_key, "stat", exc)
             connection.execute("UPDATE scan_scope SET status='failed', finished_at_ns=? WHERE id=?", (now_ns(), scope_id))
-            connection.execute("UPDATE scan SET status='failed', finished_at_ns=?, errors_seen=1 WHERE id=?", (now_ns(), scan_id))
+            stats = timer.as_dict(0) | {"checkpoints": 0, "paths_deleted": 0}
+            connection.execute(
+                "UPDATE scan SET status='failed', finished_at_ns=?, errors_seen=1, stats_json=? WHERE id=?",
+                (now_ns(), json.dumps(stats), scan_id),
+            )
             return {
                 "scan_id": scan_id,
                 "status": "failed",
@@ -554,6 +561,8 @@ def scan_directory(
                 "logical_bytes_seen": 0,
                 "refresh_before_ns": refresh_before_ns,
                 "errors_seen": 1,
+                "paths_deleted": 0,
+                "stats": stats,
             }
     files_seen = 0
     dirs_seen = 1
@@ -722,6 +731,7 @@ def scan_directory(
         """Discard the uncommitted batch and end the scan with its checkpointed counts."""
         connection.rollback()
         files, dirs, logical_bytes = committed_counts
+        stats = timer.as_dict(files + dirs) | {"checkpoints": checkpoints, "paths_deleted": 0}
         with connection:
             connection.execute(
                 "UPDATE scan_scope SET status=?, finished_at_ns=? WHERE id=? AND status='running'",
@@ -731,8 +741,7 @@ def scan_directory(
                 """UPDATE scan SET status=?, finished_at_ns=?, files_seen=?, dirs_seen=?, logical_bytes_seen=?,
                           errors_seen=(SELECT error_count FROM scan_scope WHERE id=?), stats_json=?
                    WHERE id=? AND status='running'""",
-                (status, now_ns(), files, dirs, logical_bytes, scope_id,
-                 json.dumps(timer.as_dict(files + dirs) | {"checkpoints": checkpoints}), scan_id),
+                (status, now_ns(), files, dirs, logical_bytes, scope_id, json.dumps(stats), scan_id),
             )
 
     cancelled = False
@@ -749,6 +758,7 @@ def scan_directory(
         raise
 
     scope_status = "cancelled" if cancelled else "partial" if failed else "completed"
+    paths_deleted = 0
     try:
         report("saving")
         # The first interrupt keeps everything observed so far, as before checkpoints.
@@ -761,16 +771,16 @@ def scan_directory(
             if scope_status == "completed":
                 with timer.phase("mark_missing"):
                     if shallow:
-                        _mark_missing_direct_children(connection, root_id, scan_id, scope_id, scope_path_id)
+                        paths_deleted = _mark_missing_direct_children(connection, root_id, scan_id, scope_id, scope_path_id)
                     elif refresh_before_ns is None:
                         if scope_first_seen != scan_id:
                             # A scope first recorded by this scan had no indexed
                             # descendants (a child row needs its parent row), so
                             # nothing can be missing; skip the whole-subtree pass.
-                            _mark_missing(connection, root_id, scan_id, scope_id, scope_key)
+                            paths_deleted = _mark_missing(connection, root_id, scan_id, scope_id, scope_key)
                     else:
                         for directory_id in completed_directories:
-                            _mark_missing_direct_children(connection, root_id, scan_id, scope_id, directory_id)
+                            paths_deleted += _mark_missing_direct_children(connection, root_id, scan_id, scope_id, directory_id)
             with timer.phase("summaries"):
                 refresh_directory_summaries(
                     connection,
@@ -782,7 +792,7 @@ def scan_directory(
             errors = int(
                 connection.execute("SELECT error_count FROM scan_scope WHERE id=?", (scope_id,)).fetchone()["error_count"]
             )
-            stats = timer.as_dict(files_seen + dirs_seen) | {"checkpoints": checkpoints}
+            stats = timer.as_dict(files_seen + dirs_seen) | {"checkpoints": checkpoints, "paths_deleted": paths_deleted}
             _claim_running_scan(
                 connection, scan_id,
                 "status=?, finished_at_ns=?, files_seen=?, dirs_seen=?, logical_bytes_seen=?, errors_seen=?, "
@@ -812,5 +822,6 @@ def scan_directory(
         "logical_bytes_seen": logical_bytes_seen,
         "refresh_before_ns": refresh_before_ns,
         "errors_seen": errors,
+        "paths_deleted": paths_deleted,
         "stats": stats,
     }

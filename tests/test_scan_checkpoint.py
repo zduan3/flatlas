@@ -134,6 +134,7 @@ def test_killed_scan_keeps_checkpoints_and_resumes_from_them(tmp_path: Path, mon
         assert selection.scan_id == killed_scan["id"]
         info = scan_info(connection, killed_scan["id"])
         assert info["status"] == "cancelled" and "abandoned" in info["note"]
+        assert info["stats"]["paths_deleted"] == 0
         assert info["scopes"][0]["status"] == "cancelled"
 
         resumed = scan_directory(connection, source, refresh_before_ns=selection.refresh_before_ns)
@@ -220,8 +221,9 @@ def test_interrupt_while_saving_a_complete_scan_confirms_nothing(tmp_path: Path)
 
         with pytest.raises(KeyboardInterrupt):
             scan_directory(connection, source, on_progress=interrupt_saving)
-        latest = connection.execute("SELECT status FROM scan ORDER BY id DESC").fetchone()
+        latest = connection.execute("SELECT id, status FROM scan ORDER BY id DESC").fetchone()
         assert latest["status"] == "cancelled"
+        assert scan_info(connection, latest["id"])["stats"]["paths_deleted"] == 0
         assert connection.execute(
             "SELECT state FROM path WHERE path_display=?", (str(source / "d1" / "f.bin"),)
         ).fetchone()["state"] == "present"
@@ -253,15 +255,20 @@ def test_migration_adds_checkpoint_columns_and_keeps_scans(tmp_path: Path) -> No
 def test_unexpected_error_while_saving_marks_the_scan_failed(tmp_path: Path, monkeypatch) -> None:
     source, database = _tree(tmp_path)
 
-    def broken_refresh(*_args, **_kwargs):
+    def broken_refresh(connection, *_args, **_kwargs):
+        assert connection.execute("SELECT count(*) FROM path WHERE state='deleted'").fetchone()[0] == 1
         raise sqlite3.OperationalError("injected")
 
-    monkeypatch.setattr(scanning, "refresh_directory_summaries", broken_refresh)
     connection = open_database(database)
     try:
+        scan_directory(connection, source)
+        (source / "d1" / "f.bin").unlink()
+        monkeypatch.setattr(scanning, "refresh_directory_summaries", broken_refresh)
         with pytest.raises(sqlite3.OperationalError, match="injected"):
             scan_directory(connection, source)
-        assert connection.execute("SELECT status FROM scan").fetchone()["status"] == "failed"
-        assert connection.execute("SELECT status FROM scan_scope").fetchone()["status"] == "failed"
+        latest = scan_info(connection, 2)
+        assert latest["status"] == latest["scopes"][0]["status"] == "failed"
+        assert latest["stats"]["paths_deleted"] == 0
+        assert connection.execute("SELECT count(*) FROM path WHERE state='deleted'").fetchone()[0] == 0
     finally:
         connection.close()

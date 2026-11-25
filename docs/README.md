@@ -10,7 +10,7 @@
 - [数据库结构](design/schema.md)：schema v7 的表、索引、扫描与删除语义、migration 历史与执行机制。
 - [扫描与目录汇总](design/scanning.md)：metadata 扫描、元数据成本、目录汇总与 freshness、`--refresh-before`、中断与续扫、删除确认。
 - [惰性 Hash 与重复候选](design/hashing.md)：size → quick → full 流水线、basis 校验、dupes 筛选、分组与输出。
-- [查询命令](design/queries.md)：`ls`、`du`、`find`、`largest`、`roots` / `df`、`rm`、`scans` / `scan-info`、`plan`。
+- [查询命令](design/queries.md)：`ls`、`du`、`find`、`largest`、`roots` / `df`、`rm`、`scans` / `scan-info`、`plan` 与只读 Python API。
 - [命令默认参数配置](design/config.md)：`config.toml` 与 `flatlas config`。
 - [平台差异](design/platform.md)：Windows 占用空间采集；Linux / Lustre 元数据实测。
 
@@ -21,7 +21,6 @@
 - [路线图](plan/roadmap.md)：版本级目标（唯一副本）。
 - [backlog](plan/backlog.md)：当前阶段按优先级排列的待办。
 - [待决策清单](plan/decisions.md)：尚未定案的产品与技术选择。
-- [proposals/automation.md](plan/proposals/automation.md)：0.2.1 自动化收口（只读 Python API、删除计数、批量浅扫描）。
 - [proposals/incremental-refresh.md](plan/proposals/incremental-refresh.md)：浅扫描与按目录 mtime 的增量刷新。
 - [proposals/lazy-hash.md](plan/proposals/lazy-hash.md)：惰性 hash 的并发、缓存控制、审计与过滤。
 - [proposals/query-cli.md](plan/proposals/query-cli.md)：查询命令 GNU 兼容参数、后续子命令与默认行为迁移。
