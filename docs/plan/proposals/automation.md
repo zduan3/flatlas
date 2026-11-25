@@ -29,7 +29,7 @@
 ## 0.2.1：后续
 
 - **只读 Python API**（`flatlas.api`）：一次打开索引、多次查询，返回与 `jsonl` 相同字段的记录迭代器；CLI 改为它的薄层。用于需要多次组合查询的报告脚本，取代对内部模块的直接引用。
-- **基于重新观察的删除后同步**：`scan --shallow --files0-from PARENTS` 在一次扫描中覆盖多个父目录，由文件系统观察确认删除并写入 tombstone，保留 `deleted_by_scope_id` 审计。`rm --files0-from` 保留，用于移除不再关心或登记错误的子树。
+- **基于重新观察的删除后同步**：`scan --shallow --files0-from PARENTS` 在一次扫描中覆盖多个父目录，由文件系统观察确认删除并写入 tombstone，保留 `deleted_by_scope_id` 审计。`rm --files0-from` 保留，用于移除不再关心或登记错误的子树。确认删除要逐行改写 tombstone，代价与被删条目数成正比（[扫描](../../design/scanning.md#元数据成本)），已有删除清单时 `rm --files0-from` 更快，且不留 tombstone。
 
 ## 不在本提案内
 

@@ -38,6 +38,22 @@
 
 ## 0.2.x
 
+- **扫描报告确认删除的条数**
+  目标：`scan` 输出与 `scan.stats_json` 增加本次标记为 deleted 的路径数；`entries_per_s` 注明只按观测到的条目计算，或另给不含 `mark_missing` 的速率。
+  原因：清理后重扫时，这个数正是要核对的结果，现在只能对比前后两次 `du`；一次删除 368 万条目后的重扫只观测到 23 万条目，报告 336 条目/s，而时间主要花在没有计数的 `mark_missing` 上（[扫描](../design/scanning.md#元数据成本)）。
+
+- **清理 tombstone 与压缩索引**
+  目标：只移除某个现存目录下 `state='deleted'` 的后代、保留 present 行（如 `rm --deleted PATH`），以及按需回收空间的 `VACUUM` 入口或说明。依赖 [待决策清单](decisions.md#索引与历史) 中 deleted 记录的保留策略。
+  原因：现在的 `rm` 只能删整棵子树，要清 tombstone 得先拿到被删路径的清单；扫描确认的大批删除留下的 tombstone 会一直占索引，后续完整扫描的删除确认也要走过它们。删行后 SQLite 文件不缩小。
+
+- **`rm` 帮助文字**
+  目标：说明单个 PATH 同样立即删除，并给出先用 `du PATH` 查看规模的提示。
+  原因：帮助中「One PATH prints that path's counts」容易被读成只显示计数的预览。
+
+- **重复目录树候选**
+  目标：只读索引，按目录内相对路径与 size 的集合找出结构相同或几乎相同的目录树，按组报告条目数与字节，作为 inode 清理的候选（不是删除授权）。需要独立设计：相似度定义、规模阈值、与文件级 `dupes` 的关系。
+  原因：一次按 inode 的清理中，95% 的条目是同一份源码树的约两百份副本（构建快照与测试运行冻结的源码，每份 1.4 万–14 万个文件，目录名是 `src`、`source` 等通用词）；按名字的候选完全找不到，文件级 `dupes` 也不直接给出「这些整棵目录是同一份」。
+
 - **lazy-hash 后续能力**：有界并发、`--cached` / `--rehash`、hash 运行审计、多 PATH 与 include/exclude。
   → [proposals/lazy-hash.md](proposals/lazy-hash.md)
 

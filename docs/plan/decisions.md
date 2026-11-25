@@ -4,7 +4,7 @@
 
 ## 索引与历史
 
-- 0.1 只维护当前状态、扫描 coverage/error 审计与 plan/operation 记录；不保存可查询的 immutable scan snapshot。是否在后续版本引入 snapshot，取决于保留策略与数据库增长评估。当前结构见 [数据库结构](../design/schema.md)。deleted path 的保留时长（当前只能用 `rm` 手动物理移除）同样待定。
+- 0.1 只维护当前状态、扫描 coverage/error 审计与 plan/operation 记录；不保存可查询的 immutable scan snapshot。是否在后续版本引入 snapshot，取决于保留策略与数据库增长评估。当前结构见 [数据库结构](../design/schema.md)。deleted path 的保留时长（当前只能用 `rm` 手动物理移除）同样待定；参考：一次扫描确认 368 万条删除后，这些 tombstone 占索引中该子树行数的 94%，且只能按被删路径的清单逐个子树 `rm`。
 - object observation 如何区分 inode 复用？哪些 `stat` 字段在各平台可用？0.1 不将 `(device, inode)` 当作跨历史永久 ID；复用 hash 时同时核验身份、size、mtime 与全部可用且可靠的 change/birth 时间。
 - `config_json` / `policy_json` 的正式 schema 与版本化规则是什么？
 
