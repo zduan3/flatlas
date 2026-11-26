@@ -441,6 +441,11 @@ def _remove_rows(connection: sqlite3.Connection, rows: list[sqlite3.Row]) -> dic
         if affected:
             from flatlas.summaries import refresh_finished_directories
 
+            connection.executemany(
+                """UPDATE directory_summary SET enumerated_mtime_ns=NULL, enumerated_change_time_ns=NULL
+                   WHERE path_id=?""",
+                ((path_id,) for path_id in affected),
+            )
             refresh_finished_directories(connection, sorted(affected), {})
     return {
         "scopes": len(outermost),

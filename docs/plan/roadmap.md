@@ -28,7 +28,7 @@ File Atlas 首先服务于寻找大文件、大目录和重复内容，以减少
 - 大规模与网络文件系统上的扫描性能和可恢复性（lazy 元数据、短事务 checkpoint）。
 - `dupes`、`du`、`largest` 的空间回收主线：hardlink 识别、深度展开、top N、metric、排序与阈值、completeness 与稳定导出。
 - 局部子树更新、当前状态校验、stale hash 重算、dirty state 与历史结果保留策略，并以最小的 `coverage`、`errors`、scan 摘要解释结果可信度。
-- 配置化 include/exclude、大小与时间过滤；hash 并发、强制重算/只用缓存模式与运行审计。
+- 配置化 include/exclude、大小与时间过滤；hash 并发、强制重算/只用缓存模式，以及 `dupes` 本次运行统计与错误明细。
 - 基准测试与故障注入测试。
 - 补齐 Linux 非 UTF-8、Windows 长路径/reparse tag、跨 mount/volume 策略和 allocated size 平台校准。
 
@@ -37,7 +37,7 @@ File Atlas 首先服务于寻找大文件、大目录和重复内容，以减少
 | 版本 | 目标 | 内容 |
 |---|---|---|
 | 0.2.0（已发布，`v0.2.0`） | 脚本可以直接依赖的查询接口 | lazy 元数据、checkpoint 续扫、机器输出约定、`find --format`、`du --files0-from`、批量 `rm`、`FLATLAS_DB` / `--no-config` 与双平台验收。见 [发布记录](../history/0.2.0-release.md) |
-| 0.2.1（当前） | 清理闭环、脚本复用与降低重复评估成本 | 已落地：[扫描确认删除计数](../design/scanning.md#分阶段计时)、[完整扫描并清理删除记录](../design/scanning.md#完整扫描并清理删除记录)、`rm` 帮助澄清、[按目录清理 tombstone](../design/queries.md#rm---deleted-path) 与 [只读 Python API](../design/queries.md#只读-python-api)（维持 schema v7）。待推进（见 [backlog](backlog.md#021)）：索引存储布局精简与 `plan_operation` 路径外键索引（合并为新 schema v8）、按目录 mtime 增量刷新（[proposals/incremental-refresh.md](proposals/incremental-refresh.md)）、机械硬盘对比 `v0.2.0` 基线及可选批量浅扫描 |
+| 0.2.1（当前） | 清理闭环、脚本复用与降低重复评估成本 | 已落地：[扫描确认删除计数](../design/scanning.md#分阶段计时)、[完整扫描并清理删除记录](../design/scanning.md#完整扫描并清理删除记录)、`rm` 帮助澄清、[按目录清理 tombstone](../design/queries.md#rm---deleted-path) 与 [只读 Python API](../design/queries.md#只读-python-api)、[索引布局与路径外键索引](../design/schema.md#migration-历史)、[按目录变化刷新](../design/scanning.md#按目录变化刷新--refresh-changed)。待推进（见 [backlog](backlog.md#021)）：机械硬盘对比 `v0.2.0` 基线及可选批量浅扫描 |
 | 0.2.x | 按需推进的其余 0.2 能力 | 重复目录树候选、lazy-hash 后续能力（[proposals/lazy-hash.md](proposals/lazy-hash.md)）、交互用 GNU 参数（[proposals/query-cli.md](proposals/query-cli.md)）、跨平台与数据真实性 |
 
 按优先级排列的具体条目见 [backlog](backlog.md)。

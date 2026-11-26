@@ -92,6 +92,14 @@ VALUE 支持带时区或使用本地时区的 ISO 8601 时间，以及 `30s`、`
 
 刷新扫描只为实际完整枚举的目录推进 `self_completed_at_ns`。当整次 scope 没有错误并成为 completed 时，每个完整枚举目录只确认其直接缺失条目及这些条目的已索引后代；主动跳过的新鲜目录不参与当前 scan 的删除判定，也不视为已被当前 scan 观察。partial、failed 或 cancelled 刷新仍不确认任何删除。
 
+## 按目录变化刷新：`--refresh-changed`
+
+`flatlas scan PATH --refresh-changed` 检查目录本身的身份及 mtime、可用的 change time。与最近一次成功重列目录时的基线一致时，跳过该目录的 `readdir` 并继续检查已索引的普通子目录；发现子目录缺失或类型变化时重新列父目录。缺少可信基线的目录会重新枚举。此模式覆盖命令配置中的默认 cutoff。续扫继承变化检测模式，重新检查目录并复用已提交的基线。
+
+成功的扫描为重新枚举且检查完直接条目的目录保存基线。跳过枚举的目录保留既有 freshness，其直接文件也保留上次观测的 metadata。只有 completed scope 中重新枚举成功的目录才确认缺失的直接条目及其后代。旧库升级后的基线从第一次成功重列开始建立。
+
+`scan`、`scans` 和 `scan-info` 的机器输出用 `refresh_changed` 标记此模式。完成时的 `stats.directories_skipped` 统计跳过枚举的目录数。此模式可遗漏文件原地改写（包括大小变化），周期性的 `scan PATH --full` 用于重新采集所有文件 metadata。
+
 ## 中断与续扫
 
 ### Checkpoint
@@ -155,5 +163,3 @@ CLI 在 POSIX 上把 `SIGTERM`（批处理调度器终止作业前发送）和 `
 checkpoint 照常提交观测。scope 完整完成后，在最终事务按 `path_key` 区间直接移除本次缺失的路径及历史 tombstone。关联的 hash、缓存汇总及引用被移除路径的 dry-run plan 随之清理。重新观测到的路径、仍有效的 hash、其余 plan 和扫描审计保留。目录汇总与状态、计数在同一事务提交。
 
 开始时发现同一 namespace 的重叠扫描仍在运行会报错；判定为已遗弃的重叠扫描先按 owner 规则记为 `cancelled`，再启动本次扫描。如果新重叠扫描在遍历期间启动，收尾仍刷新已提交观测对应的目录与祖先汇总，将本次记为 `failed` 并保留原行。
-
-相关提案：[按目录 mtime 的增量刷新](../plan/proposals/incremental-refresh.md)。

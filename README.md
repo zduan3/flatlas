@@ -52,7 +52,7 @@ flatlas config unset scan.refresh-before
 flatlas config list [-a|--all]
 flatlas roots [-h] [--format table|jsonl|csv]
 flatlas df [-h] [-T] [FILE ...] [--format table|jsonl|csv]
-flatlas scan PATH [--refresh-before VALUE | --full | --resume | --shallow | --purge-deleted] [--format table|json]
+flatlas scan PATH [--refresh-before VALUE | --refresh-changed | --full | --resume | --shallow | --purge-deleted] [--format table|json]
 flatlas scan --resume-from ID
 flatlas scans [PATH] [-n N] [--format table|jsonl|csv]
 flatlas scan-info ID [--format table|json]
@@ -98,6 +98,8 @@ flatlas config unset scan.refresh-before
 上述配置让普通 `scan` 只刷新从未完整扫描或最近完整扫描早于七天前的目录；相对时长在每次扫描启动时重新计算为固定 cutoff。也可保存 ISO 8601 时间，例如 `2026-01-01T00:00:00+08:00`。显式 `--refresh-before` 优先于配置，`--full` 临时执行完整扫描；移除配置后恢复默认完整扫描。`--resume` / `--resume-from` 继承历史扫描的固定 cutoff。`--full`、`--refresh-before`、`--resume`、`--resume-from` 互斥。
 
 ## 中断扫描
+
+显式运行 `flatlas scan PATH --refresh-changed` 会跳过时间戳未变化的目录枚举，同时递归检查已知子目录。文件原地写入未必改变目录时间戳，定期用 `flatlas scan PATH --full` 刷新全部文件 metadata。详见 [按目录变化刷新](docs/design/scanning.md#按目录变化刷新--refresh-changed)。
 
 扫描过程中按 Ctrl-C 会停止遍历并保存已观测的数据，scan 记为 `cancelled`，不确认任何删除；保存阶段再按一次则跳过收尾，只保留已提交的 checkpoint。在 Linux 等 POSIX 系统上，`SIGTERM`（如批处理调度器终止作业）和 `SIGHUP`（如终端关闭或远程会话断开）按同样方式处理；在 `nohup` 下被忽略的 `SIGHUP` 仍保持忽略。之后可用 `flatlas scan PATH --resume` 或 `flatlas scan --resume-from ID` 继续，用 `flatlas scans` / `flatlas scan-info ID` 查看历史记录。扫描每 5 秒提交一次 checkpoint；进程被强制杀死（如 `SIGKILL`）时保留已提交的部分，`--resume` 判定原进程已退出后接管该扫描并从 checkpoint 继续。行为细节见 [扫描与目录汇总](docs/design/scanning.md#中断与续扫)。
 

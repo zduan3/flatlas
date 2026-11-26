@@ -80,8 +80,9 @@ class ScanProgress:
 @dataclass(frozen=True)
 class ResumeSelection:
     scan_id: int
-    refresh_before_ns: int
+    refresh_before_ns: int | None
     scope: Path
+    refresh_changed: bool
 
 
 def _observation(
@@ -167,7 +168,7 @@ def upsert_path(
     if parent_id is None:
         parent_id = _parent_id(connection, root_id, item.key)
     old = connection.execute(
-        """SELECT id, state, entry_kind, device, inode
+        """SELECT id, state, entry_kind, device, inode, birth_time_ns
            FROM path WHERE root_id=? AND path_key=?""",
         (root_id, item.key),
     ).fetchone()
@@ -194,6 +195,7 @@ def upsert_path(
         or old["state"] == "deleted"
         or old["device"] != item.device
         or old["inode"] != item.inode
+        or old["birth_time_ns"] != item.birth_time_ns
     ):
         # A successful scan timestamp belongs to the observed directory object,
         # not merely to a path that may later be reused.
@@ -234,20 +236,19 @@ def _ensure_ancestors(
     scope: Path,
     *,
     lazy: bool = False,
-) -> int:
+) -> tuple[int, Observation]:
     values = [namespace.path]
     relative = scope.relative_to(namespace.path)
     current = namespace.path
     for part in relative.parts:
         current = current / part
         values.append(current)
-    scope_id = -1
     parent_id: int | None = None
-    for index, value in enumerate(values):
+    for index, value in enumerate(values[:-1]):
         observed = _observation(namespace, value, root=index == 0, lazy=lazy)
-        scope_id = upsert_path(connection, root_id, scan_id, observed, parent_id=parent_id)
-        parent_id = scope_id
-    return scope_id
+        parent_id = upsert_path(connection, root_id, scan_id, observed, parent_id=parent_id)
+    observed = _observation(namespace, scope, root=scope == namespace.path, lazy=lazy)
+    return upsert_path(connection, root_id, scan_id, observed, parent_id=parent_id), observed
 
 
 def _mark_missing(connection: sqlite3.Connection, root_id: int, scan_id: int, scope_id: int, scope_key: bytes) -> int:
@@ -268,16 +269,21 @@ def _mark_missing(connection: sqlite3.Connection, root_id: int, scan_id: int, sc
 
 
 def _overlapping_scans(
-    connection: sqlite3.Connection, root_id: int, scope_key: bytes, scan_id: int, *, starting: bool = False,
+    connection: sqlite3.Connection, root_id: int, scope_key: bytes, scan_id: int, *,
+    starting: bool = False, since_ns: int | None = None,
 ) -> sqlite3.Cursor:
     condition = "s.id<? AND s.status='running'" if starting else "s.id>?"
+    parameters = (scan_id,)
+    if since_ns is not None:
+        condition = "(s.id>? OR (s.id<? AND (s.finished_at_ns IS NULL OR s.finished_at_ns>?)))"
+        parameters = (scan_id, scan_id, since_ns)
     return connection.execute(
         f"""SELECT s.id, s.started_at_ns, s.heartbeat_at_ns, s.owner_json
            FROM scan s JOIN scan_scope ss ON ss.scan_id=s.id
            WHERE s.root_id=? AND {condition}
              AND (ss.scope_path_key=? OR substr(ss.scope_path_key, 1, length(?))=?
                   OR substr(?, 1, length(ss.scope_path_key))=ss.scope_path_key)""",
-        (root_id, scan_id, scope_key, scope_key, scope_key, scope_key),
+        (root_id, *parameters, scope_key, scope_key, scope_key, scope_key),
     )
 
 
@@ -315,12 +321,18 @@ def _mark_missing_direct_children(
              WHERE root_id=? AND parent_path_id=? AND state='present'
                AND last_seen_scan_id <> ?
              UNION ALL
+             SELECT child.id
+             FROM path direct CROSS JOIN path child ON child.parent_path_id=direct.id
+             WHERE direct.root_id=? AND direct.parent_path_id=? AND direct.state='present'
+               AND direct.last_seen_scan_id=? AND direct.entry_kind NOT IN ('root', 'directory')
+               AND child.state='present'
+             UNION ALL
              SELECT p.id FROM missing m CROSS JOIN path p ON p.parent_path_id=m.id
              WHERE p.root_id=? AND p.state='present'
            )
            UPDATE path SET state='deleted', deleted_by_scope_id=?, deleted_at_ns=?
            WHERE id IN missing""",
-        (root_id, directory_id, scan_id, root_id, scope_id, now_ns()),
+        (root_id, directory_id, scan_id, root_id, directory_id, scan_id, root_id, scope_id, now_ns()),
     )
     # sqlite3.Cursor.rowcount is -1 for an UPDATE prefixed by WITH.
     return int(connection.execute("SELECT changes()").fetchone()[0])
@@ -332,7 +344,8 @@ def _directory_refresh_state(
     directory_id: int,
 ) -> sqlite3.Row | None:
     return connection.execute(
-        """SELECT ds.self_completed_at_ns, ds.subtree_complete_through_ns
+        """SELECT ds.self_completed_at_ns, ds.subtree_complete_through_ns,
+                  ds.enumerated_mtime_ns, ds.enumerated_change_time_ns
            FROM path p JOIN directory_summary ds ON ds.path_id=p.id
            WHERE p.root_id=? AND p.id=? AND p.state='present'
              AND p.entry_kind IN ('root', 'directory')""",
@@ -433,7 +446,8 @@ def resume_selection(
         raise FlatlasError(f"scan path must be a directory: {scope}")
     scope_key = path_key(namespace, scope)
     row = connection.execute(
-        """SELECT s.id, s.status, s.started_at_ns, s.refresh_before_ns, s.heartbeat_at_ns, s.owner_json
+        """SELECT s.id, s.status, s.started_at_ns, s.refresh_before_ns, s.refresh_changed,
+                  s.heartbeat_at_ns, s.owner_json
            FROM scan s JOIN scan_scope ss ON ss.scan_id=s.id
            WHERE ss.root_id=? AND ss.scope_path_key=? AND s.max_depth IS NULL
            ORDER BY s.id DESC LIMIT 1""",
@@ -448,10 +462,11 @@ def resume_selection_from_scan(connection: sqlite3.Connection, scan_id: int) -> 
     """Resolve one incomplete scan ID and infer its unique scope path."""
 
     rows = connection.execute(
-        """SELECT s.id, s.status, s.started_at_ns, s.refresh_before_ns, s.max_depth,
-                  s.heartbeat_at_ns, s.owner_json, p.path_display AS scope
+        """SELECT s.id, s.status, s.started_at_ns, s.refresh_before_ns, s.max_depth, s.refresh_changed,
+                  s.heartbeat_at_ns, s.owner_json, p.path_key, r.root_path_raw
            FROM scan s JOIN scan_scope ss ON ss.scan_id=s.id
-           LEFT JOIN path_with_display p
+           JOIN root r ON r.id=ss.root_id
+           LEFT JOIN path p
              ON p.root_id=ss.root_id AND p.path_key=ss.scope_path_key
            WHERE s.id=? ORDER BY ss.id""",
         (scan_id,),
@@ -463,9 +478,9 @@ def resume_selection_from_scan(connection: sqlite3.Connection, scan_id: int) -> 
     row = rows[0]
     if row["max_depth"] is not None:
         raise FlatlasError(f"scan {scan_id} is a shallow scan; rerun it instead of resuming")
-    if row["scope"] is None:
+    if row["path_key"] is None:
         raise FlatlasError(f"scan {scan_id} scope path is unavailable")
-    return _resume_selection_from_row(connection, row, Path(str(row["scope"])))
+    return _resume_selection_from_row(connection, row, path_from_key(row["root_path_raw"], row["path_key"]))
 
 
 def _resume_selection_from_row(connection: sqlite3.Connection, row: sqlite3.Row, scope: Path) -> ResumeSelection:
@@ -484,10 +499,12 @@ def _resume_selection_from_row(connection: sqlite3.Connection, row: sqlite3.Row,
         with connection:
             _finalize_abandoned(connection, row)
     refresh_before = row["refresh_before_ns"]
+    refresh_changed = bool(row["refresh_changed"])
     return ResumeSelection(
         scan_id=int(row["id"]),
-        refresh_before_ns=int(row["started_at_ns"] if refresh_before is None else refresh_before),
+        refresh_before_ns=None if refresh_changed else int(row["started_at_ns"] if refresh_before is None else refresh_before),
         scope=scope,
+        refresh_changed=refresh_changed,
     )
 
 
@@ -535,6 +552,7 @@ def scan_directory(
     value: Path,
     *,
     refresh_before_ns: int | None = None,
+    refresh_changed: bool = False,
     on_progress: Callable[[ScanProgress], None] | None = None,
     shallow: bool = False,
     purge_deleted: bool = False,
@@ -552,6 +570,8 @@ def scan_directory(
     """
     if shallow and refresh_before_ns is not None:
         raise ValueError("a shallow scan cannot use refresh_before_ns")
+    if refresh_changed and (shallow or purge_deleted or refresh_before_ns is not None):
+        raise ValueError("refresh_changed requires a recursive scan without an age cutoff or purge")
     if purge_deleted and (shallow or refresh_before_ns is not None):
         raise ValueError("purge_deleted requires a full scan")
     empty_deletion_counts = {"paths_deleted": 0}
@@ -574,12 +594,12 @@ def scan_directory(
     scope_key = path_key(namespace, scope)
     with connection:
         scan_id = _last_insert_id(connection.execute(
-            """INSERT INTO scan(root_id, kind, status, started_at_ns, scanner_version, refresh_before_ns, max_depth,
+            """INSERT INTO scan(root_id, kind, status, started_at_ns, scanner_version, refresh_before_ns, max_depth, refresh_changed,
                                 heartbeat_at_ns, owner_json)
-               VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)""",
             (
                 root_id, kind, started, SCANNER_VERSION + (LAZY_SCANNER_SUFFIX if lazy else ""),
-                refresh_before_ns, 0 if shallow else None, started, json.dumps(scan_owner(), sort_keys=True),
+                refresh_before_ns, 0 if shallow else None, refresh_changed, started, json.dumps(scan_owner(), sort_keys=True),
             ),
         ))
         scope_id = _last_insert_id(connection.execute(
@@ -595,7 +615,7 @@ def scan_directory(
                     raise FlatlasError(f"cannot purge deleted paths: overlapping scan {overlap['id']} is still running")
                 _finalize_abandoned(connection, overlap, reason="purge")
         try:
-            scope_path_id = _ensure_ancestors(connection, namespace, root_id, scan_id, scope, lazy=lazy)
+            scope_path_id, scope_observed = _ensure_ancestors(connection, namespace, root_id, scan_id, scope, lazy=lazy)
             scope_first_seen = int(connection.execute(
                 "SELECT first_seen_scan_id FROM path WHERE id=?", (scope_path_id,)
             ).fetchone()[0])
@@ -614,6 +634,7 @@ def scan_directory(
                 "dirs_seen": 0,
                 "logical_bytes_seen": 0,
                 "refresh_before_ns": refresh_before_ns,
+                "refresh_changed": refresh_changed,
                 "errors_seen": 1,
                 **empty_deletion_counts,
                 "stats": stats,
@@ -627,6 +648,8 @@ def scan_directory(
     completed_directories: dict[int, tuple[int, int]] = {}
     pending_completed: dict[int, tuple[int, int]] = {}
     pending_finished: list[int] = []
+    enumeration_bases: dict[int, tuple[int | None, int | None]] = {}
+    directories_skipped = 0
     committed_counts = (files_seen, dirs_seen, logical_bytes_seen)
     checkpoints = 0
     next_checkpoint = time.monotonic() + CHECKPOINT_INTERVAL_S
@@ -685,24 +708,35 @@ def scan_directory(
     def visit(
         directory: Path,
         directory_id: int,
-        directory_key: bytes,
+        observed_directory: Observation,
     ) -> None:
-        nonlocal files_seen, dirs_seen, logical_bytes_seen, failed
+        nonlocal files_seen, dirs_seen, logical_bytes_seen, failed, directories_skipped
         maybe_checkpoint()
-        scan_self = refresh_before_ns is None
-        if refresh_before_ns is not None:
+        directory_key = observed_directory.key
+        basis = (observed_directory.mtime_ns, observed_directory.change_time_ns)
+        if refresh_before_ns is not None or refresh_changed:
             report("scanning", directory)
             with timer.phase("refresh_query"):
                 refresh_state = _directory_refresh_state(connection, root_id, directory_id)
-            scan_self = (
-                refresh_state is None
-                or refresh_state["self_completed_at_ns"] is None
-                or int(refresh_state["self_completed_at_ns"]) < refresh_before_ns
-            )
-            if not scan_self:
+            if refresh_changed:
+                skip_enumeration = (
+                    refresh_state is not None
+                    and basis[0] is not None
+                    and observed_directory.inode not in (None, 0)
+                    and observed_directory.device is not None
+                    and basis == (refresh_state["enumerated_mtime_ns"], refresh_state["enumerated_change_time_ns"])
+                )
+            else:
+                assert refresh_before_ns is not None
+                skip_enumeration = (
+                    refresh_state is not None
+                    and refresh_state["self_completed_at_ns"] is not None
+                    and int(refresh_state["self_completed_at_ns"]) >= refresh_before_ns
+                )
+            if skip_enumeration:
                 assert refresh_state is not None
                 subtree_time = refresh_state["subtree_complete_through_ns"]
-                if subtree_time is not None and int(subtree_time) >= refresh_before_ns:
+                if refresh_before_ns is not None and subtree_time is not None and int(subtree_time) >= refresh_before_ns:
                     return
                 with timer.phase("refresh_query"):
                     indexed_children = _indexed_directories(connection, root_id, directory_id)
@@ -710,7 +744,8 @@ def scan_directory(
                 refresh_parent = False
                 for child in indexed_children:
                     child_subtree_time = child["subtree_complete_through_ns"]
-                    if child_subtree_time is not None and int(child_subtree_time) >= refresh_before_ns:
+                    if (refresh_before_ns is not None and child_subtree_time is not None
+                            and int(child_subtree_time) >= refresh_before_ns):
                         continue
                     child_path = path_from_key(os.fsencode(namespace.path), child["path_key"])
                     try:
@@ -733,13 +768,15 @@ def scan_directory(
                         break
                     observed_children.append((child_path, child_observed))
                 if not refresh_parent:
+                    if refresh_changed:
+                        directories_skipped += 1
                     for child_path, child_observed in observed_children:
                         with timer.phase("db_write"):
                             child_id = upsert_path(
                                 connection, root_id, scan_id, child_observed, parent_id=directory_id
                             )
                         dirs_seen += 1
-                        visit(child_path, child_id, child_observed.key)
+                        visit(child_path, child_id, child_observed)
                     pending_finished.append(directory_id)
                     return
         report("scanning", directory)
@@ -772,13 +809,14 @@ def scan_directory(
             if observed.kind == "directory":
                 dirs_seen += 1
                 if not shallow:
-                    visit(entry_path, path_id, entry_key)
+                    visit(entry_path, path_id, observed)
             elif observed.kind == "file":
                 files_seen += 1
                 logical_bytes_seen += observed.logical_size or 0
                 report("scanning", directory)
         if directory_complete:
             pending_completed[directory_id] = (now_ns(), scan_id)
+            enumeration_bases[directory_id] = basis
         pending_finished.append(directory_id)
 
     def abandon(status: str) -> None:
@@ -800,7 +838,7 @@ def scan_directory(
 
     cancelled = False
     try:
-        visit(scope, scope_path_id, scope_key)
+        visit(scope, scope_path_id, scope_observed)
     except KeyboardInterrupt:
         cancelled = True
     except ScanTakenOverError:
@@ -813,23 +851,27 @@ def scan_directory(
 
     scope_status = "cancelled" if cancelled else "partial" if failed else "completed"
     deletion_counts = empty_deletion_counts.copy()
-    purge_conflict = None
+    overlap_error = None
     try:
         report("saving")
         # The first interrupt keeps everything observed so far, as before checkpoints.
         checkpoint()
         with connection:
-            if scope_status == "completed" and purge_deleted:
+            if scope_status == "completed" and (purge_deleted or refresh_changed):
                 # Last-seen IDs may be overwritten while the write lock is
                 # released between checkpoints. Check under the final write lock.
                 connection.execute("BEGIN IMMEDIATE")
-                overlap = _overlapping_scans(connection, root_id, scope_key, scan_id).fetchone()
+                overlap = _overlapping_scans(
+                    connection, root_id, scope_key, scan_id, since_ns=started if refresh_changed else None,
+                ).fetchone()
                 if overlap is not None:
-                    purge_conflict = (
+                    overlap_error = (
+                        f"cannot confirm deleted paths: scan {overlap['id']} overlapped this scope; rerun the scan"
+                        if refresh_changed else
                         f"cannot purge deleted paths: scan {overlap['id']} overlapped this scope; rerun the full scan"
                     )
                     scope_status = "failed"
-                    connection.execute("UPDATE scan SET note=? WHERE id=?", (purge_conflict, scan_id))
+                    connection.execute("UPDATE scan SET note=? WHERE id=?", (overlap_error, scan_id))
             connection.execute(
                 "UPDATE scan_scope SET status=?, finished_at_ns=?, paths_seen=? WHERE id=?",
                 (scope_status, now_ns(), files_seen + dirs_seen, scope_id),
@@ -844,7 +886,7 @@ def scan_directory(
                         deletion_counts["paths_deleted"] = _mark_missing_direct_children(
                             connection, root_id, scan_id, scope_id, scope_path_id,
                         )
-                    elif refresh_before_ns is None:
+                    elif refresh_before_ns is None and not refresh_changed:
                         if scope_first_seen != scan_id:
                             # A scope first recorded by this scan had no indexed
                             # descendants (a child row needs its parent row), so
@@ -860,13 +902,28 @@ def scan_directory(
                     connection,
                     root_id,
                     scope_path_id,
-                    completed_directories=completed_directories if purge_conflict is None else None,
+                    completed_directories=completed_directories if overlap_error is None else None,
                     max_depth=1 if shallow else None,
                 )
+                if scope_status == "completed" and (
+                    refresh_changed or not _overlapping_scans(
+                        connection, root_id, scope_key, scan_id, since_ns=started,
+                    ).fetchone()
+                ):
+                    connection.executemany(
+                        """UPDATE directory_summary SET enumerated_mtime_ns=?, enumerated_change_time_ns=?
+                           WHERE path_id=? AND last_completed_scan_id=?
+                             AND EXISTS (SELECT 1 FROM path p WHERE p.id=path_id AND p.last_seen_scan_id=?)
+                             AND (enumerated_mtime_ns IS NOT ? OR enumerated_change_time_ns IS NOT ?)""",
+                        ((mtime, ctime, path_id, scan_id, scan_id, mtime, ctime)
+                         for path_id, (mtime, ctime) in enumeration_bases.items()),
+                    )
             errors = int(
                 connection.execute("SELECT error_count FROM scan_scope WHERE id=?", (scope_id,)).fetchone()["error_count"]
             )
             stats = timer.as_dict(files_seen + dirs_seen) | {"checkpoints": checkpoints} | deletion_counts
+            if refresh_changed:
+                stats["directories_skipped"] = directories_skipped
             _claim_running_scan(
                 connection, scan_id,
                 "status=?, finished_at_ns=?, files_seen=?, dirs_seen=?, logical_bytes_seen=?, errors_seen=?, "
@@ -886,8 +943,8 @@ def scan_directory(
             abandon("failed")
         raise
     report(scope_status)
-    if purge_conflict is not None:
-        raise FlatlasError(purge_conflict)
+    if overlap_error is not None:
+        raise FlatlasError(overlap_error)
     if cancelled:
         raise KeyboardInterrupt
     return {
@@ -897,6 +954,7 @@ def scan_directory(
         "dirs_seen": dirs_seen,
         "logical_bytes_seen": logical_bytes_seen,
         "refresh_before_ns": refresh_before_ns,
+        "refresh_changed": refresh_changed,
         "errors_seen": errors,
         **deletion_counts,
         "stats": stats,

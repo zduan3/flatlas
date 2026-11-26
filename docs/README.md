@@ -21,7 +21,6 @@
 - [路线图](plan/roadmap.md)：版本级目标（唯一副本）。
 - [backlog](plan/backlog.md)：当前阶段按优先级排列的待办。
 - [待决策清单](plan/decisions.md)：尚未定案的产品与技术选择。
-- [proposals/incremental-refresh.md](plan/proposals/incremental-refresh.md)：浅扫描与按目录 mtime 的增量刷新。
 - [proposals/lazy-hash.md](plan/proposals/lazy-hash.md)：惰性 hash 的并发、缓存控制、审计与过滤。
 - [proposals/query-cli.md](plan/proposals/query-cli.md)：查询命令 GNU 兼容参数、后续子命令与默认行为迁移。
 

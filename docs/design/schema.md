@@ -51,7 +51,7 @@ path.parent_path_id ── path.id
 
 ## DDL（schema v8）
 
-以下为语义等价的可读版本；实际语句见 `db.py` 的 `DDL` 与 `DIRECTORY_SUMMARY_MIGRATION`及后续 migration。
+以下为语义等价的可读版本；实际语句见 `db.py` 的 `DDL` 与 `DIRECTORY_SUMMARY_MIGRATION` 及后续 migration。
 
 ```sql
 PRAGMA application_id = 1179402580; -- "FLAT" 的固定项目标识
@@ -222,7 +222,9 @@ CREATE TABLE directory_summary (
     last_completed_scan_id       INTEGER REFERENCES scan(id),
     updated_at_ns                INTEGER NOT NULL,
     direct_entries               INTEGER NOT NULL DEFAULT 0 CHECK (direct_entries >= 0),  -- migration 4
-    subtree_entries              INTEGER NOT NULL DEFAULT 0 CHECK (subtree_entries >= 0)  -- migration 4
+    subtree_entries              INTEGER NOT NULL DEFAULT 0 CHECK (subtree_entries >= 0), -- migration 4
+    enumerated_mtime_ns           INTEGER,         -- migration 8
+    enumerated_change_time_ns     INTEGER          -- migration 8
 );
 ```
 

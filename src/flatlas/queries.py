@@ -177,7 +177,7 @@ def list_scans(
                    CASE WHEN s.finished_at_ns IS NULL THEN NULL
                         ELSE s.finished_at_ns-s.started_at_ns END AS duration_ns,
                    s.files_seen, s.dirs_seen, s.errors_seen,
-                   s.refresh_before_ns, s.max_depth, s.scanner_version, s.note,
+                   s.refresh_before_ns, s.max_depth, s.refresh_changed, s.scanner_version, s.note,
                    ss.id AS scope_id, ss.status AS scope_status,
                    ss.paths_seen, ss.error_count,
                    p.path_display AS scope,
@@ -192,7 +192,7 @@ def list_scans(
             LIMIT ?""",
         parameters,
     ).fetchall()
-    return [dict(row) for row in rows]
+    return [dict(row) | {"refresh_changed": bool(row["refresh_changed"])} for row in rows]
 
 
 def scan_info(connection: sqlite3.Connection, scan_id: int) -> dict[str, Any]:
@@ -204,7 +204,7 @@ def scan_info(connection: sqlite3.Connection, scan_id: int) -> dict[str, Any]:
                   CASE WHEN s.finished_at_ns IS NULL THEN NULL
                        ELSE s.finished_at_ns-s.started_at_ns END AS duration_ns,
                   s.files_seen, s.dirs_seen, s.errors_seen, s.logical_bytes_seen,
-                  s.refresh_before_ns, s.max_depth, s.scanner_version, s.note,
+                  s.refresh_before_ns, s.max_depth, s.refresh_changed, s.scanner_version, s.note,
                   s.heartbeat_at_ns, s.owner_json, s.stats_json
            FROM scan s JOIN root r ON r.id=s.root_id
            WHERE s.id=?""",
@@ -235,6 +235,7 @@ def scan_info(connection: sqlite3.Connection, scan_id: int) -> dict[str, Any]:
         (scan_id,),
     ).fetchall()
     details = dict(scan)
+    details["refresh_changed"] = bool(details["refresh_changed"])
     stats_json = details.pop("stats_json")
     owner_json = details.pop("owner_json")
     return {
@@ -292,7 +293,7 @@ def list_child_directories(
     ).fetchone()
     scopes = connection.execute(
         """SELECT ss.scope_path_key, ss.status, ss.scan_id,
-                  s.started_at_ns, s.refresh_before_ns, s.max_depth
+                  s.started_at_ns, s.refresh_before_ns, s.max_depth, s.refresh_changed
            FROM scan_scope ss
         JOIN scan s ON s.id=ss.scan_id
         WHERE ss.root_id=?
@@ -371,7 +372,14 @@ def _entry_scan_status(
         or indexed["entry_kind"] != entry_kind
     ):
         return NEW
-    covering = [scope for scope in scopes if _scope_covers(scope, entry_key, entry_kind)]
+    directory = entry_kind in {"root", "directory"}
+    summary = usage if directory else parent_summary
+    observed_in = None if summary is None else summary["last_completed_scan_id"]
+    covering = [
+        scope for scope in scopes
+        if _scope_covers(scope, entry_key, entry_kind)
+        and (not scope["refresh_changed"] or scope["status"] != "completed" or scope["scan_id"] == observed_in)
+    ]
     if not covering:
         return NEW
     latest = covering[0]
@@ -379,6 +387,8 @@ def _entry_scan_status(
         # First seen by a later shallow scan that did not enumerate it.
         return NEW
     if latest["status"] == "completed":
+        if latest["refresh_changed"] and directory and check_subtree:
+            return OK if usage is not None and usage["subtree_complete_through_ns"] is not None else PART
         return OK
 
     refresh_before = latest["refresh_before_ns"]
@@ -529,7 +539,7 @@ def _descendant_directories(
 def _scan_scopes(connection: sqlite3.Connection, root_id: int) -> list[sqlite3.Row]:
     return connection.execute(
         """SELECT ss.scope_path_key, ss.status, ss.scan_id,
-                  s.started_at_ns, s.refresh_before_ns, s.max_depth
+                  s.started_at_ns, s.refresh_before_ns, s.max_depth, s.refresh_changed
            FROM scan_scope ss JOIN scan s ON s.id=ss.scan_id
            WHERE ss.root_id=? ORDER BY s.id DESC, ss.id DESC""",
         (root_id,),

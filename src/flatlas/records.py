@@ -77,7 +77,7 @@ FILESYSTEM_FIELDS = (
 )
 SCAN_FIELDS = (
     "type", "scan_id", "root_id", "root", "kind", "status", "started_at_ns", "finished_at_ns", "duration_ns",
-    "files_seen", "dirs_seen", "errors_seen", "refresh_before_ns", "max_depth", "scanner_version", "note",
+    "files_seen", "dirs_seen", "errors_seen", "refresh_before_ns", "max_depth", "refresh_changed", "scanner_version", "note",
     "scope_id", "scope_status", "paths_seen", "error_count", "scope", "scope_path_key_hex",
 )
 PLAN_FIELDS = (

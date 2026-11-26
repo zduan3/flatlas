@@ -583,7 +583,7 @@ def _print_scans(rows: list[dict[str, Any]], fmt: str, *, limit: int | None) -> 
             str(row["dirs_seen"]),
             str(row["errors_seen"]),
             str(row["scope"] or f"key:{row['scope_path_key_hex']}")
-            + (" (shallow)" if row.get("max_depth") == 0 else ""),
+            + (" (shallow)" if row.get("max_depth") == 0 else " (changed)" if row["refresh_changed"] else ""),
         ]
         for row in rows
     ]
@@ -871,6 +871,10 @@ def scan(
             help="Only refresh directories last completely scanned before this ISO 8601 time or duration (for example 7d); defaults to scan.refresh-before in config.",
         ),
     ] = None,
+    refresh_changed: Annotated[
+        bool,
+        typer.Option("--refresh-changed", help="Skip listing unchanged directories and check their known subdirectories."),
+    ] = False,
     resume: Annotated[
         bool,
         typer.Option("--resume", help="Continue the latest incomplete scan for this exact directory scope."),
@@ -900,6 +904,8 @@ def scan(
     db: db_option = None,
 ) -> None:
     """Scan metadata for a complete namespace or one subtree and update the persistent index."""
+    if refresh_changed and (full or shallow or purge_deleted or resume or resume_from is not None or refresh_before is not None):
+        raise typer.BadParameter("--refresh-changed cannot be combined with other scan modes")
     if purge_deleted and (shallow or resume or resume_from is not None or refresh_before is not None):
         raise typer.BadParameter("--purge-deleted requires a full scan and cannot be combined with --shallow, --resume, --resume-from, or --refresh-before")
     if shallow and (full or resume or resume_from is not None or refresh_before is not None):
@@ -914,7 +920,7 @@ def scan(
         raise typer.BadParameter("PATH is required unless --resume-from is used")
     check_format(format, OBJECT_FORMATS)
     cutoff = None
-    if not (resume or resume_from is not None or full or shallow or purge_deleted):
+    if not (resume or resume_from is not None or full or shallow or purge_deleted or refresh_changed):
         value = refresh_before if refresh_before is not None else _command_default(ctx, "scan.refresh-before")
         cutoff = _parse_refresh_before(value) if value is not None else None
     with _connection(db) as connection, _ScanProgressDisplay(enabled=_stderr_is_tty()) as progress:
@@ -923,12 +929,16 @@ def scan(
             selection = resume_selection_from_scan(connection, resume_from)
             scan_path = selection.scope
             cutoff = selection.refresh_before_ns
+            refresh_changed = selection.refresh_changed
         elif resume:
             assert path is not None
-            cutoff = resume_selection(connection, path).refresh_before_ns
+            selection = resume_selection(connection, path)
+            cutoff = selection.refresh_before_ns
+            refresh_changed = selection.refresh_changed
         assert scan_path is not None
         result = scan_directory(
-            connection, scan_path, refresh_before_ns=cutoff, shallow=shallow, purge_deleted=purge_deleted,
+            connection, scan_path, refresh_before_ns=cutoff, refresh_changed=refresh_changed,
+            shallow=shallow, purge_deleted=purge_deleted,
             # Without a terminal the line is never drawn; skip the per-entry callback.
             on_progress=progress.update if progress.enabled else None,
         )
