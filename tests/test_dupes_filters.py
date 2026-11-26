@@ -151,9 +151,9 @@ def test_local_rescan_combines_new_and_existing_hashes_under_filters(indexed) ->
         groups = queries.duplicate_groups(connection, scope=scope, filters=filters)
         assert len(groups) == 1 and groups[0]["count"] == 3
         assert {Path(path["path_display"]).name for path in groups[0]["paths"]} == {"other-0", "other-1", "other-2"}
-        deleted = [row[0] for row in connection.execute("SELECT path_display FROM path WHERE state='deleted'")]
+        deleted = [row[0] for row in connection.execute("SELECT path_display FROM path_with_display WHERE state='deleted'")]
         assert deleted == [str(scope / "nested" / "medium-2")]
-        assert connection.execute("SELECT state FROM path WHERE path_display=?", (str(scope / "small-0"),)).fetchone()[0] == "present"
+        assert connection.execute("SELECT state FROM path_with_display WHERE path_display=?", (str(scope / "small-0"),)).fetchone()[0] == "present"
 
 
 @pytest.mark.safety

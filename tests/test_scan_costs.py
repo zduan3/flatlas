@@ -113,7 +113,7 @@ def test_kind_changes_still_clear_summaries_and_stale_hashes(tmp_path: Path) -> 
     try:
         scan_directory(connection, source)
         path_id = connection.execute(
-            "SELECT id FROM path WHERE path_display=?", (str(target),)
+            "SELECT id FROM path_with_display WHERE path_display=?", (str(target),)
         ).fetchone()["id"]
         assert connection.execute("SELECT 1 FROM directory_summary WHERE path_id=?", (path_id,)).fetchone()
 

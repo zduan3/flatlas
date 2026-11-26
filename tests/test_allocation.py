@@ -175,7 +175,7 @@ def test_allocation_failure_preserves_metadata_and_prevents_false_deletion(tmp_p
         register_namespace(connection, discover_namespace(source))
         scan_directory(connection, source)
         old_freshness = connection.execute(
-            "SELECT self_completed_at_ns FROM directory_summary JOIN path ON path.id=path_id WHERE path_display=?",
+            "SELECT self_completed_at_ns FROM directory_summary JOIN path_with_display p ON p.id=path_id WHERE path_display=?",
             (str(nested),),
         ).fetchone()[0]
         missing.unlink()
@@ -194,7 +194,7 @@ def test_allocation_failure_preserves_metadata_and_prevents_false_deletion(tmp_p
         assert audit["errors_seen"] == 1
         assert audit["errors"][0]["operation"] == "stat"
         assert "allocation query failed" in audit["errors"][0]["message"]
-        rows = connection.execute("SELECT path_display, state, logical_size, allocated_size FROM path WHERE entry_kind='file'").fetchall()
+        rows = connection.execute("SELECT path_display, state, logical_size, allocated_size FROM path_with_display WHERE entry_kind='file'").fetchall()
         indexed = {row["path_display"]: row for row in rows}
         assert all(row["state"] == "present" for row in rows)
         assert indexed[str(target)]["logical_size"] == 7
@@ -203,7 +203,7 @@ def test_allocation_failure_preserves_metadata_and_prevents_false_deletion(tmp_p
         assert disk_usage(connection, scope=nested)[0]["allocated_size"] is None
         assert disk_usage(connection, scope=source)[0]["allocated_size"] is None
         assert connection.execute(
-            "SELECT self_completed_at_ns FROM directory_summary JOIN path ON path.id=path_id WHERE path_display=?",
+            "SELECT self_completed_at_ns FROM directory_summary JOIN path_with_display p ON p.id=path_id WHERE path_display=?",
             (str(nested),),
         ).fetchone()[0] == old_freshness
         live = list_child_directories(connection, scope=nested)

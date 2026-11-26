@@ -158,9 +158,9 @@ def test_subtree_scan_can_match_existing_index_and_complete_scope_marks_deletion
         assert duplicate_groups(connection)[0]["count"] == 2
         (incoming / "new.bin").unlink()
         scan_directory(connection, incoming)
-        row = connection.execute("SELECT state FROM path WHERE path_display=?", (str(incoming / "new.bin"),)).fetchone()
+        row = connection.execute("SELECT state FROM path_with_display WHERE path_display=?", (str(incoming / "new.bin"),)).fetchone()
         assert row["state"] == "deleted"
-        old = connection.execute("SELECT state FROM path WHERE path_display=?", (str(source / "old.bin"),)).fetchone()
+        old = connection.execute("SELECT state FROM path_with_display WHERE path_display=?", (str(source / "old.bin"),)).fetchone()
         assert old["state"] == "present"
         assert disk_usage(connection, scope=source)[0]["logical_size"] == len(b"shared")
     finally:
@@ -208,8 +208,8 @@ def test_rm_recursively_removes_only_indexed_paths_without_touching_files(tmp_pa
 
     connection = open_database(database)
     try:
-        assert connection.execute("SELECT count(*) FROM path WHERE path_display LIKE ?", (f"{target}%",)).fetchone()[0] == 0
-        assert connection.execute("SELECT state FROM path WHERE path_display=?", (str(retained_file),)).fetchone()["state"] == "present"
+        assert connection.execute("SELECT count(*) FROM path_with_display WHERE path_display LIKE ?", (f"{target}%",)).fetchone()[0] == 0
+        assert connection.execute("SELECT state FROM path_with_display WHERE path_display=?", (str(retained_file),)).fetchone()["state"] == "present"
         assert disk_usage(connection, scope=source)[0]["logical_size"] == len(b"retain")
     finally:
         connection.close()
@@ -499,7 +499,7 @@ def test_ls_marks_live_child_directory_scan_statuses(tmp_path: Path, monkeypatch
         assert by_name["new"]["files"] is None
         assert by_name["new"]["complete_through_ns"] is None
         empty_state = connection.execute(
-            "SELECT state FROM path WHERE path_display=?",
+            "SELECT state FROM path_with_display WHERE path_display=?",
             (str(empty),),
         ).fetchone()["state"]
         assert empty_state == "present"
@@ -541,7 +541,7 @@ def test_ls_does_not_treat_equal_scan_times_as_completed_coverage(tmp_path: Path
         assert Path(child_rows[0]["path"]).name == "child"
         assert child_rows[0]["status"] == "part"
         assert connection.execute(
-            "SELECT state FROM path WHERE path_display=?", (str(child / "old.bin"),)
+            "SELECT state FROM path_with_display WHERE path_display=?", (str(child / "old.bin"),)
         ).fetchone()["state"] == "present"
     finally:
         connection.close()
@@ -770,7 +770,7 @@ def test_lazy_hashing_is_scoped_reads_small_files_once_and_reuses_cache(tmp_path
         assert reads == [(inside / "a.bin", False), (inside / "b.bin", False)]
         assert duplicate_groups(connection, scope=inside)[0]["count"] == 2
         assert connection.execute(
-            "SELECT count(*) FROM file_hash h JOIN path p ON p.id=h.path_id WHERE p.path_display LIKE ?",
+            "SELECT count(*) FROM file_hash h JOIN path_with_display p ON p.id=h.path_id WHERE p.path_display LIKE ?",
             (f"{outside}%",),
         ).fetchone()[0] == 0
 
@@ -829,7 +829,7 @@ def test_lazy_hash_reports_file_changed_after_scan_as_incomplete(tmp_path: Path,
         assert summary.errors == 0
         assert duplicate_groups(connection, scope=source) == []
         assert connection.execute(
-            "SELECT h.state FROM file_hash h JOIN path p ON p.id=h.path_id WHERE p.path_display=?",
+            "SELECT h.state FROM file_hash h JOIN path_with_display p ON p.id=h.path_id WHERE p.path_display=?",
             (str(changed),),
         ).fetchone()["state"] == "stale"
     finally:
@@ -885,7 +885,7 @@ def test_ls_shows_subtree_scan_time_in_table_json_and_csv(tmp_path: Path) -> Non
     scanned_through = 1_700_000_000_000_000_000
     connection.execute(
         """UPDATE directory_summary SET subtree_complete_through_ns=?
-           WHERE path_id=(SELECT id FROM path WHERE path_display=?)""",
+           WHERE path_id=(SELECT id FROM path_with_display WHERE path_display=?)""",
         (scanned_through, str(indexed)),
     )
     connection.commit()
@@ -946,7 +946,7 @@ def test_database_migration_is_idempotent_and_keeps_existing_data(tmp_path: Path
     (source / "preserved.bin").write_bytes(b"data")
     scan_directory(connection, source)
     preserved_path_count = connection.execute("SELECT count(*) FROM path").fetchone()[0]
-    # Recreate the exact pre-v2 state so reopening exercises the forward migration.
+    # Remove the v2 table and marker to exercise the legacy backfill.
     connection.execute("DROP TABLE directory_summary")
     connection.execute("DELETE FROM schema_migration WHERE version=2")
     connection.commit()
@@ -958,13 +958,13 @@ def test_database_migration_is_idempotent_and_keeps_existing_data(tmp_path: Path
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
         assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
-        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 7
+        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 8
         assert connection.execute("SELECT root_path_display FROM root").fetchone()[0] == str(discover_namespace(source).path)
         assert connection.execute("SELECT count(*) FROM path").fetchone()[0] == preserved_path_count
         summary = connection.execute(
             """SELECT ds.subtree_files, ds.subtree_logical_size,
                       ds.self_completed_at_ns, ds.subtree_complete_through_ns
-               FROM directory_summary ds JOIN path p ON p.id=ds.path_id
+               FROM directory_summary ds JOIN path_with_display p ON p.id=ds.path_id
                WHERE p.path_display=?""",
             (str(source),),
         ).fetchone()
@@ -1027,7 +1027,7 @@ def test_ls_skips_recursive_checks_after_cancellation_and_keeps_cached_usage(
         assert disk_usage(connection, scope=completed)[0]["status"] == "ok"
         cached_usage = connection.execute(
             """SELECT subtree_files, subtree_logical_size, subtree_complete_through_ns
-               FROM directory_summary ds JOIN path p ON p.id=ds.path_id
+               FROM directory_summary ds JOIN path_with_display p ON p.id=ds.path_id
                WHERE p.path_display=?""",
             (str(completed),),
         ).fetchone()
@@ -1101,7 +1101,7 @@ def test_refresh_cutoff_migration_keeps_existing_scans(tmp_path: Path) -> None:
         columns = {row["name"] for row in connection.execute("PRAGMA table_info('scan')")}
         assert "refresh_before_ns" in columns
         assert connection.execute("SELECT count(*) FROM scan").fetchone()[0] == scan_count
-        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 7
+        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 8
         assert [(event.version, event.phase) for event in progress] == [(3, "started"), (3, "completed")]
     finally:
         connection.close()
@@ -1129,7 +1129,7 @@ def test_directory_summary_records_partial_and_complete_scan_freshness(tmp_path:
             for row in connection.execute(
                 """SELECT p.path_display, ds.subtree_files, ds.subtree_logical_size,
                           ds.self_completed_at_ns, ds.subtree_complete_through_ns
-                   FROM directory_summary ds JOIN path p ON p.id=ds.path_id"""
+                   FROM directory_summary ds JOIN path_with_display p ON p.id=ds.path_id"""
             )
         }
         assert rows[str(source)]["self_completed_at_ns"] is not None
@@ -1144,7 +1144,7 @@ def test_directory_summary_records_partial_and_complete_scan_freshness(tmp_path:
         completed = connection.execute(
             """SELECT ds.subtree_files, ds.subtree_logical_size,
                       ds.self_completed_at_ns, ds.subtree_complete_through_ns
-               FROM directory_summary ds JOIN path p ON p.id=ds.path_id
+               FROM directory_summary ds JOIN path_with_display p ON p.id=ds.path_id
                WHERE p.path_display=?""",
             (str(source),),
         ).fetchone()
@@ -1154,7 +1154,7 @@ def test_directory_summary_records_partial_and_complete_scan_freshness(tmp_path:
         assert completed["subtree_complete_through_ns"] is not None
         nested_last_success = connection.execute(
             """SELECT ds.self_completed_at_ns FROM directory_summary ds
-               JOIN path p ON p.id=ds.path_id WHERE p.path_display=?""",
+               JOIN path_with_display p ON p.id=ds.path_id WHERE p.path_display=?""",
             (str(nested),),
         ).fetchone()[0]
 
@@ -1162,7 +1162,7 @@ def test_directory_summary_records_partial_and_complete_scan_freshness(tmp_path:
         assert scan_directory(connection, source)["status"] == "partial"
         invalidated = connection.execute(
             """SELECT p.path_display, ds.self_completed_at_ns, ds.subtree_complete_through_ns
-               FROM directory_summary ds JOIN path p ON p.id=ds.path_id
+               FROM directory_summary ds JOIN path_with_display p ON p.id=ds.path_id
                WHERE p.path_display IN (?, ?) ORDER BY p.path_display""",
             (str(source), str(nested)),
         ).fetchall()
@@ -1192,19 +1192,19 @@ def test_refresh_before_scans_old_directories_and_preserves_fresh_subtrees(tmp_p
         connection.execute(
             """UPDATE directory_summary
                SET self_completed_at_ns=?, subtree_complete_through_ns=?
-               WHERE path_id=(SELECT id FROM path WHERE path_display=?)""",
+               WHERE path_id=(SELECT id FROM path_with_display WHERE path_display=?)""",
             (cutoff + 100, cutoff - 100, str(source)),
         )
         connection.execute(
             """UPDATE directory_summary
                SET self_completed_at_ns=?, subtree_complete_through_ns=?
-               WHERE path_id=(SELECT id FROM path WHERE path_display=?)""",
+               WHERE path_id=(SELECT id FROM path_with_display WHERE path_display=?)""",
             (cutoff + 100, cutoff + 100, str(fresh)),
         )
         connection.execute(
             """UPDATE directory_summary
                SET self_completed_at_ns=?, subtree_complete_through_ns=?
-               WHERE path_id=(SELECT id FROM path WHERE path_display=?)""",
+               WHERE path_id=(SELECT id FROM path_with_display WHERE path_display=?)""",
             (cutoff - 100, cutoff - 100, str(old)),
         )
         connection.commit()
@@ -1218,7 +1218,7 @@ def test_refresh_before_scans_old_directories_and_preserves_fresh_subtrees(tmp_p
         states = {
             row["path_display"]: row["state"]
             for row in connection.execute(
-                "SELECT path_display, state FROM path WHERE path_display IN (?, ?)",
+                "SELECT path_display, state FROM path_with_display WHERE path_display IN (?, ?)",
                 (str(fresh_file), str(old_file)),
             )
         }
@@ -1230,7 +1230,7 @@ def test_refresh_before_scans_old_directories_and_preserves_fresh_subtrees(tmp_p
         assert scan["refresh_before_ns"] == cutoff
         freshness = connection.execute(
             """SELECT ds.self_completed_at_ns
-               FROM directory_summary ds JOIN path p ON p.id=ds.path_id
+               FROM directory_summary ds JOIN path_with_display p ON p.id=ds.path_id
                WHERE p.path_display=?""",
             (str(old),),
         ).fetchone()[0]
@@ -1270,7 +1270,7 @@ def test_partial_refresh_never_confirms_missing_entries(tmp_path: Path, monkeypa
 
         assert result["status"] == "partial"
         assert connection.execute(
-            "SELECT state FROM path WHERE path_display=?", (str(vanished),)
+            "SELECT state FROM path_with_display WHERE path_display=?", (str(vanished),)
         ).fetchone()["state"] == "present"
     finally:
         connection.close()
@@ -1290,13 +1290,13 @@ def test_refresh_falls_back_to_parent_when_indexed_child_disappears(tmp_path: Pa
         connection.execute(
             """UPDATE directory_summary
                SET self_completed_at_ns=?, subtree_complete_through_ns=?
-               WHERE path_id=(SELECT id FROM path WHERE path_display=?)""",
+               WHERE path_id=(SELECT id FROM path_with_display WHERE path_display=?)""",
             (cutoff + 100, cutoff - 100, str(source)),
         )
         connection.execute(
             """UPDATE directory_summary
                SET self_completed_at_ns=?, subtree_complete_through_ns=?
-               WHERE path_id=(SELECT id FROM path WHERE path_display=?)""",
+               WHERE path_id=(SELECT id FROM path_with_display WHERE path_display=?)""",
             (cutoff - 100, cutoff - 100, str(removed)),
         )
         connection.commit()
@@ -1309,7 +1309,7 @@ def test_refresh_falls_back_to_parent_when_indexed_child_disappears(tmp_path: Pa
         states = {
             row["path_display"]: row["state"]
             for row in connection.execute(
-                "SELECT path_display, state FROM path WHERE path_display IN (?, ?)",
+                "SELECT path_display, state FROM path_with_display WHERE path_display IN (?, ?)",
                 (str(removed), str(payload)),
             )
         }
@@ -1339,7 +1339,7 @@ def test_reappeared_directory_does_not_reuse_previous_success_time(tmp_path: Pat
         assert scan_directory(connection, source)["status"] == "partial"
         summary = connection.execute(
             """SELECT ds.self_completed_at_ns, ds.subtree_complete_through_ns
-               FROM directory_summary ds JOIN path p ON p.id=ds.path_id
+               FROM directory_summary ds JOIN path_with_display p ON p.id=ds.path_id
                WHERE p.path_display=?""",
             (str(nested),),
         ).fetchone()
@@ -1361,7 +1361,7 @@ def test_subtree_scan_refreshes_cached_ancestor_totals_without_rescanning_ancest
         scan_directory(connection, source)
         root_before = connection.execute(
             """SELECT ds.self_completed_at_ns FROM directory_summary ds
-               JOIN path p ON p.id=ds.path_id WHERE p.path_display=?""",
+               JOIN path_with_display p ON p.id=ds.path_id WHERE p.path_display=?""",
             (str(source),),
         ).fetchone()[0]
 
@@ -1369,7 +1369,7 @@ def test_subtree_scan_refreshes_cached_ancestor_totals_without_rescanning_ancest
         scan_directory(connection, nested)
         root_after = connection.execute(
             """SELECT ds.subtree_files, ds.subtree_logical_size, ds.self_completed_at_ns
-               FROM directory_summary ds JOIN path p ON p.id=ds.path_id
+               FROM directory_summary ds JOIN path_with_display p ON p.id=ds.path_id
                WHERE p.path_display=?""",
             (str(source),),
         ).fetchone()
@@ -1413,7 +1413,7 @@ def test_scan_records_unicode_entries_and_does_not_follow_symlinks(tmp_path: Pat
         assert result["status"] == "completed"
         rows = {
             row["path_display"]: row
-            for row in connection.execute("SELECT path_display, entry_kind, logical_size FROM path")
+            for row in connection.execute("SELECT path_display, entry_kind, logical_size FROM path_with_display")
         }
         assert rows[str(document)]["entry_kind"] == "file"
         assert rows[str(document)]["logical_size"] == len("内容".encode())
@@ -1443,14 +1443,14 @@ def test_completed_scan_confirms_directory_deletion_and_reappearance_stales_hash
         result = scan_directory(connection, source)
         assert result["status"] == "completed"
         deleted = connection.execute(
-            "SELECT state, deleted_by_scope_id, deleted_at_ns FROM path WHERE path_display=?",
+            "SELECT state, deleted_by_scope_id, deleted_at_ns FROM path_with_display WHERE path_display=?",
             (str(tracked),),
         ).fetchone()
         assert deleted["state"] == "deleted"
         assert deleted["deleted_by_scope_id"] is not None
         assert deleted["deleted_at_ns"] is not None
         assert connection.execute(
-            "SELECT state FROM path WHERE path_display=?", (str(removed),)
+            "SELECT state FROM path_with_display WHERE path_display=?", (str(removed),)
         ).fetchone()["state"] == "deleted"
 
         removed.mkdir()
@@ -1458,7 +1458,7 @@ def test_completed_scan_confirms_directory_deletion_and_reappearance_stales_hash
         scan_directory(connection, source)
         restored = connection.execute(
             """SELECT p.state, p.deleted_by_scope_id, p.deleted_at_ns, h.state AS hash_state
-            FROM path p JOIN file_hash h ON h.path_id=p.id WHERE p.path_display=?""",
+            FROM path_with_display p JOIN file_hash h ON h.path_id=p.id WHERE p.path_display=?""",
             (str(tracked),),
         ).fetchone()
         assert dict(restored) == {
@@ -1490,7 +1490,7 @@ def test_partial_or_cancelled_scan_never_confirms_missing_paths(tmp_path: Path, 
         monkeypatch.setattr("flatlas.scanning.os.scandir", lambda _path: (_ for _ in ()).throw(OSError("injected")))
         assert scan_directory(connection, source)["status"] == "partial"
         assert connection.execute(
-            "SELECT state FROM path WHERE path_display=?", (str(vanished),)
+            "SELECT state FROM path_with_display WHERE path_display=?", (str(vanished),)
         ).fetchone()["state"] == "present"
 
         monkeypatch.setattr("flatlas.scanning.os.scandir", real_scandir)
@@ -1502,7 +1502,7 @@ def test_partial_or_cancelled_scan_never_confirms_missing_paths(tmp_path: Path, 
         else:
             raise AssertionError("scan should propagate cancellation")
         assert connection.execute(
-            "SELECT state FROM path WHERE path_display=?", (str(vanished),)
+            "SELECT state FROM path_with_display WHERE path_display=?", (str(vanished),)
         ).fetchone()["state"] == "present"
     finally:
         connection.close()
@@ -1535,11 +1535,11 @@ def test_first_scan_interrupt_saves_observed_paths_and_cached_totals(tmp_path: P
         ).fetchone()
         assert dict(scan) == {"status": "cancelled", "files_seen": 1, "dirs_seen": 1}
         assert connection.execute(
-            "SELECT state FROM path WHERE path_display=?", (str(payload),)
+            "SELECT state FROM path_with_display WHERE path_display=?", (str(payload),)
         ).fetchone()["state"] == "present"
         summary = connection.execute(
             """SELECT ds.subtree_files, ds.subtree_logical_size, ds.self_completed_at_ns
-               FROM directory_summary ds JOIN path p ON p.id=ds.path_id
+               FROM directory_summary ds JOIN path_with_display p ON p.id=ds.path_id
                WHERE p.path_display=?""",
             (str(source),),
         ).fetchone()
@@ -1830,7 +1830,7 @@ def test_second_interrupt_during_cancel_save_keeps_only_checkpoints(tmp_path: Pa
         assert (scan["status"], scan["files_seen"]) == ("cancelled", 0)
         assert scan["finished_at_ns"] is not None
         assert connection.execute(
-            "SELECT count(*) FROM path WHERE path_display=?", (str(payload),)
+            "SELECT count(*) FROM path_with_display WHERE path_display=?", (str(payload),)
         ).fetchone()[0] == 0
         assert connection.execute("SELECT count(*) FROM path WHERE state='deleted'").fetchone()[0] == 0
     finally:
@@ -1847,7 +1847,7 @@ def test_directory_summary_refresh_reads_directory_data_in_batches(tmp_path: Pat
     try:
         scan_directory(connection, source)
         root = connection.execute(
-            "SELECT id, root_id FROM path WHERE path_display=?", (str(source),)
+            "SELECT id, root_id FROM path_with_display WHERE path_display=?", (str(source),)
         ).fetchone()
         statements: list[str] = []
         connection.set_trace_callback(statements.append)

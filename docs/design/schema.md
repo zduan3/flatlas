@@ -1,6 +1,6 @@
 # SQLite 数据库结构
 
-> 状态：当前设计。描述 schema v7（`db.SCHEMA_VERSION = 7`）的持久化模型、迁移与查询约束；随代码更新。
+> 状态：当前设计。描述 schema v8（`db.SCHEMA_VERSION = 8`）的持久化模型、迁移与查询约束；随代码更新。
 
 ## 目标与范围
 
@@ -49,9 +49,9 @@ path.parent_path_id ── path.id
 - `directory_summary`：每个当前 root 或普通目录的派生汇总与扫描 freshness，见 [扫描与目录汇总](scanning.md)。
 - `plan` / `plan_operation`：不可变的 dry-run 候选建议快照；只创建和导出，不执行，也不构成删除或替换授权。
 
-## DDL（schema v7）
+## DDL（schema v8）
 
-以下为语义等价的可读版本；实际语句见 `db.py` 的 `DDL` 与 `DIRECTORY_SUMMARY_MIGRATION`（均使用 `IF NOT EXISTS`）。
+以下为语义等价的可读版本；实际语句见 `db.py` 的 `DDL` 与 `DIRECTORY_SUMMARY_MIGRATION`及后续 migration。
 
 ```sql
 PRAGMA application_id = 1179402580; -- "FLAT" 的固定项目标识
@@ -94,6 +94,7 @@ CREATE TABLE scan (
     max_depth          INTEGER, -- migration 6；NULL 为不限深度，0 为 --shallow
     logical_bytes_seen INTEGER NOT NULL DEFAULT 0, -- migration 7；已提交的普通文件 logical bytes
     heartbeat_at_ns    INTEGER, -- migration 7；最后一次 checkpoint 时间
+    refresh_changed    INTEGER NOT NULL DEFAULT 0 CHECK (refresh_changed IN (0, 1)), -- migration 8
     owner_json         TEXT     -- migration 7；运行进程 {host, pid_ns, pid}，用于判断 running scan 是否已被遗弃
 );
 
@@ -103,7 +104,6 @@ CREATE TABLE path (
     parent_path_id        INTEGER REFERENCES path(id),
     path_key              BLOB NOT NULL,
     name_raw              BLOB NOT NULL,
-    path_display          TEXT NOT NULL,
     entry_kind            TEXT NOT NULL CHECK (entry_kind IN ('root', 'directory', 'file', 'symlink', 'reparse', 'other')),
     state                 TEXT NOT NULL CHECK (state IN ('present', 'deleted')),
     device                INTEGER,
@@ -232,6 +232,8 @@ CREATE TABLE directory_summary (
 
 `reparse_tag` 预留给 Windows 区分 junction、symlink 和其他 reparse point；当前扫描不写入该列，reparse point 只按文件属性记为 `reparse`。默认不跟随 `symlink` 或 `reparse`。POSIX FIFO、socket、device 等存为 `other`，不建立 `file_hash`。`scan_error.operation` 的 `readlink`、`hash_quick`、`hash_full` 为预留值：当前 readlink 失败只令 `symlink_target_raw` 为 `NULL`，hash 错误写入 `file_hash.error_message`。
 
+应用的读写连接和只读连接都注册 `flatlas_display_path`。视图 `path_with_display` 用该函数从 root 原始路径、平台与 `path_key` 推导显示路径。路径 ID、唯一键和面向用户的路径排序保留原语义。读回文件系统时直接使用原始字节构造本机路径。
+
 ## 索引
 
 ```sql
@@ -246,6 +248,8 @@ CREATE INDEX idx_hash_quick ON file_hash(quick_algorithm, quick_digest)
 CREATE INDEX idx_hash_full ON file_hash(full_algorithm, full_digest)
     WHERE state = 'full_ready';
 CREATE INDEX idx_plan_root_created ON plan(root_id, created_at_ns DESC);
+CREATE INDEX idx_plan_operation_canonical_path ON plan_operation(canonical_path_id);     -- migration 8
+CREATE INDEX idx_plan_operation_replacement_path ON plan_operation(replacement_path_id); -- migration 8
 -- migration 2
 CREATE INDEX idx_directory_summary_freshness
     ON directory_summary(self_completed_at_ns, subtree_complete_through_ns);
@@ -288,7 +292,7 @@ quick hash 只用于缩小候选集；重复组必须以相同 `logical_size`、
 SELECT h.full_algorithm, h.full_digest, p.logical_size,
        group_concat(p.path_display, char(10)) AS paths
 FROM file_hash AS h
-JOIN path AS p ON p.id = h.path_id
+JOIN path_with_display AS p ON p.id = h.path_id
 WHERE h.state = 'full_ready'
   AND p.state = 'present'
   AND p.entry_kind = 'file'
@@ -319,12 +323,15 @@ HAVING count(*) > 1;
 | 5 | `record per-phase scan timing and index path parents` | 为 `scan` 增加可空 `stats_json`，并建 `idx_path_parent`（均可重复执行）|
 | 6 | `record scan depth limit` | 为 `scan` 增加可空 `max_depth`（`CHECK max_depth >= 0`）；既有扫描为 NULL |
 | 7 | `checkpoint running scans with owner and heartbeat` | 为 `scan` 增加 `logical_bytes_seen`（默认 0）、可空 `heartbeat_at_ns` 与 `owner_json`；既有扫描保持原值 |
+| 8 | `derive display paths, index plan references, and store directory refresh baselines` | 原地移除冗余的 `path.path_display`，新增派生视图与两个计划路径外键索引；记录刷新模式与可空的 `directory_summary.enumerated_mtime_ns`、`enumerated_change_time_ns` |
 
 migration 2 回填既有索引时，历史完成时间只从覆盖相应目录的 completed `scan_scope` 保守恢复；partial、failed 或 cancelled scope 不用于推断完整时间。migration 不重建或清空现有 root、path、scan、error、hash 或 plan 数据。
 
 migration 3 记录 `--refresh-before` 解析后的固定 UTC Unix 纳秒时间点。既有普通扫描保留为 `NULL`，迁移不修改 scan、scope、path、error、hash 或 plan 的既有数据。
 
 migration 4 的条目数统计 present 的全部类型（普通文件、目录、symlink、特殊条目）：`direct_entries` 是直接子项数，`subtree_entries` 是全部后代加目录自身，与 GNU `du --inodes` 一致，用于把 inode 配额归因到目录。回填按现有 path 行重算各 root 的汇总，完成时间（`self_completed_at_ns`、`subtree_complete_through_ns`、`last_completed_scan_id`）保持原值。`directory_summary` 的建表语句已包含这两列，因此从版本 1 升级时 migration 2 直接建出含条目列的表，migration 4 只补版本记录与重算。约 13 万目录的索引在 Lustre 上回填约 3 分钟。
+
+v8 在同一迁移事务内使用 `ALTER TABLE ... DROP COLUMN` 和新增 DDL，保留路径 ID 以及所有引用。既有目录基线为空，既有 scan 的 `refresh_changed` 为 0。移除列会改写 SQLite 的记录页，旧库升级时需预留 WAL 空间。
 
 ### 执行机制
 

@@ -17,7 +17,7 @@ from blake3 import blake3
 from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError
 from flatlas.lazystat import uses_lazy_metadata
-from flatlas.paths import _scope_row, _sqlite_integer
+from flatlas.paths import _scope_row, _sqlite_integer, path_from_key
 
 QUICK_SAMPLE_BYTES = 64 * 1024
 
@@ -108,7 +108,7 @@ def _validated_digest(candidate: dict[str, Any], *, full: bool) -> bytes:
     expected = _candidate_hash_basis(candidate)
     size = int(candidate["logical_size"])
     digest = blake3()
-    with Path(candidate["path_display"]).open("rb") as stream:
+    with path_from_key(candidate["root_path_raw"], candidate["path_key"]).open("rb") as stream:
         before = os.fstat(stream.fileno())
         if not stat_module.S_ISREG(before.st_mode):
             raise _HashBasisChanged
@@ -207,7 +207,7 @@ def _duplicate_hash_candidates(
             GROUP BY p.logical_size
             HAVING count(DISTINCT coalesce(p.device, '') || ':' || coalesce(p.inode, -p.id)) > 1
         )
-        SELECT p.id, p.path_display, p.logical_size, p.device, p.inode, p.mtime_ns,
+        SELECT p.id, p.path_display, p.path_key, r.root_path_raw, p.logical_size, p.device, p.inode, p.mtime_ns,
                p.change_time_ns, p.birth_time_ns, p.last_seen_scan_id,
                r.filesystem_type,
                h.state AS hash_state, h.quick_algorithm, h.quick_digest, h.quick_sample_bytes,
@@ -216,7 +216,7 @@ def _duplicate_hash_candidates(
                h.basis_size AS hash_size, h.basis_mtime_ns AS hash_mtime_ns,
                h.basis_change_time_ns AS hash_change_time_ns,
                h.basis_birth_time_ns AS hash_birth_time_ns
-        FROM descendants d CROSS JOIN path p ON d.id=p.id
+        FROM descendants d CROSS JOIN path_with_display p ON d.id=p.id
         JOIN duplicate_sizes s ON s.logical_size=p.logical_size
         JOIN root r ON r.id=p.root_id
         LEFT JOIN file_hash h ON h.path_id=p.id

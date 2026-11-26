@@ -48,7 +48,7 @@ def test_ls_other_directory_during_scan(tmp_path: Path) -> None:
         scan_directory(writer, first, on_progress=query_during_scan)
         assert queried
         assert writer.execute(
-            "SELECT state FROM path WHERE path_display=?", (str(second / "kept.bin"),)
+            "SELECT state FROM path_with_display WHERE path_display=?", (str(second / "kept.bin"),)
         ).fetchone()[0] == "present"
     finally:
         writer.close()
@@ -109,7 +109,7 @@ def test_concurrent_openers_recheck_versions_after_lock(tmp_path: Path, monkeypa
         progress = []
         connection = db.open_database(database, on_migration=progress.append)
         try:
-            assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 7
+            assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == db.SCHEMA_VERSION
             return [(event.version, event.phase) for event in progress]
         finally:
             connection.close()
@@ -141,7 +141,7 @@ def test_failed_migration_rolls_back_schema_and_preserves_data(tmp_path: Path, m
     connection = sqlite3.connect(database)
     try:
         assert connection.execute("SELECT count(*) FROM root").fetchone()[0] == 1
-        assert connection.execute("SELECT version FROM schema_migration").fetchall() == [(1,)]
+        assert connection.execute("SELECT version FROM schema_migration").fetchall() == [(1,), (8,)]
         assert connection.execute(
             "SELECT 1 FROM sqlite_schema WHERE name='directory_summary'"
         ).fetchone() is None
@@ -149,8 +149,75 @@ def test_failed_migration_rolls_back_schema_and_preserves_data(tmp_path: Path, m
         connection.close()
     connection = db.open_database(database)
     try:
-        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 7
+        assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == db.SCHEMA_VERSION
         assert connection.execute("SELECT count(*) FROM root").fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
+def test_v8_migrates_populated_index_in_place(tmp_path: Path, monkeypatch) -> None:
+    from flatlas.hashing import ensure_duplicate_hashes
+    from flatlas.planning import create_dry_run_plan
+
+    database = tmp_path / "index.sqlite"
+    source = tmp_path / "source"
+    source.mkdir()
+    for name in ("a", "b"):
+        (source / name).write_bytes(b"x" * 16384)
+    connection = db.open_database(database)
+    root_id = register_namespace(connection, discover_namespace(source))
+    scan_directory(connection, source)
+    ensure_duplicate_hashes(connection, source)
+    create_dry_run_plan(connection, root_id)
+    with connection:
+        connection.execute("DROP VIEW path_with_display")
+        connection.execute("ALTER TABLE path ADD COLUMN path_display TEXT NOT NULL DEFAULT ''")
+        connection.execute(
+            """UPDATE path SET path_display=flatlas_display_path(
+                (SELECT root_path_raw FROM root WHERE id=root_id), path_key,
+                (SELECT platform FROM root WHERE id=root_id))"""
+        )
+        connection.execute("DROP INDEX idx_plan_operation_canonical_path")
+        connection.execute("DROP INDEX idx_plan_operation_replacement_path")
+        connection.execute("ALTER TABLE scan DROP COLUMN refresh_changed")
+        connection.execute("ALTER TABLE directory_summary DROP COLUMN enumerated_mtime_ns")
+        connection.execute("ALTER TABLE directory_summary DROP COLUMN enumerated_change_time_ns")
+        connection.execute("DELETE FROM schema_migration WHERE version=8")
+    tables = ("root", "scan", "scan_scope", "scan_error", "file_hash", "plan", "plan_operation", "directory_summary")
+    columns = {
+        table: ", ".join(row["name"] for row in connection.execute(f"PRAGMA table_info({table})"))
+        for table in tables
+    }
+    before = {table: connection.execute(f"SELECT {cols} FROM {table}").fetchall() for table, cols in columns.items()}
+    paths = connection.execute("SELECT id, path_key, path_display FROM path ORDER BY id").fetchall()
+    connection.close()
+
+    migrate_v8 = db._migrate_v8
+
+    def fail_after_ddl(connection: sqlite3.Connection) -> None:
+        migrate_v8(connection)
+        raise RuntimeError("injected v8 migration failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(db, "_migrate_v8", fail_after_ddl)
+        with pytest.raises(RuntimeError, match="injected v8 migration failure"):
+            db.open_database(database)
+    with sqlite3.connect(database) as raw:
+        assert raw.execute("SELECT max(version) FROM schema_migration").fetchone()[0] == 7
+        assert raw.execute("SELECT id, path_key, path_display FROM path ORDER BY id").fetchall() == [
+            tuple(row) for row in paths
+        ]
+    connection = db.open_database(database)
+    try:
+        assert connection.execute("SELECT max(version) FROM schema_migration").fetchone()[0] == 8
+        assert connection.execute("SELECT id, path_key, path_display FROM path_with_display ORDER BY id").fetchall() == paths
+        assert "path_display" not in {row["name"] for row in connection.execute("PRAGMA table_info(path)")}
+        for table, cols in columns.items():
+            assert connection.execute(f"SELECT {cols} FROM {table}").fetchall() == before[table]
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        plan = [row[3] for row in connection.execute("EXPLAIN QUERY PLAN DELETE FROM path WHERE id=1")]
+        assert any("idx_plan_operation_canonical_path" in step for step in plan)
+        assert any("idx_plan_operation_replacement_path" in step for step in plan)
     finally:
         connection.close()
 

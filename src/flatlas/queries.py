@@ -22,7 +22,8 @@ from flatlas.paths import (
     discover_namespace,
     display_path,
     get_root,
-    indexed_key,
+    indexed_display_path,
+    indexed_keys,
     parent_key,
     path_key,
     scope_path,
@@ -146,17 +147,14 @@ def list_scans(
     where = ""
     if scope is not None:
         selected_path = scope.expanduser().resolve()
-        key = indexed_key(connection, selected_path)
-        indexed = None if key is None else connection.execute(
-            "SELECT root_id, path_key FROM path WHERE root_id=? AND path_key=? AND path_display=?",
-            (*key, display_path(selected_path)),
-        ).fetchone()
-        if indexed is None:
+        indexed = None
+        for key in indexed_keys(connection, selected_path):
             indexed = connection.execute(
-                """SELECT root_id, path_key FROM path
-                   WHERE path_display=? ORDER BY state='present' DESC LIMIT 1""",
-                (display_path(selected_path),),
+                "SELECT root_id, path_key FROM path WHERE root_id=? AND path_key=?",
+                key,
             ).fetchone()
+            if indexed is not None:
+                break
         if indexed is None:
             namespace = discover_namespace(selected_path)
             root = get_root(connection, namespace)
@@ -187,7 +185,7 @@ def list_scans(
             FROM scan s
             JOIN root r ON r.id=s.root_id
             JOIN scan_scope ss ON ss.scan_id=s.id
-            LEFT JOIN path p
+            LEFT JOIN path_with_display p
               ON p.root_id=ss.root_id AND p.path_key=ss.scope_path_key
             {where}
             ORDER BY s.id DESC, ss.id
@@ -220,7 +218,7 @@ def scan_info(connection: sqlite3.Connection, scan_id: int) -> dict[str, Any]:
                   p.path_display AS scope,
                   hex(ss.scope_path_key) AS scope_path_key_hex
            FROM scan_scope ss
-           LEFT JOIN path p
+           LEFT JOIN path_with_display p
              ON p.root_id=ss.root_id AND p.path_key=ss.scope_path_key
            WHERE ss.scan_id=? ORDER BY ss.id""",
         (scan_id,),
@@ -231,7 +229,7 @@ def scan_info(connection: sqlite3.Connection, scan_id: int) -> dict[str, Any]:
                   e.operation, e.error_code, e.message, e.occurred_at_ns
            FROM scan_error e
            JOIN scan_scope ss ON ss.id=e.scan_scope_id
-           LEFT JOIN path p
+           LEFT JOIN path_with_display p
              ON p.root_id=ss.root_id AND p.path_key=e.path_key
            WHERE ss.scan_id=? ORDER BY e.id""",
         (scan_id,),
@@ -271,10 +269,10 @@ def list_child_directories(
     indexed_rows = [] if parent is None else connection.execute(
         """SELECT id, path_key, path_display, entry_kind, state, logical_size, allocated_size,
                   mtime_ns, last_seen_scan_id, first_seen_scan_id
-        FROM path WHERE parent_path_id=? AND state='present'""",
+        FROM path_with_display WHERE parent_path_id=? AND state='present'""",
         (parent["id"],),
     ).fetchall()
-    indexed_by_path = {_normalized_display(row["path_display"]): row for row in indexed_rows}
+    indexed_by_path = {_normalized_key(row["path_key"]): row for row in indexed_rows}
 
     usage_rows = [] if parent is None else connection.execute(
         """SELECT p.id, ds.subtree_files AS files, ds.subtree_entries AS entries,
@@ -303,9 +301,10 @@ def list_child_directories(
     ).fetchall()
 
     result: list[dict[str, Any]] = []
-    actual_keys: set[str] = set()
+    actual_keys: set[bytes] = set()
     for actual_path in actual_paths:
-        normalized = _normalized_display(display_path(actual_path))
+        actual_key = path_key(namespace, actual_path)
+        normalized = _normalized_key(actual_key)
         actual_keys.add(normalized)
         indexed = indexed_by_path.get(normalized)
         try:
@@ -317,7 +316,7 @@ def list_child_directories(
             connection,
             indexed,
             observed.kind,
-            path_key(namespace, actual_path),
+            actual_key,
             scopes,
             usage,
             parent_summary,
@@ -329,7 +328,7 @@ def list_child_directories(
         ))
 
     for indexed in indexed_rows:
-        if _normalized_display(indexed["path_display"]) not in actual_keys:
+        if _normalized_key(indexed["path_key"]) not in actual_keys:
             result.append(_child_record(
                 str(indexed["path_display"]), str(indexed["entry_kind"]), GONE, indexed["logical_size"],
                 indexed["allocated_size"], indexed["mtime_ns"], usage_by_id.get(indexed["id"]), parent_summary,
@@ -337,8 +336,8 @@ def list_child_directories(
     return sorted(result, key=lambda row: os.path.normcase(os.path.basename(str(row["path"]))))
 
 
-def _normalized_display(path_display: str) -> str:
-    return os.path.normcase(os.path.normpath(path_display))
+def _normalized_key(key: bytes) -> bytes:
+    return os.fsencode(os.path.normcase(os.fsdecode(key))) if os.name == "nt" else key
 
 
 def _scope_covers(scope: sqlite3.Row, entry_key: bytes, entry_kind: str) -> bool:
@@ -520,7 +519,7 @@ def _descendant_directories(
             WHERE p.state='present' AND p.entry_kind='directory' AND t.depth < ?
         )
         SELECT t.depth, {_SCOPE_COLUMNS}
-        FROM tree t CROSS JOIN path p ON p.id=t.id JOIN root r ON r.id=p.root_id
+        FROM tree t CROSS JOIN path_with_display p ON p.id=t.id JOIN root r ON r.id=p.root_id
         WHERE t.depth > 0 ORDER BY p.path_key""",
         (selected["id"], max_depth),
     ).fetchall()
@@ -649,7 +648,7 @@ def largest_files(
     upper = key[:-1] + b"\x01" if key else None
     rows = connection.execute(
         f"""SELECT {_SCOPE_COLUMNS}
-        FROM path p JOIN root r ON r.id=p.root_id
+        FROM path_with_display p JOIN root r ON r.id=p.root_id
         WHERE p.root_id=? AND p.path_key>=? {'' if upper is None else 'AND p.path_key<?'}
           AND p.state='present' AND p.entry_kind='file'
         ORDER BY p.logical_size DESC, p.path_display LIMIT ?""",
@@ -683,7 +682,7 @@ def duplicate_groups(
                 SELECT p.id FROM descendants d CROSS JOIN path p ON p.parent_path_id=d.id
             ) SELECT h.full_algorithm, h.full_digest, p.logical_size, p.id, p.root_id, p.path_display,
                    p.device, p.inode, p.nlink
-            FROM file_hash h JOIN path p ON p.id=h.path_id
+            FROM file_hash h JOIN path_with_display p ON p.id=h.path_id
             WHERE h.state='full_ready' AND p.state='present' AND p.entry_kind='file'
               AND p.logical_size > 0
               AND (p.allocated_size IS NULL OR p.allocated_size > 0)
@@ -697,7 +696,7 @@ def duplicate_groups(
         rows = connection.execute(
             f"""SELECT h.full_algorithm, h.full_digest, p.logical_size, p.id, p.root_id, p.path_display,
                    p.device, p.inode, p.nlink
-            FROM file_hash h JOIN path p ON p.id=h.path_id
+            FROM file_hash h JOIN path_with_display p ON p.id=h.path_id
             WHERE h.state='full_ready' AND p.state='present' AND p.entry_kind='file'
               AND p.logical_size > 0 {where}
               AND (p.allocated_size IS NULL OR p.allocated_size > 0)
@@ -755,7 +754,7 @@ class FindHit:
 
 
 _FIND_COLUMNS = "p.id, p.path_key, p.name_raw, p.entry_kind, p.mode, p.state"
-_FIND_METADATA_COLUMNS = f"""{_FIND_COLUMNS}, p.parent_path_id, p.path_display, p.logical_size,
+_FIND_METADATA_COLUMNS = f"""{_FIND_COLUMNS}, p.parent_path_id, p.logical_size,
     p.allocated_size, p.mtime_ns, p.first_seen_scan_id, p.last_seen_scan_id,
     ds.path_id AS summary_id, ds.subtree_files, ds.subtree_entries, ds.subtree_logical_size,
     ds.subtree_allocated_size, ds.self_completed_at_ns, ds.subtree_complete_through_ns,
@@ -857,7 +856,8 @@ def find_paths(
                 parent = parent_summary(row["parent_path_id"])
                 complete = None if parent is None else parent["self_completed_at_ns"]
             record = entry_record(
-                path=str(row["path_display"]), kind=kind, status=status_of(), logical_size=size,
+                path=indexed_display_path(selected["root_path_raw"], row["path_key"], selected["platform"]),
+                kind=kind, status=status_of(), logical_size=size,
                 allocated_size=allocated, files=files, entries=entries, mtime_ns=row["mtime_ns"],
                 complete_through_ns=complete, depth=depth,
             )

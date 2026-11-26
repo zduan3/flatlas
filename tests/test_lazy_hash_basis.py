@@ -41,7 +41,7 @@ def _index_pair(tmp_path: Path, fs_type: str):
 
 
 def _indexed_mtimes(connection) -> dict[str, int]:
-    rows = connection.execute("SELECT path_display, mtime_ns FROM path WHERE entry_kind='file'")
+    rows = connection.execute("SELECT path_display, mtime_ns FROM path_with_display WHERE entry_kind='file'")
     return {Path(row["path_display"]).name: int(row["mtime_ns"]) for row in rows}
 
 

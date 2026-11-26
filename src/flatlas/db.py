@@ -10,7 +10,7 @@ from pathlib import Path
 
 from flatlas.errors import FlatlasError
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 CACHE_SIZE_KIB = 256 * 1024
 
 DDL = """
@@ -174,6 +174,7 @@ def open_database(
     connection = sqlite3.connect(location)
     connection.row_factory = sqlite3.Row
     try:
+        _register_path_functions(connection)
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
         # The default 2 MiB page cache makes per-entry path_key lookups re-read
@@ -238,6 +239,7 @@ def _connect_readonly(uri: str) -> sqlite3.Connection:
     connection = sqlite3.connect(uri, uri=True)
     connection.row_factory = sqlite3.Row
     try:
+        _register_path_functions(connection)
         connection.execute("PRAGMA busy_timeout = 5000")
         connection.execute(f"PRAGMA cache_size = -{CACHE_SIZE_KIB}")
         connection.execute("SELECT count(*) FROM sqlite_schema").fetchone()
@@ -245,6 +247,12 @@ def _connect_readonly(uri: str) -> sqlite3.Connection:
         connection.close()
         raise
     return connection
+
+
+def _register_path_functions(connection: sqlite3.Connection) -> None:
+    from flatlas.paths import indexed_display_path
+
+    connection.create_function("flatlas_display_path", 3, indexed_display_path, deterministic=True)
 
 
 def migrate(
@@ -398,3 +406,29 @@ def _apply_migrations(
         )
         if existing_database and on_migration is not None:
             completed.append(MigrationProgress(7, CHECKPOINT_MIGRATION_DESCRIPTION, "completed"))
+
+    if connection.execute("SELECT 1 FROM schema_migration WHERE version = 8").fetchone() is None:
+        description = "derive display paths, index plan references, and store directory refresh baselines"
+        if existing_database and on_migration is not None:
+            on_migration(MigrationProgress(8, description, "started"))
+        _migrate_v8(connection)
+        connection.execute(
+            "INSERT INTO schema_migration(version, applied_at_ns, description) VALUES (?, ?, ?)",
+            (8, now_ns(), description),
+        )
+        if existing_database and on_migration is not None:
+            completed.append(MigrationProgress(8, description, "completed"))
+
+
+def _migrate_v8(connection: sqlite3.Connection) -> None:
+    connection.execute("ALTER TABLE path DROP COLUMN path_display")
+    _execute_ddl(connection, """
+        CREATE VIEW path_with_display AS
+        SELECT p.*, flatlas_display_path(r.root_path_raw, p.path_key, r.platform) AS path_display
+        FROM path p JOIN root r ON r.id=p.root_id;
+        CREATE INDEX idx_plan_operation_canonical_path ON plan_operation(canonical_path_id);
+        CREATE INDEX idx_plan_operation_replacement_path ON plan_operation(replacement_path_id);
+        ALTER TABLE scan ADD COLUMN refresh_changed INTEGER NOT NULL DEFAULT 0 CHECK (refresh_changed IN (0, 1));
+        ALTER TABLE directory_summary ADD COLUMN enumerated_mtime_ns INTEGER;
+        ALTER TABLE directory_summary ADD COLUMN enumerated_change_time_ns INTEGER;
+    """)

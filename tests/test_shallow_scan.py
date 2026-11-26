@@ -40,7 +40,7 @@ def indexed(tmp_path: Path):
 
 
 def _state(connection, path: Path) -> str | None:
-    row = connection.execute("SELECT state FROM path WHERE path_display=?", (str(path),)).fetchone()
+    row = connection.execute("SELECT state FROM path_with_display WHERE path_display=?", (str(path),)).fetchone()
     return None if row is None else row["state"]
 
 

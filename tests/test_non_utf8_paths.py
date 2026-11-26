@@ -56,7 +56,7 @@ def test_scan_indexes_non_utf8_names_and_completes(tmp_path: Path) -> None:
         assert result["status"] == "completed"
         assert result["files_seen"] == 2
         row = connection.execute(
-            "SELECT path_display, state FROM path WHERE path_key=?", (path_key(namespace, bad_file),)
+            "SELECT path_display, state FROM path_with_display WHERE path_key=?", (path_key(namespace, bad_file),)
         ).fetchone()
         assert row["state"] == "present"
         assert row["path_display"].endswith("bad\\xffname")

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import errno
+import ntpath
 import os
+import posixpath
 import sqlite3
 import sys
 from collections.abc import Callable, Iterator, Sequence
@@ -48,6 +50,20 @@ def display_path(value: Path | str) -> str:
     are shown as ``\\xNN`` escapes instead of aborting the transaction.
     """
     return os.fsencode(str(value)).decode("utf-8", "backslashreplace")
+
+
+def path_from_key(root_raw: bytes, key: bytes) -> Path:
+    """Reconstruct a native filesystem path without using escaped display text."""
+    parts = key[:-1].split(b"\0") if key else ()
+    return Path(os.fsdecode(root_raw), *(os.fsdecode(part) for part in parts))
+
+
+def indexed_display_path(root_raw: bytes, key: bytes, platform: str) -> str:
+    """Render a stored path using its namespace's platform and raw bytes."""
+    path_module = ntpath if platform == "windows" else posixpath
+    relative = key[:-1].replace(b"\0", path_module.sep.encode())
+    raw = path_module.join(root_raw, relative) if key else root_raw
+    return raw.decode("utf-8", "backslashreplace")
 
 
 def display_text(value: object) -> str:
@@ -196,12 +212,14 @@ def _memo_realpath(path: str, memo: dict[str, str]) -> str:
 def indexed_key(connection: sqlite3.Connection, value: Path) -> tuple[int, bytes] | None:
     """``(root_id, path_key)`` of an absolute path under the deepest registered root.
 
-    Computed from the root table without touching the filesystem, so lookups
-    use the ``(root_id, path_key)`` unique index; ``path_display`` has no index
-    and filtering on it scans every path row. Returns ``None`` if no registered
-    root contains ``value``.
+    Computed from the root table without touching the filesystem.
     """
-    best: tuple[int, int] | None = None
+    return next(iter(indexed_keys(connection, value)), None)
+
+
+def indexed_keys(connection: sqlite3.Connection, value: Path) -> list[tuple[int, bytes]]:
+    """Candidate identities, deepest first, including enclosing mount indexes."""
+    matches_by_depth: list[tuple[int, int]] = []
     for root in connection.execute("SELECT id, root_path_raw, platform, case_sensitive FROM root"):
         try:
             root_text = os.fsdecode(root["root_path_raw"])
@@ -219,38 +237,32 @@ def indexed_key(connection: sqlite3.Connection, value: Path) -> tuple[int, bytes
             )
         else:
             matches = prefix == root_parts
-        if matches and (best is None or len(root_parts) > best[1]):
-            best = (int(root["id"]), len(root_parts))
-    if best is None:
-        return None
-    return best[0], b"".join(os.fsencode(part) + b"\0" for part in value.parts[best[1]:])
+        if matches:
+            matches_by_depth.append((len(root_parts), int(root["id"])))
+    return [
+        (root_id, b"".join(os.fsencode(part) + b"\0" for part in value.parts[depth:]))
+        for depth, root_id in sorted(matches_by_depth, key=lambda match: -match[0])
+    ]
 
 
 _SCOPE_ROW_SELECT = """SELECT p.id, p.root_id, p.path_key, p.parent_path_id, p.state,
                   p.last_seen_scan_id, p.first_seen_scan_id, p.path_display, p.entry_kind,
                   p.logical_size, p.allocated_size, p.mtime_ns,
-                  r.root_path_display
-        FROM path p JOIN root r ON r.id=p.root_id"""
+                  r.root_path_display, r.root_path_raw, r.platform
+        FROM path_with_display p JOIN root r ON r.id=p.root_id"""
 
 
 def _scope_row(connection: sqlite3.Connection, value: Path | str, *, follow: bool = True) -> sqlite3.Row:
     selected = scope_path(value, follow=follow)
     display = display_path(selected)
-    key = indexed_key(connection, selected)
-    row = None
-    if key is not None:
+    for key in indexed_keys(connection, selected):
         row = connection.execute(
-            f"{_SCOPE_ROW_SELECT} WHERE p.root_id=? AND p.path_key=? AND p.state='present' AND p.path_display=?",
-            (*key, display),
+            f"{_SCOPE_ROW_SELECT} WHERE p.root_id=? AND p.path_key=? AND p.state='present'",
+            key,
         ).fetchone()
-    if row is None:
-        # Slow path (full scan) for names whose display text differs from the raw key.
-        row = connection.execute(
-            f"{_SCOPE_ROW_SELECT} WHERE p.path_display=? AND p.state='present'", (display,)
-        ).fetchone()
-    if row is None:
-        raise PathError(f"path is not currently indexed: {display}")
-    return row
+        if row is not None:
+            return row
+    raise PathError(f"path is not currently indexed: {display}")
 
 
 def _lexical_absolute_path(value: Path) -> Path:
@@ -348,18 +360,15 @@ def _delete_paths_and_plans(
 def _removal_row(connection: sqlite3.Connection, value: Path) -> sqlite3.Row:
     absolute = _lexical_absolute_path(value)
     display = display_path(absolute)
-    selected = None
     columns = "id, root_id, parent_path_id, path_key"
-    if (key := indexed_key(connection, absolute)) is not None:
+    for key in indexed_keys(connection, absolute):
         selected = connection.execute(
             f"SELECT {columns} FROM path WHERE root_id=? AND path_key=?",
             key,
         ).fetchone()
-    if selected is None:
-        selected = connection.execute(f"SELECT {columns} FROM path WHERE path_display=?", (display,)).fetchone()
-    if selected is None:
-        raise PathError(f"path is not indexed: {display}")
-    return selected
+        if selected is not None:
+            return selected
+    raise PathError(f"path is not indexed: {display}")
 
 
 def _key_range(

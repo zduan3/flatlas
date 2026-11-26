@@ -80,7 +80,7 @@ def test_rm_deleted_purges_only_tombstones_in_the_selected_directory(tmp_path: P
         assert json.loads(result.stdout) == {"path": str(target), "paths_removed": 4, "plans_removed": 1}
         assert [row["id"] for row in connection.execute("SELECT id FROM plan")] == [kept_plan]
         assert [row["path_display"] for row in connection.execute(
-            "SELECT path_display FROM path WHERE state='deleted'"
+            "SELECT path_display FROM path_with_display WHERE state='deleted'"
         )] == [str(neighbor / "stale.bin")]
         assert connection.execute("SELECT count(*) FROM file_hash").fetchone()[0] == 2
         assert retained_rows() == before
@@ -126,7 +126,7 @@ def test_purge_rolls_back_if_a_retained_path_references_a_tombstone(tmp_path: Pa
         register_namespace(connection, discover_namespace(source))
         scan_directory(connection, source)
         with connection:
-            connection.execute("UPDATE path SET state='deleted' WHERE path_display=?", (str(branch),))
+            connection.execute("UPDATE path SET state='deleted' WHERE id=(SELECT id FROM path_with_display WHERE path_display=?)", (str(branch),))
         before = connection.execute("SELECT * FROM path ORDER BY id").fetchall()
         with pytest.raises(FlatlasError, match="retained paths reference"):
             remove_deleted_descendants(connection, source)
@@ -163,7 +163,7 @@ def test_indexed_key_skips_non_utf8_roots_and_respects_case_sensitivity(tmp_path
         scan_directory(connection, source)
 
         assert indexed_key(connection, source) is not None
-        connection.execute(
+        sensitive_id = connection.execute(
             """INSERT INTO root(root_path_raw, root_path_display, platform, namespace_kind,
                namespace_id_raw, filesystem_type, case_sensitive, created_at_ns, updated_at_ns)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -178,8 +178,10 @@ def test_indexed_key_skips_non_utf8_roots_and_respects_case_sensitivity(tmp_path
                 1,
                 1,
             ),
-        )
-        assert indexed_key(connection, Path("/mnt/caseroot/file")) is None
+        ).lastrowid
+        assert indexed_key(connection, Path("/mnt/CaseRoot/file")) == (sensitive_id, b"file\x00")
+        mismatched = indexed_key(connection, Path("/mnt/caseroot/file"))
+        assert mismatched is None or mismatched[0] != sensitive_id
         insensitive_id = connection.execute(
             """INSERT INTO root(root_path_raw, root_path_display, platform, namespace_kind,
                namespace_id_raw, filesystem_type, case_sensitive, created_at_ns, updated_at_ns)

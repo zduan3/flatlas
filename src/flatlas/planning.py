@@ -51,7 +51,7 @@ def plan_operations(connection: sqlite3.Connection, plan_id: str) -> list[dict[s
         """SELECT 'operation' AS type, po.ordinal, po.action, c.path_display AS canonical_path, r.path_display AS replacement_path,
         po.expected_size, hex(po.expected_full_digest) AS expected_digest, po.expected_algorithm,
         po.preconditions_json, po.status FROM plan_operation po
-        JOIN path c ON c.id=po.canonical_path_id JOIN path r ON r.id=po.replacement_path_id
+        JOIN path_with_display c ON c.id=po.canonical_path_id JOIN path_with_display r ON r.id=po.replacement_path_id
         WHERE po.plan_id=? ORDER BY po.ordinal""", (plan_id,)
     ).fetchall()
     return [dict(row) for row in rows]

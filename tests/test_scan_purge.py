@@ -77,10 +77,10 @@ def test_purge_removes_missing_rows_and_tombstones_but_keeps_observations(tmp_pa
         assert info["scopes"][0]["status"] == "completed"
         assert scan_info(connection, first_id)["status"] == "completed"
         assert [row["path_display"] for row in connection.execute(
-            "SELECT path_display FROM path WHERE state='deleted'"
+            "SELECT path_display FROM path_with_display WHERE state='deleted'"
         )] == [str(outside)]
         assert connection.execute("SELECT count(*) FROM path WHERE parent_path_id IN ("
-                                  "SELECT id FROM path WHERE path_display=?)", (str(target),)).fetchone()[0] == 3
+                                  "SELECT id FROM path_with_display WHERE path_display=?)", (str(target),)).fetchone()[0] == 3
         assert connection.execute("SELECT * FROM file_hash ORDER BY path_id").fetchall() == kept_hashes
         assert {row["id"] for row in connection.execute("SELECT id FROM plan")} == {kept_plan}
         assert kept_plan != removed_plan
@@ -112,7 +112,7 @@ def missing_tree(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
 
 def _states(connection: sqlite3.Connection, *paths: Path) -> list[str]:
     return [
-        connection.execute("SELECT state FROM path WHERE path_display=?", (str(path),)).fetchone()[0]
+        connection.execute("SELECT state FROM path_with_display WHERE path_display=?", (str(path),)).fetchone()[0]
         for path in paths
     ]
 
@@ -142,7 +142,7 @@ def test_purge_rolls_back_deleted_rows_when_finalizing_fails(missing_tree, monke
 
     def stop_after_delete(connection, *_args, **_kwargs):
         assert connection.execute(
-            "SELECT count(*) FROM path WHERE path_display IN (?, ?)", (str(old), str(missing)),
+            "SELECT count(*) FROM path_with_display WHERE path_display IN (?, ?)", (str(old), str(missing)),
         ).fetchone()[0] == 0
         with closing(open_database_readonly(db)) as reader:
             assert _states(reader, old, missing, observed) == ["deleted", "present", "present"]
@@ -235,7 +235,7 @@ def test_purge_can_retry_after_an_abandoned_overlap(missing_tree, monkeypatch) -
         assert retry["status"] == "completed"
         assert (retry["paths_deleted"], retry["paths_purged"]) == (1, 2)
         assert scan_info(connection, 3)["scopes"][0]["status"] == "cancelled"
-        assert connection.execute("SELECT count(*) FROM path WHERE path_display IN (?, ?)", (str(old), str(missing))).fetchone()[0] == 0
+        assert connection.execute("SELECT count(*) FROM path_with_display WHERE path_display IN (?, ?)", (str(old), str(missing))).fetchone()[0] == 0
 
 
 @pytest.mark.parametrize("ancestor_scan", [True, False])

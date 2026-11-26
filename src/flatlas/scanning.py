@@ -30,6 +30,7 @@ from flatlas.paths import (
     display_text,
     get_root,
     parent_key,
+    path_from_key,
     path_key,
 )
 from flatlas.summaries import refresh_directory_summaries, refresh_finished_directories
@@ -171,16 +172,16 @@ def upsert_path(
         (root_id, item.key),
     ).fetchone()
     values = (
-        parent_id, item.name, display_path(item.path), item.kind, item.device, item.inode, item.mode,
+        parent_id, item.name, item.kind, item.device, item.inode, item.mode,
         item.uid, item.gid, item.nlink, item.logical_size, item.allocated_size, item.mtime_ns,
         item.change_time_ns, item.birth_time_ns, item.symlink_target, scan_id, root_id, item.key,
     )
     if old is None:
         cursor = connection.execute(
-            """INSERT INTO path(parent_path_id, name_raw, path_display, entry_kind, state,
+            """INSERT INTO path(parent_path_id, name_raw, entry_kind, state,
             device, inode, mode, uid, gid, nlink, logical_size, allocated_size, mtime_ns,
             change_time_ns, birth_time_ns, symlink_target_raw, first_seen_scan_id, last_seen_scan_id,
-            root_id, path_key) VALUES (?, ?, ?, ?, 'present', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            root_id, path_key) VALUES (?, ?, ?, 'present', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             values[:-2] + (scan_id, root_id, item.key),
         )
         return _last_insert_id(cursor)
@@ -198,7 +199,7 @@ def upsert_path(
         # not merely to a path that may later be reused.
         connection.execute("DELETE FROM directory_summary WHERE path_id=?", (path_id,))
     connection.execute(
-        """UPDATE path SET parent_path_id=?, name_raw=?, path_display=?, entry_kind=?, state='present',
+        """UPDATE path SET parent_path_id=?, name_raw=?, entry_kind=?, state='present',
         device=?, inode=?, mode=?, uid=?, gid=?, nlink=?, logical_size=?, allocated_size=?, mtime_ns=?,
         change_time_ns=?, birth_time_ns=?, symlink_target_raw=?, last_seen_scan_id=?,
         deleted_by_scope_id=NULL, deleted_at_ns=NULL WHERE root_id=? AND path_key=?""",
@@ -345,7 +346,7 @@ def _indexed_directories(
     parent_id: int,
 ) -> list[sqlite3.Row]:
     return connection.execute(
-        """SELECT p.id, p.path_key, p.path_display,
+        """SELECT p.id, p.path_key,
                   ds.subtree_complete_through_ns
            FROM path p LEFT JOIN directory_summary ds ON ds.path_id=p.id
            WHERE p.root_id=? AND p.parent_path_id=? AND p.state='present'
@@ -450,7 +451,7 @@ def resume_selection_from_scan(connection: sqlite3.Connection, scan_id: int) -> 
         """SELECT s.id, s.status, s.started_at_ns, s.refresh_before_ns, s.max_depth,
                   s.heartbeat_at_ns, s.owner_json, p.path_display AS scope
            FROM scan s JOIN scan_scope ss ON ss.scan_id=s.id
-           LEFT JOIN path p
+           LEFT JOIN path_with_display p
              ON p.root_id=ss.root_id AND p.path_key=ss.scope_path_key
            WHERE s.id=? ORDER BY ss.id""",
         (scan_id,),
@@ -711,7 +712,7 @@ def scan_directory(
                     child_subtree_time = child["subtree_complete_through_ns"]
                     if child_subtree_time is not None and int(child_subtree_time) >= refresh_before_ns:
                         continue
-                    child_path = Path(str(child["path_display"]))
+                    child_path = path_from_key(os.fsencode(namespace.path), child["path_key"])
                     try:
                         with timer.phase("observe"):
                             child_observed = _observation(

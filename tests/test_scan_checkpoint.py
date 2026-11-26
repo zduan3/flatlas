@@ -48,9 +48,7 @@ def _tree(tmp_path: Path, directories: int = 2) -> tuple[Path, Path]:
 
 
 def _reader(database: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(database)
-    connection.row_factory = sqlite3.Row
-    return connection
+    return open_database(database)
 
 
 def test_checkpoints_are_visible_to_other_connections(tmp_path: Path, every_entry) -> None:
@@ -68,7 +66,7 @@ def test_checkpoints_are_visible_to_other_connections(tmp_path: Path, every_entr
             # The first directory finished and its summary was committed with it.
             seen["done"] = reader.execute(
                 """SELECT ds.subtree_files FROM directory_summary ds JOIN path p ON p.id=ds.path_id
-                   WHERE p.parent_path_id=(SELECT id FROM path WHERE path_display=?)
+                   WHERE p.parent_path_id=(SELECT id FROM path_with_display WHERE path_display=?)
                      AND ds.last_completed_scan_id=(SELECT id FROM scan)""",
                 (str(source),),
             ).fetchall()
@@ -225,7 +223,7 @@ def test_interrupt_while_saving_a_complete_scan_confirms_nothing(tmp_path: Path)
         assert latest["status"] == "cancelled"
         assert scan_info(connection, latest["id"])["stats"]["paths_deleted"] == 0
         assert connection.execute(
-            "SELECT state FROM path WHERE path_display=?", (str(source / "d1" / "f.bin"),)
+            "SELECT state FROM path_with_display WHERE path_display=?", (str(source / "d1" / "f.bin"),)
         ).fetchone()["state"] == "present"
     finally:
         connection.close()
