@@ -54,12 +54,12 @@ Python 3.12 实现按职责拆分：
 
 ## 跨平台边界
 
-Windows 与 Linux 提供相同的常规只读能力：完整/局部扫描、SQLite 离线查询、空间分析、分级 hash、导出和 dry-run plan。已验收范围限定为当前平台可正常表示的常规 Unicode 路径和不跨文件系统的目录 scope；Linux 非 UTF-8 文件名可被扫描和确认删除，但按显示路径回到文件系统的操作（hash、按路径查询）尚未覆盖；Windows Volume GUID、完整长路径/reparse tag 和复杂 mount/bind mount 策略尚未实现。平台差异不得改变“未完整覆盖即不判定删除”的一致性语义。
+Windows 与 Linux 提供相同的常规只读能力：完整/局部扫描、SQLite 离线查询、空间分析、分级 hash、导出和 dry-run plan。已验收范围限定为当前平台可正常表示的常规 Unicode 路径和不跨文件系统的目录 scope；Linux 非 UTF-8 文件名的扫描、删除确认与 hash 使用原始字节；Windows Volume GUID、完整长路径/reparse tag 和复杂 mount/bind mount 策略尚未实现。平台差异不得改变“未完整覆盖即不判定删除”的一致性语义。
 
 | 方面 | Windows | Linux |
 |---|---|---|
 | 扫描命名空间 | 每个盘符作为 scan namespace，以路径字节标识；未采集 Volume GUID | 路径所在的最近挂载点作为 scan namespace；扫描不检查子目录是否跨 mount |
-| 路径 | 验收常规 Unicode；完整长路径和 `\\?\\` 前缀未适配 | 验收常规 Unicode；非 UTF-8 名称以原始字节为身份入库，显示字符串中不可解码的字节写作 `\xNN`，扫描不会因此中止；按显示路径 hash 或查询这类条目尚未支持 |
+| 路径 | 验收常规 Unicode；完整长路径和 `\\?\\` 前缀未适配 | 验收常规 Unicode；非 UTF-8 名称以原始字节为身份入库，显示字符串中不可解码的字节写作 `\xNN`，hash 通过原始字节打开文件，PATH 参数匹配原始名称 |
 | 特殊目录项 | 默认不跟随 symlink、junction 和其他 reparse point | 默认不跟随 symlink；FIFO、socket、device 等记录为 `other` 且不 hash |
 | metadata | owner/group/mode、POSIX change time 可为空；逻辑大小可靠，allocated size 见 [平台差异](platform.md) | `st_dev`/`st_ino`、mode、uid/gid 与 POSIX change time 可用；allocated size 由 `st_blocks * 512` 得出 |
 | 增量来源 | 定期扫描指定子树，不使用 USN Journal | 定期扫描指定子树，不使用 inotify |

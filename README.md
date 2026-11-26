@@ -61,7 +61,7 @@ flatlas du [PATH ... | --files0-from FILE] [-D] [-d N] [--sort KEY] [-n N] [--fr
 flatlas find [--db DB] [-H] [--format table|jsonl|csv] [PATH ...] [-name|-iname|-path|-ipath|-type|-size|-mtime|-entries|-status|-maxdepth|-mindepth|-prune|-print|-print0|! -o -a ( )]
 flatlas ls [PATH] [--format table|jsonl|csv]
 flatlas largest [PATH] [-n N|--limit N] [--format table|jsonl|csv]
-flatlas dupes [PATH] [--absolute] [--min-size B] [--max-size B] [--min-count N] [--min-savings B] [-n N] [--format table|jsonl|csv]
+flatlas dupes [PATH] [--absolute] [--min-size B] [--max-size B] [--min-count N] [--min-savings B] [-n N] [--format table|jsonl|csv] [--report FILE]
 flatlas plan create --root PATH
 flatlas plan show [PLAN_ID] [--format table|jsonl|csv]
 ```
@@ -157,6 +157,12 @@ scan 仍存在的父目录    → completed 后才将缺失路径标记 deleted
 - `flatlas rm PATH` 即使只有一个 PATH 也会立即移除整个索引子树。想先看规模，用 `flatlas du PATH`。
 
 ## 实际清理
+
+`dupes` 的表格和 JSONL 包含本次 hash 统计与逐文件异常。导出 CSV 时可以用 `--report FILE` 另存 JSONL 摘要和明细：
+
+```powershell
+flatlas dupes D:\Archive --format csv --output duplicates.csv --report hash-report.jsonl
+```
 
 `dupes` 支持以下筛选参数，大小与节省量使用字节整数：
 

@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from flatlas.db import open_database
+from flatlas.hashing import ensure_duplicate_hashes
 from flatlas.paths import (
     discover_namespace,
     display_path,
@@ -20,6 +21,7 @@ from flatlas.paths import (
     register_namespace,
     remove_deleted_descendants,
 )
+from flatlas.queries import duplicate_groups
 from flatlas.scanning import scan_directory
 
 pytestmark = [
@@ -40,6 +42,29 @@ def _make(parent: Path, raw_name: bytes, *, directory: bool = False) -> Path:
 
 def test_display_path_escapes_only_undecodable_bytes() -> None:
     assert display_path(Path(os.fsdecode(b"/a/caf\xc3\xa9/bad\xffname"))) == "/a/café/bad\\xffname"
+
+
+@pytest.mark.hash
+def test_hash_uses_raw_names_even_when_display_paths_collide(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    raw = _make(source, b"file\xff")
+    literal = _make(source, b"file\\xff")
+    literal.write_bytes(b"another")
+    peer = _make(source, b"peer")
+    assert display_path(raw) == display_path(literal)
+    namespace = discover_namespace(source)
+    with closing(open_database(tmp_path / "index.sqlite")) as connection:
+        register_namespace(connection, namespace)
+        scan_directory(connection, source)
+        summary = ensure_duplicate_hashes(connection, source)
+        assert summary.complete and summary.content_bytes_read == 21
+        [group] = duplicate_groups(connection, scope=source)
+        members = {
+            connection.execute("SELECT path_key FROM path WHERE id=?", (row["id"],)).fetchone()[0]
+            for row in group["paths"]
+        }
+        assert members == {path_key(namespace, raw), path_key(namespace, peer)}
 
 
 def test_scan_indexes_non_utf8_names_and_completes(tmp_path: Path) -> None:

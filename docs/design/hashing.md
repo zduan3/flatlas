@@ -51,11 +51,15 @@
 
 ## 输出
 
-- **表格**：首行汇总筛选后显示的组数、冗余副本数（`inodes - 1` 之和）与理论节省量，再逐组列出大小 × 路径数（与 inode 数不同时附 `(N inodes)`）、节省量、`has links outside this group`（`external_links`）和路径；hash 不完整时末尾提示 changed 与 error 数。
-- **jsonl**：第一行是 `type: hash` 的摘要记录（`complete`、`candidate_files`、`candidate_bytes`、`content_files_read`、`changed_files`、`errors`），描述大小筛选后的全部候选，不因组数限制截断；其后每组一行 `type: group`：`algorithm`、hex `digest`、`logical_size`、`count`、`inodes`、`theoretical_savings`、`external_links` 与 `paths`（绝对路径列表）。零组时只有摘要行。
-- **CSV**：每组一行，列同组记录，`paths` 为 JSON 列表；没有摘要行，零组时只有表头。
+- **表格**：首行汇总筛选后显示的组数、冗余副本数（`inodes - 1` 之和）与理论节省量，再逐组列出大小 × 路径数（与 inode 数不同时附 `(N inodes)`）、节省量、`has links outside this group`（`external_links`）和路径；末尾报告候选数、缓存命中和实际读取量，处理不完整时列出 changed 与 error 数及逐文件明细。
+- **jsonl**：第一行是 `type: hash` 的摘要记录（`complete`、`candidate_files`、`candidate_bytes`、`content_files_read`、`changed_files`、`errors`、`cache_hits`、`content_bytes_read`），描述大小筛选后的全部候选，不因组数限制截断；其后每组一行 `type: group`：`algorithm`、hex `digest`、`logical_size`、`count`、`inodes`、`theoretical_savings`、`external_links` 与 `paths`（绝对路径列表）。最后为每项异常输出一条 `type: hash_error` 记录，含绝对 `path`、`stage`（`quick` / `full`）、`status`（`changed` / `failed`）、可空 `error_code` 和 `message`。零组时仍输出摘要和可用明细。
+- **CSV**：每组一行，列同组记录，`paths` 为 JSON 列表；没有摘要行，零组时只有表头。用 `--report FILE` 另存诊断。
 - 表格路径默认相对 PATH，`--absolute` 改为绝对路径；机器输出始终是绝对路径。
 - hash 不完整时 stderr 输出 `warning: duplicate analysis incomplete: ...`。
+
+`cache_hits` 统计本次开始时可复用 quick hash 的候选路径数，也包括有效的 full 缓存。一次运行内复用 hardlink alias 的 digest 时不增加命中计数。`content_files_read` 统计读到内容的候选路径数，`content_bytes_read` 统计交给 hash 的实际字节数，包括 quick 样本、full 读取和失败前已读的内容。
+
+`--report FILE` 可与任意输出格式组合，以独立 JSONL 文件保存本次摘要和逐文件异常。SQLite 保留路径的 hash 缓存和最近错误；按次回查可通过保留命令报告实现。
 
 `hash.complete` 仅描述该候选范围的 hash 处理状态，不保证 scan coverage 完整，也不表示筛选范围外没有重复。`--output FILE` 把同样的内容写入文件。
 

@@ -194,7 +194,7 @@ hardlink 的默认计数应尽量对齐 GNU `du`：同一可靠对象身份在�
 | 优先级 | 子命令 | 兼容参照 | flatlas 增强信息与边界 |
 |---|---|---|---|
 | P0 | `coverage [PATH]` | flatlas 原生命令 | 按目录展示 completed、partial、failed、cancelled 与 unscanned，定位索引盲区和不完整统计的来源。 |
-| P0 | `errors [PATH]` | flatlas 原生命令 | 汇总遍历、权限、I/O 和 hash 错误，支持按 scan、目录、operation 与错误码筛选和聚合。 |
+| P0 | `errors [PATH]` | flatlas 原生命令 | 汇总遍历、权限和 I/O 等扫描错误，支持按 scan、目录、operation 与错误码筛选和聚合；hash 的本次错误明细由 `dupes` 输出。 |
 | P1 | `hash PATH...` | `b2sum` 等 checksum 工具 | 仅把 `full_ready` digest 当作可用内容 hash，同时展示 algorithm、state 与 basis；实时校验和是否回写索引必须由独立参数明确控制。 |
 | P1 | `verify [PATH...]` | flatlas 原生命令 | 只读比较索引与当前文件系统，报告新增、metadata 改变、stale hash 和未确认缺失；读取失败或 coverage 不完整不得把路径判为 deleted。 |
 | P2 | `tree [PATH]` | `tree` | 以索引生成目录层级，附带 logical/allocated 总量、文件数、coverage 和错误标记；与 `du --max-depth` 重叠，只有确有层级浏览需求时实现。 |

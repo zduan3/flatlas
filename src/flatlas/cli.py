@@ -13,6 +13,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Self
@@ -687,6 +688,11 @@ class _HashProgressDisplay(_ProgressLine):
         self._show(line, progress.phase)
 
 
+def _hash_error_records(summary: HashSummary) -> Iterator[dict[str, Any]]:
+    for issue in summary.issues:
+        yield {"type": "hash_error", **asdict(issue)}
+
+
 def _print_duplicate_groups(
     groups: list[dict[str, Any]],
     fmt: str,
@@ -705,7 +711,7 @@ def _print_duplicate_groups(
         ]
         if fmt == "jsonl":
             # The hash summary first: it says whether the groups are complete.
-            records = [{"type": "hash", **hash_summary.as_dict()}, *records]
+            records = [{"type": "hash", **hash_summary.as_dict()}, *records, *_hash_error_records(hash_summary)]
         write_records(records, fmt, GROUP_FIELDS, output)
         return
     if base is not None:
@@ -736,6 +742,15 @@ def _print_duplicate_groups(
                 *(f"    {path['path_display']}" for path in group["paths"]),
             ]
         )
+    lines.extend([
+        "",
+        (
+            f"Hash: {_counted(hash_summary.candidate_files, 'candidate')}"
+            f" · {_counted(hash_summary.cache_hits, 'cache hit')}"
+            f" · {_counted(hash_summary.content_files_read, 'file')} read"
+            f" · {hash_summary.content_bytes_read} bytes read"
+        ),
+    ])
     if not hash_summary.complete:
         lines.extend(
             [
@@ -746,6 +761,9 @@ def _print_duplicate_groups(
                 ),
             ]
         )
+        for issue in hash_summary.issues:
+            path = issue.path if base is None else _relative_display(issue.path, base)
+            lines.append(f"    {path} [{issue.stage}, {issue.status}]: {issue.message}")
     rendered = "\n".join(lines) + "\n"
     _emit(rendered, output)
 
@@ -1293,15 +1311,39 @@ def dupes(
     min_count: min_count_option = 2,
     min_savings: min_savings_option = 0,
     limit: group_limit_option = None,
+    report: Annotated[
+        Path | None,
+        typer.Option("--report", metavar="FILE", help="Write this run's hash summary and errors to a separate JSONL file."),
+    ] = None,
 ) -> None:
     """List full-hash duplicate groups within an indexed directory."""
     filters = DuplicateFilters(min_size, max_size, min_count, min_savings, limit)
     check_format(format, ROW_FORMATS)
+    if report is not None:
+        location = _database(db).resolve()
+        reserved = [location, Path(f"{location}-wal"), Path(f"{location}-shm"), Path(f"{location}-journal")]
+        if output is not None:
+            reserved.append(output)
+        resolved_report = report.resolve()
+        if any(
+            resolved_report == target.resolve()
+            or (report.exists() and target.exists() and report.samefile(target))
+            for target in reserved
+        ):
+            raise FlatlasError("--report must differ from the index files and --output")
     with _connection(db) as connection, _HashProgressDisplay(enabled=_stderr_is_tty()) as hash_progress:
         hash_summary = ensure_duplicate_hashes(connection, path, on_progress=hash_progress.update, filters=filters)
         groups = duplicate_groups(connection, scope=path, filters=filters)
     _warn_incomplete_hashes(hash_summary)
     _print_duplicate_groups(groups, format, output, hash_summary, base=None if absolute else scope_path(path))
+    if report is not None:
+        try:
+            write_records(
+                [{"type": "hash", **hash_summary.as_dict()}, *_hash_error_records(hash_summary)],
+                "jsonl", (), report,
+            )
+        except OSError as exc:
+            raise FlatlasError(f"cannot write hash report {report}: {exc}") from exc
 
 
 plan_app = typer.Typer(help="Create and inspect immutable dry-run plans; never applies filesystem changes.")

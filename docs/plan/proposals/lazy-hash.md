@@ -1,6 +1,6 @@
 # 惰性 Hash 后续能力
 
-> 状态：提案，未实现。当前的 size → quick → full 流水线、basis 校验、批量提交与 dupes 筛选见 [惰性 Hash 与重复候选](../../design/hashing.md)。
+> 状态：提案，未实现。当前的 hash 流水线、缓存校验、dupes 筛选和本次诊断见 [惰性 Hash 与重复候选](../../design/hashing.md)。
 
 ## 后续能力
 
@@ -11,12 +11,10 @@
 - 在真实的大文件数、同尺寸高碰撞和大文件语料上建立吞吐、打开次数、读取字节数和峰值内存基准。
 - 支持后台 hash 与取消恢复，但后台结果仍必须满足相同的 metadata basis 校验。
 
-### 用户控制与可观测性
+### 用户控制
 
 - `--cached`：只查询当前有效的 full hash，不打开文件；输出必须说明尚未 hash 的候选，因此不能把空结果解释为“没有重复”。
 - `--rehash`：忽略有效缓存并重新读取，作为校验或算法迁移工具；不得隐式成为默认行为。
-- 为 hash 运行新增独立的 run/error 审计模型，记录 scope、算法版本、候选数、实际读取字节、cache hit、changed、failed、cancelled 和时间。它不应复用 `scan_scope`，因为 hash 失败不影响目录 coverage。
-- 稳定机器输出继续区分完整结果与部分结果；CSV 在零重复组时也要有独立摘要表达方式，可考虑 summary sidecar 或新的流式记录类型。
 
 ### 查询范围与过滤
 
@@ -32,7 +30,7 @@
 
 ## Schema 与迁移原则
 
-若新增 hash run、error、算法策略或统计字段，应提高 migration 版本并执行只向前迁移。迁移必须保留现有 `path`、`file_hash`、scan coverage 与 plan 数据；不得通过删表、重建数据库或清空缓存实现升级。
+若日后出现按运行 ID 或时间回查的需求，再明确历史保留策略并评估独立的 run/error 表；届时以向前迁移保留现有 `path`、`file_hash`、scan coverage 与 plan 数据。
 
 ## 测试
 

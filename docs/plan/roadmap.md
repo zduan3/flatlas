@@ -28,7 +28,7 @@ File Atlas 首先服务于寻找大文件、大目录和重复内容，以减少
 - 大规模与网络文件系统上的扫描性能和可恢复性（lazy 元数据、短事务 checkpoint）。
 - `dupes`、`du`、`largest` 的空间回收主线：hardlink 识别、深度展开、top N、metric、排序与阈值、completeness 与稳定导出。
 - 局部子树更新、当前状态校验、stale hash 重算、dirty state 与历史结果保留策略，并以最小的 `coverage`、`errors`、scan 摘要解释结果可信度。
-- 配置化 include/exclude、大小与时间过滤；hash 并发、强制重算/只用缓存模式，以及 `dupes` 本次运行统计与错误明细。
+- 配置化 include/exclude、大小与时间过滤；hash 并发、强制重算/只用缓存模式与 [`dupes` 本次运行诊断](../design/hashing.md#输出)。
 - 基准测试与故障注入测试。
 - 补齐 Linux 非 UTF-8、Windows 长路径/reparse tag、跨 mount/volume 策略和 allocated size 平台校准。
 

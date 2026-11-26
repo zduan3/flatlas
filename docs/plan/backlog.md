@@ -21,7 +21,7 @@
 本批条目**仍需实际清理经验指导设计**，先在真实任务中验证需求与边界再写实现；待观察的问题见 [待实操回答的问题](decisions.md#待实操回答的问题)：
 
 - **重复目录树候选**：只读索引，按目录内相对路径与 size 找出结构相同或几乎相同的目录树副本，作为 inode 清理候选（不是删除授权）。建议先用 `flatlas.api` 在真实索引上跑脚本原型，再沉淀相似度与折叠规则。
-- **lazy-hash 后续能力**：补齐 `dupes` 的本次运行统计与逐文件错误明细，以及有界并发、`--cached` / `--rehash`、多 PATH 与 include/exclude。→ [proposals/lazy-hash.md](proposals/lazy-hash.md)
+- **lazy-hash 后续能力**：有界并发、`--cached` / `--rehash`、多 PATH 与 include/exclude。→ [proposals/lazy-hash.md](proposals/lazy-hash.md)
 - **query-cli GNU 兼容批次**：交互用 `ls` / `du` / `df` 参数，`coverage`、`errors` 诊断命令；按实际缺口补齐，不照表全量实现。→ [proposals/query-cli.md](proposals/query-cli.md)
 - **跨平台与数据真实性**：Linux 非 UTF-8 路径、Windows 长路径与 reparse tag、跨 mount/volume 策略、allocated size 平台校准及复杂物理空间语义的保守表达。→ [路线图](roadmap.md)、[待决策清单](decisions.md)
 
@@ -31,7 +31,6 @@
 
 | 功能 | 结构影响与迁移安排 |
 |---|---|
-| [本次 hash 运行统计与错误明细](proposals/lazy-hash.md) | `dupes` 直接输出本次诊断，沿用现有 `file_hash` 缓存，无需 schema 迁移。需要事后核对时可保留命令输出；等实际出现按运行回查的需求，再评估独立审计表与向前迁移。 |
 | [Hash 调度、缓存控制与版本化](proposals/lazy-hash.md) | 有界并发、复用已提交的缓存继续处理、`--cached` / `--rehash`、多 PATH 和查询过滤沿用现有结构。采样策略可通过 `quick_algorithm` 标识区分布局版本，并继续校验 `quick_sample_bytes`；若需要持久化可恢复任务队列或同一文件的多个算法结果，再设计后续迁移。 |
 | [查询与覆盖诊断](proposals/query-cli.md) | GNU 参数、`coverage` 和 `errors` 的首期查询复用 `path`、`directory_summary`、`scan`、`scan_scope` 和 `scan_error`。若实测需要持久缓存 `du` 的对象去重聚合，再设计迁移，并验证重叠 scope 与跨目录 hardlink 的计数。 |
 | [跨平台与数据真实性](decisions.md#扫描与过滤) | Linux 非 UTF-8 与 Windows 长路径先沿用 BLOB 路径模型；reparse tag、卷标识和单条路径的占用字节已有 `path.reparse_tag`、`root.namespace_id_raw`、`path.allocated_size`。若最终策略要求独立记录 mount/volume 别名、跨边界的覆盖关系、共享 extent 或占用估算来源，再评估后续迁移。卷标识参与 namespace 查找时需验证旧 root 与 coverage 的归属。 |

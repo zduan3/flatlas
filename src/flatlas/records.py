@@ -34,7 +34,7 @@ GROUP_FIELDS = (
 )
 HASH_FIELDS = (
     "type", "complete", "candidate_files", "candidate_bytes",
-    "content_files_read", "changed_files", "errors",
+    "content_files_read", "changed_files", "errors", "cache_hits", "content_bytes_read",
 )
 
 

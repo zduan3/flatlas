@@ -174,9 +174,13 @@ def test_group_filter_does_not_hide_hash_errors_or_change_coverage(indexed, monk
         "--min-size", "8", "--max-size", "8", "--min-count", "3", "--limit", "1",
     ])
     assert result.exit_code == 0, result.output
-    hash_record, *groups = _records(result.stdout)
+    hash_record, group, issue = _records(result.stdout)
     assert hash_record["complete"] is False and hash_record["errors"] == 1
-    assert len(groups) == 1 and groups[0]["count"] == 3
+    assert group["type"] == "group" and group["count"] == 3
+    assert issue == {
+        "type": "hash_error", "path": str(scope / "other-0"), "stage": "quick",
+        "status": "failed", "error_code": None, "message": "injected read error",
+    }
     assert "incomplete" in result.stderr
     with db.open_database(database) as connection:
         assert [tuple(row) for row in connection.execute("SELECT * FROM scan_scope ORDER BY id")] == before

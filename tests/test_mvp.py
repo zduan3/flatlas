@@ -692,6 +692,8 @@ def test_dupes_scopes_grouped_output_to_path_and_defaults_to_cwd(tmp_path: Path,
     assert lines[3:] == [
         "    large-a.bin",
         "    large-b.bin",
+        "",
+        "Hash: 2 candidates · 0 cache hits · 2 files read · 28 bytes read",
     ]
 
     connection = open_database(database)
@@ -765,6 +767,8 @@ def test_lazy_hashing_is_scoped_reads_small_files_once_and_reuses_cache(tmp_path
             "content_files_read": 2,
             "changed_files": 0,
             "errors": 0,
+            "cache_hits": 0,
+            "content_bytes_read": 8,
             "complete": True,
         }
         assert reads == [(inside / "a.bin", False), (inside / "b.bin", False)]

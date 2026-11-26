@@ -17,7 +17,7 @@ from blake3 import blake3
 from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError
 from flatlas.lazystat import uses_lazy_metadata
-from flatlas.paths import _scope_row, _sqlite_integer, path_from_key
+from flatlas.paths import _scope_row, _sqlite_integer, display_text, path_from_key
 
 QUICK_SAMPLE_BYTES = 64 * 1024
 
@@ -32,12 +32,24 @@ class HashProgress:
 
 
 @dataclass(frozen=True)
+class HashIssue:
+    path: str
+    stage: str
+    status: str
+    error_code: int | None
+    message: str
+
+
+@dataclass(frozen=True)
 class HashSummary:
     candidate_files: int
     candidate_bytes: int
     content_files_read: int
     changed_files: int
     errors: int
+    cache_hits: int
+    content_bytes_read: int
+    issues: tuple[HashIssue, ...]
 
     @property
     def complete(self) -> bool:
@@ -51,6 +63,8 @@ class HashSummary:
             "content_files_read": self.content_files_read,
             "changed_files": self.changed_files,
             "errors": self.errors,
+            "cache_hits": self.cache_hits,
+            "content_bytes_read": self.content_bytes_read,
         }
 
 
@@ -108,6 +122,11 @@ def _validated_digest(candidate: dict[str, Any], *, full: bool) -> bytes:
     expected = _candidate_hash_basis(candidate)
     size = int(candidate["logical_size"])
     digest = blake3()
+
+    def consume(chunk: bytes) -> None:
+        candidate["content_bytes_read"] += len(chunk)
+        digest.update(chunk)
+
     with path_from_key(candidate["root_path_raw"], candidate["path_key"]).open("rb") as stream:
         before = os.fstat(stream.fileno())
         if not stat_module.S_ISREG(before.st_mode):
@@ -119,11 +138,11 @@ def _validated_digest(candidate: dict[str, Any], *, full: bool) -> bytes:
             expected = actual
         if full or size <= QUICK_SAMPLE_BYTES * 2:
             while chunk := stream.read(1024 * 1024):
-                digest.update(chunk)
+                consume(chunk)
         else:
-            digest.update(stream.read(QUICK_SAMPLE_BYTES))
+            consume(stream.read(QUICK_SAMPLE_BYTES))
             stream.seek(-QUICK_SAMPLE_BYTES, os.SEEK_END)
-            digest.update(stream.read(QUICK_SAMPLE_BYTES))
+            consume(stream.read(QUICK_SAMPLE_BYTES))
         after = os.fstat(stream.fileno())
         if _stat_hash_basis(after) != expected:
             raise _HashBasisChanged
@@ -249,12 +268,15 @@ def ensure_duplicate_hashes(
     changed_files = 0
     errors = 0
     writes = 0
+    content_bytes_read = 0
     content_path_ids: set[int] = set()
+    issues: list[HashIssue] = []
     # Hardlink aliases share content: (device, inode, full) -> (indexed basis, validated basis, digest).
     alias_digests: dict[tuple[Any, ...], tuple[tuple[int | None, ...], tuple[int | None, ...], bytes]] = {}
 
-    def digest_once(candidate: dict[str, Any], *, full: bool) -> tuple[bytes, bool]:
-        """Return (digest, read) reading each inode at most once per run."""
+    def digest_once(candidate: dict[str, Any], *, full: bool) -> bytes:
+        """Read each inode at most once per stage while its basis matches."""
+        nonlocal content_bytes_read
         indexed = _candidate_hash_basis(candidate)
         key = (candidate["device"], candidate["inode"], full) if candidate["inode"] is not None else None
         cached = alias_digests.get(key) if key is not None else None
@@ -263,14 +285,27 @@ def ensure_duplicate_hashes(
             if indexed != validated:
                 candidate["mtime_ns"], candidate["change_time_ns"], candidate["birth_time_ns"] = validated[3:]
                 candidate["times_reconciled"] = True
-            return cached[2], False
-        digest = _validated_digest(candidate, full=full)
+            return cached[2]
+        candidate["content_bytes_read"] = 0
+        try:
+            digest = _validated_digest(candidate, full=full)
+        finally:
+            read_bytes = candidate.pop("content_bytes_read")
+            content_bytes_read += read_bytes
+            if read_bytes:
+                content_path_ids.add(int(candidate["id"]))
         if key is not None:
             alias_digests[key] = (indexed, _candidate_hash_basis(candidate), digest)
-        return digest, True
+        return digest
 
-    def save_problem(candidate: dict[str, Any], state: str, message: str) -> None:
+    def save_problem(
+        candidate: dict[str, Any], state: str, stage: str, message: str, error_code: int | None = None,
+    ) -> None:
         nonlocal writes
+        message = display_text(message)
+        issues.append(HashIssue(
+            candidate["path_display"], stage, "changed" if state == "stale" else "failed", error_code, message,
+        ))
         _save_hash_problem(connection, candidate, state, message)
         candidate["hash_state"] = state
         candidate["quick_digest"] = None
@@ -321,6 +356,7 @@ def ensure_duplicate_hashes(
         for candidate in candidates
         if not has_quick(candidate)
     ]
+    cache_hits = len(candidates) - len(quick_work)
     quick_total_bytes = sum(int(candidate["logical_size"]) for candidate in quick_work)
     if on_progress is not None and quick_work:
         on_progress(HashProgress("quick", 0, len(quick_work), 0, quick_total_bytes))
@@ -329,7 +365,7 @@ def ensure_duplicate_hashes(
         for index, candidate in enumerate(quick_work, start=1):
             size = int(candidate["logical_size"])
             try:
-                quick, read = digest_once(candidate, full=False)
+                quick = digest_once(candidate, full=False)
                 _persist_reconciled_times(connection, candidate)
                 is_full = size <= QUICK_SAMPLE_BYTES * 2
                 _save_hash(connection, candidate, quick=quick, full=quick if is_full else None)
@@ -340,17 +376,15 @@ def ensure_duplicate_hashes(
                 candidate["full_algorithm"] = "blake3" if is_full else None
                 candidate["full_digest"] = quick if is_full else None
                 remember_current_basis(candidate)
-                if read:
-                    content_path_ids.add(int(candidate["id"]))
                 writes += 1
                 if writes % commit_batch == 0:
                     connection.commit()
             except _HashBasisChanged:
                 changed_files += 1
-                save_problem(candidate, "stale", "metadata changed since scan")
+                save_problem(candidate, "stale", "quick", "metadata changed since scan")
             except OSError as exc:
                 errors += 1
-                save_problem(candidate, "failed", str(exc))
+                save_problem(candidate, "failed", "quick", str(exc), exc.errno)
             quick_done_bytes += size
             if on_progress is not None:
                 on_progress(HashProgress("quick", index, len(quick_work), quick_done_bytes, quick_total_bytes))
@@ -395,24 +429,22 @@ def ensure_duplicate_hashes(
         for index, candidate in enumerate(full_work, start=1):
             size = int(candidate["logical_size"])
             try:
-                full, read = digest_once(candidate, full=True)
+                full = digest_once(candidate, full=True)
                 _persist_reconciled_times(connection, candidate)
                 _save_hash(connection, candidate, quick=candidate["quick_digest"], full=full)
                 candidate["hash_state"] = "full_ready"
                 candidate["full_algorithm"] = "blake3"
                 candidate["full_digest"] = full
                 remember_current_basis(candidate)
-                if read:
-                    content_path_ids.add(int(candidate["id"]))
                 writes += 1
                 if writes % commit_batch == 0:
                     connection.commit()
             except _HashBasisChanged:
                 changed_files += 1
-                save_problem(candidate, "stale", "metadata changed during hash")
+                save_problem(candidate, "stale", "full", "metadata changed during hash")
             except OSError as exc:
                 errors += 1
-                save_problem(candidate, "failed", str(exc))
+                save_problem(candidate, "failed", "full", str(exc), exc.errno)
             full_done_bytes += size
             if on_progress is not None:
                 on_progress(HashProgress("full", index, len(full_work), full_done_bytes, full_total_bytes))
@@ -427,6 +459,9 @@ def ensure_duplicate_hashes(
         content_files_read=len(content_path_ids),
         changed_files=changed_files,
         errors=errors,
+        cache_hits=cache_hits,
+        content_bytes_read=content_bytes_read,
+        issues=tuple(issues),
     )
     if on_progress is not None:
         phase = "incomplete" if not summary.complete else "cached" if not content_path_ids else "completed"
