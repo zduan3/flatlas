@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from flatlas import db
 from flatlas.cli import app
+from flatlas.errors import FlatlasError
 from flatlas.paths import (
     discover_namespace,
     register_namespace,
@@ -152,3 +153,43 @@ def test_failed_migration_rolls_back_schema_and_preserves_data(tmp_path: Path, m
         assert connection.execute("SELECT count(*) FROM root").fetchone()[0] == 1
     finally:
         connection.close()
+
+
+@pytest.mark.safety
+def test_open_database_readonly_wraps_sqlite_errors(tmp_path: Path, monkeypatch) -> None:
+    corrupt = tmp_path / "corrupt.sqlite"
+    corrupt.write_bytes(b"not a sqlite database")
+    with pytest.raises(FlatlasError, match="cannot open index database for reading"):
+        db.open_database_readonly(corrupt)
+
+    database = tmp_path / "index.sqlite"
+    db.open_database(database).close()
+    Path(f"{database}-wal").write_bytes(b"active-wal")
+
+    def fail_connect(*_args, **_kwargs):
+        raise sqlite3.OperationalError("simulated read error")
+
+    monkeypatch.setattr(db, "_connect_readonly", fail_connect)
+    with pytest.raises(FlatlasError, match="cannot open index database for reading"):
+        db.open_database_readonly(database)
+
+    Path(f"{database}-wal").unlink()
+    with pytest.raises(FlatlasError, match="cannot open index database for reading"):
+        db.open_database_readonly(database)
+
+    # A symlinked index checks <resolved>-wal rather than <symlink>-wal before falling back.
+    alias = tmp_path / "alias.sqlite"
+    alias.write_bytes(b"placeholder")
+    Path(f"{database}-wal").write_bytes(b"active-wal")
+    original_resolve = Path.resolve
+    monkeypatch.setattr(Path, "resolve", lambda self: database if self == alias else original_resolve(self))
+    calls: list[str] = []
+
+    def record_and_fail(uri: str):
+        calls.append(uri)
+        raise sqlite3.OperationalError("simulated read error")
+
+    monkeypatch.setattr(db, "_connect_readonly", record_and_fail)
+    with pytest.raises(FlatlasError, match="cannot open index database for reading"):
+        db.open_database_readonly(alias)
+    assert len(calls) == 1 and "immutable=1" not in calls[0]

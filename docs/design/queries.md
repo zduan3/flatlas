@@ -203,7 +203,7 @@ python -m sqlite3 "/path/to/index.sqlite" "VACUUM;"
 
 ## 只读 Python API
 
-`flatlas.api.open_index(db=None)` 以 SQLite 只读模式打开现有索引。显式 `db` 接受路径对象或字符串；省略时按 [索引位置](config.md#索引位置) 查找。数据库不存在或需要迁移时抛出 `flatlas.errors.FlatlasError`。同一个 `with` 块内复用连接与 SQLite 读事务，退出时关闭连接。
+`flatlas.api.open_index(db=None)` 以 SQLite 只读模式打开现有索引。显式 `db` 接受路径对象或字符串；省略时按 [索引位置](config.md#索引位置) 查找。数据库不存在、无法读取或需要迁移时抛出 `flatlas.errors.FlatlasError`。同一个 `with` 块内复用连接与 SQLite 读事务，退出时关闭连接。
 
 ```python
 from flatlas.api import open_index

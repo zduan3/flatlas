@@ -11,6 +11,7 @@ from typing import Any
 
 from flatlas.config import resolve_database
 from flatlas.db import open_database_readonly
+from flatlas.errors import FlatlasError
 from flatlas.findexpr import parse_find_expression
 from flatlas.queries import (
     disk_usage,
@@ -36,10 +37,17 @@ class Index:
         follow_symlink: bool = False,
     ) -> Iterator[dict[str, Any]]:
         """Yield entry records for the find expression's print actions."""
+        if isinstance(expression, (str, bytes)):
+            raise FlatlasError("find expression must be a sequence of tokens, not a string")
         parsed = parse_find_expression(list(expression))
-        for hit in find_paths(self._connection, os.fspath(path), parsed, follow_symlink=follow_symlink, records=True):
-            if hit.record is not None:
-                yield hit.record
+        target = os.fspath(path)
+
+        def _iterate() -> Iterator[dict[str, Any]]:
+            for hit in find_paths(self._connection, target, parsed, follow_symlink=follow_symlink, records=True):
+                if hit.record is not None:
+                    yield hit.record
+
+        return _iterate()
 
     def du(
         self,

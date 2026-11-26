@@ -89,3 +89,46 @@ def test_api_rejects_missing_or_outdated_indexes_without_migrating(tmp_path: Pat
         with pytest.raises(FlatlasError, match="needs migration"), api.open_index(db):
             pytest.fail("opened a database with an outdated schema")
         assert connection.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == before
+
+
+def test_api_validates_parameter_ranges(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "file.bin").write_bytes(b"data")
+    db = tmp_path / "index.sqlite"
+    with closing(open_database(db)) as connection:
+        register_namespace(connection, discover_namespace(source))
+        scan_directory(connection, source)
+
+    with api.open_index(db) as idx:
+        for bad_limit in (0, -1):
+            with pytest.raises(FlatlasError, match="limit must be at least 1"):
+                idx.largest(source, limit=bad_limit)
+            with pytest.raises(FlatlasError, match="limit must be at least 1"):
+                idx.scans(source, limit=bad_limit)
+        with pytest.raises(FlatlasError, match="max_depth must be at least 0"):
+            idx.du(source, max_depth=-1)
+        for bad_scan_id in (0, -1):
+            with pytest.raises(FlatlasError, match="scan_id must be at least 1"):
+                idx.scan_info(bad_scan_id)
+
+
+def test_find_rejects_string_and_validates_expression_eagerly(tmp_path: Path) -> None:
+    db = tmp_path / "index.sqlite"
+    with closing(open_database(db)):
+        pass
+
+    with api.open_index(db) as idx:
+        with pytest.raises(FlatlasError, match="sequence of tokens"):
+            idx.find(tmp_path, "-name *.bin")
+        with pytest.raises(FlatlasError, match="sequence of tokens"):
+            idx.find(tmp_path, b"-name")  # type: ignore[arg-type]
+        with pytest.raises(FlatlasError, match="unsupported expression"):
+            idx.find(tmp_path, ("-unknown",))
+
+
+def test_open_index_wraps_readonly_sqlite_errors(tmp_path: Path) -> None:
+    corrupt = tmp_path / "corrupt.sqlite"
+    corrupt.write_bytes(b"not a sqlite database")
+    with pytest.raises(FlatlasError, match="cannot open index database for reading"), api.open_index(corrupt):
+        pytest.fail("opened a corrupt database")

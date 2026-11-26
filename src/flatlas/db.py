@@ -202,15 +202,26 @@ def open_database_readonly(location: Path) -> sqlite3.Connection:
     """
     if not location.is_file():
         raise FlatlasError(f"index database does not exist: {location}")
-    uri = location.resolve().as_uri()
+    resolved = location.resolve()
+    uri = resolved.as_uri()
     try:
         connection = _connect_readonly(f"{uri}?mode=ro")
-    except sqlite3.OperationalError:
-        if Path(f"{location}-wal").exists():
-            raise
-        connection = _connect_readonly(f"{uri}?mode=ro&immutable=1")
+    except sqlite3.OperationalError as exc:
+        if Path(f"{resolved}-wal").exists():
+            raise FlatlasError(f"cannot open index database for reading: {location}: {exc}") from exc
+        try:
+            connection = _connect_readonly(f"{uri}?mode=ro&immutable=1")
+        except sqlite3.Error as fallback_exc:
+            raise FlatlasError(
+                f"cannot open index database for reading: {location}: {fallback_exc}"
+            ) from fallback_exc
+    except sqlite3.Error as exc:
+        raise FlatlasError(f"cannot open index database for reading: {location}: {exc}") from exc
     try:
         missing = set(range(1, SCHEMA_VERSION + 1)) - _migration_versions(connection)
+    except sqlite3.Error as exc:
+        connection.close()
+        raise FlatlasError(f"cannot open index database for reading: {location}: {exc}") from exc
     except BaseException:
         connection.close()
         raise

@@ -97,12 +97,18 @@ def test_rm_statements_use_the_path_key_range(tmp_path: Path) -> None:
         connection.set_trace_callback(statements.append)
         remove_indexed_subtrees(connection, [source / "a", source / "keep" / "big"])
         connection.set_trace_callback(None)
-        ranged = [sql for sql in statements if "path_key>=" in sql]
-        assert any(sql.lstrip().startswith("DELETE FROM path") for sql in ranged)
-        for sql in ranged:
+        ranged = {sql for sql in statements if "path_key>=" in sql}
+        delete_statements = [sql for sql in ranged if sql.lstrip().startswith("DELETE FROM path")]
+        assert delete_statements
+        for sql in delete_statements:
             # The trace shows statements with their values bound.
             plan = [row[3] for row in connection.execute("EXPLAIN QUERY PLAN " + sql)]
             # A bare (root_id=?) search would scan the whole root for each subtree.
             assert any("path_key>? AND path_key<?" in step for step in plan), plan
+        for sql in ranged - set(delete_statements):
+            plan = [row[3] for row in connection.execute("EXPLAIN QUERY PLAN " + sql)]
+            assert [step for step in plan if step.startswith(("SCAN p ", "SEARCH p "))] == [
+                "SEARCH p USING INTEGER PRIMARY KEY (rowid=?)"
+            ] * 2, plan
     finally:
         connection.close()

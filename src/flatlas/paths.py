@@ -202,9 +202,24 @@ def indexed_key(connection: sqlite3.Connection, value: Path) -> tuple[int, bytes
     root contains ``value``.
     """
     best: tuple[int, int] | None = None
-    for root in connection.execute("SELECT id, root_path_raw FROM root"):
-        root_parts = Path(os.fsdecode(root["root_path_raw"])).parts
-        if value.parts[: len(root_parts)] == root_parts and (best is None or len(root_parts) > best[1]):
+    for root in connection.execute("SELECT id, root_path_raw, platform, case_sensitive FROM root"):
+        try:
+            root_text = os.fsdecode(root["root_path_raw"])
+        except UnicodeDecodeError:
+            continue
+        root_parts = Path(root_text).parts
+        if len(value.parts) < len(root_parts):
+            continue
+        prefix = value.parts[: len(root_parts)]
+        case_sensitive = root["case_sensitive"]
+        insensitive = (case_sensitive == 0) if case_sensitive is not None else (root["platform"] == "windows")
+        if insensitive:
+            matches = tuple(part.casefold() for part in prefix) == tuple(
+                part.casefold() for part in root_parts
+            )
+        else:
+            matches = prefix == root_parts
+        if matches and (best is None or len(root_parts) > best[1]):
             best = (int(root["id"]), len(root_parts))
     if best is None:
         return None
@@ -337,8 +352,8 @@ def _removal_row(connection: sqlite3.Connection, value: Path) -> sqlite3.Row:
     columns = "id, root_id, parent_path_id, path_key"
     if (key := indexed_key(connection, absolute)) is not None:
         selected = connection.execute(
-            f"SELECT {columns} FROM path WHERE root_id=? AND path_key=? AND path_display=?",
-            (*key, display),
+            f"SELECT {columns} FROM path WHERE root_id=? AND path_key=?",
+            key,
         ).fetchone()
     if selected is None:
         selected = connection.execute(f"SELECT {columns} FROM path WHERE path_display=?", (display,)).fetchone()
@@ -376,14 +391,20 @@ def _remove_rows(connection: sqlite3.Connection, rows: list[sqlite3.Row]) -> dic
 
     plan_ids: set[str] = set()
     for row in outermost:
-        condition, keys = _key_range(bytes(row["path_key"]))
+        condition, keys = _key_range(bytes(row["path_key"]), column="p.path_key")
+        parameters = (row["root_id"], *keys)
         plan_ids.update(
             str(found["plan_id"])
             for found in connection.execute(
                 f"""SELECT DISTINCT po.plan_id FROM plan_operation po
-                    JOIN path p ON p.id IN (po.canonical_path_id, po.replacement_path_id)
-                    WHERE p.root_id=? AND {condition.replace("path_key", "p.path_key")}""",
-                (row["root_id"], *keys),
+                    WHERE EXISTS (
+                        SELECT 1 FROM path p NOT INDEXED
+                        WHERE p.id=po.canonical_path_id AND p.root_id=? AND {condition}
+                    ) OR EXISTS (
+                        SELECT 1 FROM path p NOT INDEXED
+                        WHERE p.id=po.replacement_path_id AND p.root_id=? AND {condition}
+                    )""",
+                parameters * 2,
             )
         )
     removed_paths = 0

@@ -134,3 +134,33 @@ def test_purge_checks_plan_paths_by_primary_key(tmp_path: Path, mode: str, missi
         assert path_steps == ["SEARCH p USING INTEGER PRIMARY KEY (rowid=?)"] * 2, plan
         assert removed == 1
         assert connection.execute("SELECT count(*) FROM plan WHERE id=?", (plan_id,)).fetchone()[0] == 0
+
+
+@pytest.mark.plan
+@pytest.mark.safety
+@pytest.mark.parametrize("target", ["a", "b"])
+def test_remove_subtree_checks_plan_paths_by_primary_key(tmp_path: Path, target: str) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    for file in ("a", "b"):
+        (source / file).write_bytes(b"x" * 16384)
+    with closing(open_database(tmp_path / "index.sqlite")) as connection:
+        root_id = register_namespace(connection, discover_namespace(source))
+        scan_directory(connection, source)
+        ensure_duplicate_hashes(connection, source)
+        plan_id = create_dry_run_plan(connection, root_id)
+
+        traced: list[str] = []
+        connection.set_trace_callback(traced.append)
+        removed = remove_indexed_subtree(connection, source / target)
+        connection.set_trace_callback(None)
+
+        select_statements = {sql for sql in traced if "FROM plan_operation po" in sql}
+        [select_statement] = select_statements
+        select_plan = _plan(connection, select_statement)
+        path_steps = [detail for _, _, detail in select_plan if detail.startswith(("SCAN p ", "SEARCH p "))]
+        assert path_steps == ["SEARCH p USING INTEGER PRIMARY KEY (rowid=?)"] * 2, select_plan
+
+        assert removed["paths_removed"] == 1
+        assert removed["plans_removed"] == 1
+        assert connection.execute("SELECT count(*) FROM plan WHERE id=?", (plan_id,)).fetchone()[0] == 0

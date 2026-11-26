@@ -140,6 +140,8 @@ def list_scans(
     scope: Path | None = None,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
+    if limit is not None and limit < 1:
+        raise FlatlasError("limit must be at least 1")
     parameters: list[Any] = []
     where = ""
     if scope is not None:
@@ -196,6 +198,8 @@ def list_scans(
 
 
 def scan_info(connection: sqlite3.Connection, scan_id: int) -> dict[str, Any]:
+    if scan_id < 1:
+        raise FlatlasError("scan_id must be at least 1")
     scan = connection.execute(
         """SELECT s.id AS scan_id, s.root_id, r.root_path_display AS root,
                   s.kind, s.status, s.started_at_ns, s.finished_at_ns,
@@ -593,6 +597,8 @@ def disk_usage(
     max_depth: int = 0,
 ) -> list[dict[str, Any]]:
     """Entry records of one scope, then its subdirectories down to ``max_depth``."""
+    if max_depth < 0:
+        raise FlatlasError("max_depth must be at least 0")
     scope = Path(".") if scope is None else scope
     try:
         selected = _scope_row(connection, scope, follow=follow_symlink)
@@ -636,6 +642,8 @@ def largest_files(
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """Entry records of the largest present files under ``scope``, largest first."""
+    if limit is not None and limit < 1:
+        raise FlatlasError("limit must be at least 1")
     selected = _scope_row(connection, scope)
     key = bytes(selected["path_key"])
     upper = key[:-1] + b"\x01" if key else None
