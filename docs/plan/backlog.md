@@ -11,15 +11,12 @@
 
 ## 0.2.1
 
-- **`scan --shallow --files0-from`（按需可选）**：一次调用复用连接，按 NUL 分隔的清单顺序浅扫多个父目录。每个目录各有独立的 scan 与 scope 并独立提交，只有 completed scope 才确认缺失的直接条目及其后代。若日常清理以清单 + `rm --files0-from` 为主可后置。
+清理闭环、只读 Python API 与扫描直接清理（`--purge-deleted`）已落地，当前维持 schema v7。以下待办涉及全仓改动、schema 迁移或跨文件系统语义折中，待取得 `v0.2.0` 机械硬盘基线和刷新实测后推进；**所有数据库结构修改将合并为单次向前迁移（新 schema v8）**：
 
-## 0.2.2
-
-本批条目**方向明确，但涉及全仓改动、schema 迁移或跨文件系统语义折中**，待取得 `v0.2.0` 机械硬盘基线和刷新实测后再推进：
-
+- **索引存储布局与计划路径外键索引（合并为新 schema v8）**：`path_display` 改为由 `root` 与 `path_key` 推导，减少每行重复路径和冷读体积（影响全仓查询与排序）；同一 v8 迁移一并为 `plan_operation(canonical_path_id)` 与 `plan_operation(replacement_path_id)` 建立单列外键索引，消除保留 dry-run plan 存在时物理删除 `path` 行（`rm`、`rm --deleted`、`scan --purge-deleted`）触发的 `plan_operation` 全表外键扫描（若增量刷新同期定案需新增列，也并入同一 v8 迁移）。
 - **按目录 mtime 的增量刷新**：目录未变化时跳过 `readdir`（浅扫描 `--shallow` 已实现，见 [扫描](../design/scanning.md#浅扫描--shallow)）。→ [proposals/incremental-refresh.md](proposals/incremental-refresh.md)
-- **索引存储布局**：`path_display` 改为由 root 与 `path_key` 推导，减少每行重复路径和冷读体积（影响全仓查询与排序，需 migration）。
-- **机械硬盘基线与复测**：在具备 Windows 机械硬盘时，检出 `v0.2.0` 对一块真实目录树记录一次全量 `scan`、一次无变化 `--refresh-before`、一次大子树 `find --format jsonl` 的耗时、`scan-info` 分阶段计时与 `.db` 文件大小；0.2.2 在同一块盘与同一目录复跑对比，结果记入 [验证记录](../history/verification-log.md)。
+- **机械硬盘基线与复测**：在具备 Windows 机械硬盘时，检出 `v0.2.0` 对一块真实目录树记录一次全量 `scan`、一次无变化 `--refresh-before`、一次大子树 `find --format jsonl` 的耗时、`scan-info` 分阶段计时与 `.db` 文件大小；0.2.1 完成后在同一块盘与同一目录复跑对比，结果记入 [验证记录](../history/verification-log.md)。
+- **`scan --shallow --files0-from`（按需可选）**：一次调用复用连接，按 NUL 分隔的清单顺序浅扫多个父目录。每个目录各有独立的 scan 与 scope 并独立提交，只有 completed scope 才确认缺失的直接条目及其后代。若日常清理以清单 + `rm --files0-from` 为主可后置。
 
 ## 0.2.x
 
