@@ -34,6 +34,7 @@
 - `phases.allocation.phases` 细分普通非空、非压缩、非稀疏文件的占用空间查询：`extents` 包含打开文件句柄、校验属性、查询 extent 和关闭句柄；有外部 extent 时才调用 `cluster_size`，其中包含查缓存以及必要时定位卷和查询簇大小。调用次数包含缓存命中，耗时已计入 `allocation` 总计。压缩或稀疏文件的独立查询计入 `allocation` 总计。
 - `exact_stat_fallbacks`、`exact_stat_fallback_s`：lazy root 上因 `blocks×512 < size` 回退到精确 `lstat` 的次数与耗时（包含在 `observe` 内）。
 - `checkpoints`：本次提交的 checkpoint 数（含收尾前的最后一个）。
+- `summary_scope`：收尾时的目录汇总范围。`affected` 代表受影响目录及其祖先，`subtree` 代表整个 scope 及其祖先，`shallow` 代表浅扫描的限深范围及其祖先。中断或失败后未提交最终汇总的记录可以缺少此字段。
 - 进入收尾、初始化失败或收尾回滚时写入统计。partial、failed、cancelled 的删除计数为 `0`。被杀后接管的扫描只记录删除计数 `0`；尚未收尾的扫描可能没有统计，migration 5 之前的扫描为 `null`。
 
 ### Lustre 上的 lazy 元数据
@@ -75,7 +76,7 @@
 
 ### 更新规则
 
-扫描以 completed、partial 或 cancelled 结束时，在同一扫描事务内自底向上刷新请求 scope 及其所有祖先：
+扫描以 completed、partial 或 cancelled 结束时，在最终事务内自底向上刷新目录汇总。全量扫描刷新请求 scope 及其祖先。按时间、按变化刷新及续扫会累计重新枚举的目录（包括失败的枚举）和受影响的祖先，跳过的分支沿用缓存。检测到重叠扫描、取消，或有可能遗留未汇总 checkpoint 的扫描记录时，使用整树汇总修复。以下规则适用于各模式：
 
 1. 完整枚举且所有直接条目 stat 成功的目录推进自身完成时间。
 2. 枚举或 stat 失败的目录保留上一次成功时间；如果从未成功过则继续为 `NULL`。失败不推进 freshness。
@@ -113,7 +114,7 @@ VALUE 支持带时区或使用本地时区的 ISO 8601 时间，以及 `30s`、`
 - `scan.files_seen`、`dirs_seen`、`logical_bytes_seen`（migration 7）、`scan_scope.paths_seen` 与心跳 `scan.heartbeat_at_ns`；
 - 这一批中遍历结束的目录的汇总，完整枚举的目录同时推进 `self_completed_at_ns`/`last_completed_scan_id`。遍历是后序的，目录结束时它访问过的子目录都已结束，汇总可以从子目录已提交的汇总自底向上算出；仍在遍历中的祖先保留旧汇总，直到它们结束或最终刷新。
 
-删除确认只在最终事务中进行，与 completed 状态和整个 scope 的汇总刷新一起提交，因此任何中断、崩溃或被杀都只留下 checkpoint，不会删除任何旧路径。其他连接可以在扫描期间读到已提交的 checkpoint：已结束的目录按当前 scan 显示为已完成，未结束的部分按之前的覆盖判断（running 的处理与 cancelled 相同）。checkpoint 期间扫描进程持有写锁，其它写入者只能在两次 checkpoint 之间的空隙获得锁。
+删除确认只在最终事务中进行，与 completed 状态和最终汇总一起提交，因此任何中断、崩溃或被杀都只留下 checkpoint，不会删除任何旧路径。其他连接可以在扫描期间读到已提交的 checkpoint：已结束的目录按当前 scan 显示为已完成，未结束的部分按之前的覆盖判断（running 的处理与 cancelled 相同）。checkpoint 期间扫描进程持有写锁，其它写入者只能在两次 checkpoint 之间的空隙获得锁。
 
 提交开销（2026-11 在 Lustre 上实测，63.8 万条目子树）：每次提交约 0.35 s，按 5 s 间隔约占扫描 7%。其中约 70% 是提交后顺带的 WAL checkpoint——每批写入 21–37 MiB WAL，远超默认 `wal_autocheckpoint` 1000 页，几乎每次提交都触发；WAL fsync 只占约 0.04 s。扫描期间关闭自动 checkpoint、结束时统一做一次（约 1 s）可把提交降到约 0.11 s（`synchronous=NORMAL` 再降到约 0.07 s），代价是扫描期间 WAL 涨到约 1 GB，NORMAL 还会在掉电时丢最近批次。当前未采用，保持 SQLite 默认；需要压低开销时优先调 `wal_autocheckpoint`，不改 `synchronous`。
 

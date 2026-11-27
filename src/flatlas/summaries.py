@@ -97,14 +97,15 @@ def refresh_finished_directories(
     path_ids: list[int],
     completed_directories: Mapping[int, tuple[int, int]],
 ) -> None:
-    """Refresh the summaries of directories whose traversal has finished.
+    """Refresh the selected directory summaries in post-order.
 
     A scan checkpoint calls this for the directories it finished since the
     previous checkpoint. Traversal is post-order, so every visited child of a
     finished directory was finished earlier: in this batch (computed here) or
     in an earlier checkpoint (read from its committed summary). Ancestors that
     are still being traversed keep their previous totals until a later batch
-    or the final scope refresh.
+    or the final scope refresh. Selective refresh and index removal also use
+    this routine with the affected directories and their ancestors.
     """
     rows: list[sqlite3.Row] = []
     for batch in _id_batches(path_ids):

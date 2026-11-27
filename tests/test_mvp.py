@@ -1214,6 +1214,10 @@ def test_refresh_before_scans_old_directories_and_preserves_fresh_subtrees(tmp_p
             (cutoff - 100, cutoff - 100, str(old)),
         )
         connection.commit()
+        fresh_summary = connection.execute(
+            "SELECT ds.* FROM directory_summary ds JOIN path_with_display p ON p.id=ds.path_id WHERE p.path_display=?",
+            (str(fresh),),
+        ).fetchone()
         fresh_file.unlink()
         old_file.unlink()
 
@@ -1221,6 +1225,11 @@ def test_refresh_before_scans_old_directories_and_preserves_fresh_subtrees(tmp_p
 
         assert result["status"] == "completed"
         assert result["refresh_before_ns"] == cutoff
+        assert result["stats"]["summary_scope"] == "affected"
+        assert connection.execute(
+            "SELECT ds.* FROM directory_summary ds WHERE ds.path_id=?", (fresh_summary["path_id"],),
+        ).fetchone() == fresh_summary
+        assert disk_usage(connection, scope=source)[0]["logical_size"] == len(b"fresh")
         states = {
             row["path_display"]: row["state"]
             for row in connection.execute(
@@ -1255,6 +1264,8 @@ def test_partial_refresh_never_confirms_missing_entries(tmp_path: Path, monkeypa
     blocked.mkdir()
     vanished = first / "vanished.bin"
     vanished.write_bytes(b"gone")
+    changed = first / "changed.bin"
+    changed.write_bytes(b"x")
     cutoff = 2_000_000_000
     real_scandir = os.scandir
     try:
@@ -1265,6 +1276,7 @@ def test_partial_refresh_never_confirms_missing_entries(tmp_path: Path, monkeypa
         )
         connection.commit()
         vanished.unlink()
+        changed.write_bytes(b"longer")
 
         def fail_one_directory(path):
             if Path(path) == blocked:
@@ -1275,6 +1287,9 @@ def test_partial_refresh_never_confirms_missing_entries(tmp_path: Path, monkeypa
         result = scan_directory(connection, source, refresh_before_ns=cutoff)
 
         assert result["status"] == "partial"
+        assert result["stats"]["summary_scope"] == "affected"
+        assert result["paths_deleted"] == 0
+        assert disk_usage(connection, scope=source)[0]["logical_size"] == len(b"gonelonger")
         assert connection.execute(
             "SELECT state FROM path_with_display WHERE path_display=?", (str(vanished),)
         ).fetchone()["state"] == "present"
@@ -1363,6 +1378,9 @@ def test_subtree_scan_refreshes_cached_ancestor_totals_without_rescanning_ancest
     nested.mkdir()
     payload = nested / "payload.bin"
     payload.write_bytes(b"a")
+    sibling = source / "sibling"
+    sibling.mkdir()
+    (sibling / "payload.bin").write_bytes(b"two")
     try:
         scan_directory(connection, source)
         root_before = connection.execute(
@@ -1370,6 +1388,10 @@ def test_subtree_scan_refreshes_cached_ancestor_totals_without_rescanning_ancest
                JOIN path_with_display p ON p.id=ds.path_id WHERE p.path_display=?""",
             (str(source),),
         ).fetchone()[0]
+        sibling_before = connection.execute(
+            "SELECT ds.* FROM directory_summary ds JOIN path_with_display p ON p.id=ds.path_id WHERE p.path_display=?",
+            (str(sibling),),
+        ).fetchone()
 
         payload.write_bytes(b"four")
         scan_directory(connection, nested)
@@ -1379,10 +1401,13 @@ def test_subtree_scan_refreshes_cached_ancestor_totals_without_rescanning_ancest
                WHERE p.path_display=?""",
             (str(source),),
         ).fetchone()
-        assert root_after["subtree_files"] == 1
-        assert root_after["subtree_logical_size"] == 4
+        assert root_after["subtree_files"] == 2
+        assert root_after["subtree_logical_size"] == 7
         assert root_after["self_completed_at_ns"] == root_before
-        assert disk_usage(connection, scope=source)[0]["logical_size"] == 4
+        assert disk_usage(connection, scope=source)[0]["logical_size"] == 7
+        assert connection.execute(
+            "SELECT * FROM directory_summary WHERE path_id=?", (sibling_before["path_id"],),
+        ).fetchone() == sibling_before
     finally:
         connection.close()
 

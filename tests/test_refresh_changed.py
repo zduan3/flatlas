@@ -33,6 +33,9 @@ def test_refresh_lists_changed_descendants_and_preserves_skipped_freshness(tmp_p
         register_namespace(connection, discover_namespace(source))
         scan = scanning.scan_directory(connection, source)
         old_freshness = disk_usage(connection, scope=unchanged)[0]["complete_through_ns"]
+        old_summary = connection.execute(
+            "SELECT ds.* FROM directory_summary ds JOIN path p ON p.id=ds.path_id WHERE p.name_raw=?", (b"unchanged",),
+        ).fetchone()
         growing.write_bytes(b"longer")
         gone.rename(nested / "new")
         mtime = nested.stat().st_mtime_ns + 2_000_000_000
@@ -55,6 +58,10 @@ def test_refresh_lists_changed_descendants_and_preserves_skipped_freshness(tmp_p
         assert listed == [nested]
         assert report["refresh_changed"] is True
         assert report["stats"]["directories_skipped"] == 2
+        assert report["stats"]["summary_scope"] == "affected"
+        assert connection.execute(
+            "SELECT * FROM directory_summary WHERE path_id=?", (old_summary["path_id"],),
+        ).fetchone() == old_summary
         assert report["paths_deleted"] == 1
         details = scan_info(connection, report["scan_id"])
         assert details["refresh_changed"] is True

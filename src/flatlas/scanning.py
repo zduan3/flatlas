@@ -242,6 +242,7 @@ def _ensure_ancestors(
     scope: Path,
     *,
     lazy: bool = False,
+    affected_directories: set[int] | None = None,
 ) -> tuple[int, Observation]:
     values = [namespace.path]
     relative = scope.relative_to(namespace.path)
@@ -253,6 +254,8 @@ def _ensure_ancestors(
     for index, value in enumerate(values[:-1]):
         observed = _observation(namespace, value, root=index == 0, lazy=lazy)
         parent_id = upsert_path(connection, root_id, scan_id, observed, parent_id=parent_id)
+        if affected_directories is not None:
+            affected_directories.add(parent_id)
     observed = _observation(namespace, scope, root=scope == namespace.path, lazy=lazy)
     return upsert_path(connection, root_id, scan_id, observed, parent_id=parent_id), observed
 
@@ -291,6 +294,32 @@ def _overlapping_scans(
                   OR substr(?, 1, length(ss.scope_path_key))=ss.scope_path_key)""",
         (root_id, *parameters, scope_key, scope_key, scope_key, scope_key),
     )
+
+
+def _summary_repair_needed(connection: sqlite3.Connection, root_id: int, scope_key: bytes, scan_id: int) -> bool:
+    """Find older overlapping scans whose checkpoints may have left stale summaries."""
+    return connection.execute(
+        """WITH last_rebuild AS (
+               SELECT max(s.finished_at_ns) AS finished_at_ns
+               FROM scan s JOIN scan_scope ss ON ss.scan_id=s.id
+               WHERE s.root_id=:root_id AND s.id<:scan_id AND s.max_depth IS NULL
+                 AND substr(:scope_key, 1, length(ss.scope_path_key))=ss.scope_path_key
+                 AND (json_extract(s.stats_json, '$.summary_scope')='subtree'
+                      OR (json_extract(s.stats_json, '$.summary_scope') IS NULL
+                          AND s.status IN ('completed', 'partial')))
+           )
+           SELECT 1 FROM scan s JOIN scan_scope ss ON ss.scan_id=s.id
+           WHERE s.root_id=:root_id AND s.id<:scan_id
+             AND (s.status='running' OR (s.status IN ('failed', 'cancelled')
+                  AND json_extract(s.stats_json, '$.summary_scope') IS NOT 'subtree'
+                  AND (s.finished_at_ns >= (SELECT finished_at_ns FROM last_rebuild)
+                       OR (SELECT finished_at_ns FROM last_rebuild) IS NULL
+                       OR s.finished_at_ns IS NULL)))
+             AND (substr(ss.scope_path_key, 1, length(:scope_key))=:scope_key
+                  OR substr(:scope_key, 1, length(ss.scope_path_key))=ss.scope_path_key)
+           LIMIT 1""",
+        {"root_id": root_id, "scope_key": scope_key, "scan_id": scan_id},
+    ).fetchone() is not None
 
 
 def _purge_missing(
@@ -617,6 +646,7 @@ def scan_directory(
     root_id = int(root["id"])
     lazy = uses_lazy_metadata(root["filesystem_type"])
     timer = ScanTimer()
+    affected_directories: set[int] | None = set() if refresh_before_ns is not None or refresh_changed else None
     allocation_cache = WindowsAllocationCache() if sys.platform == "win32" else None
     kind = "full" if scope == namespace.path else "subtree"
     started = now_ns()
@@ -646,7 +676,9 @@ def scan_directory(
                     raise FlatlasError(f"cannot purge deleted paths: overlapping scan {overlap['id']} is still running")
                 _finalize_abandoned(connection, overlap, reason="purge")
         try:
-            scope_path_id, scope_observed = _ensure_ancestors(connection, namespace, root_id, scan_id, scope, lazy=lazy)
+            scope_path_id, scope_observed = _ensure_ancestors(
+                connection, namespace, root_id, scan_id, scope, lazy=lazy, affected_directories=affected_directories,
+            )
             scope_first_seen = int(connection.execute(
                 "SELECT first_seen_scan_id FROM path WHERE id=?", (scope_path_id,)
             ).fetchone()[0])
@@ -801,6 +833,7 @@ def scan_directory(
                 if not refresh_parent:
                     if refresh_changed:
                         directories_skipped += 1
+                    affected_before = len(affected_directories) if affected_directories is not None else 0
                     for child_path, child_observed in observed_children:
                         with timer.phase("db_write"):
                             child_id = upsert_path(
@@ -808,8 +841,12 @@ def scan_directory(
                             )
                         dirs_seen += 1
                         visit(child_path, child_id, child_observed)
-                    pending_finished.append(directory_id)
+                    if affected_directories is not None and len(affected_directories) > affected_before:
+                        affected_directories.add(directory_id)
+                        pending_finished.append(directory_id)
                     return
+        if affected_directories is not None:
+            affected_directories.add(directory_id)
         report("scanning", directory)
         try:
             with timer.phase("readdir"):
@@ -930,18 +967,21 @@ def scan_directory(
                                 connection, root_id, scan_id, scope_id, directory_id,
                             )
             with timer.phase("summaries"):
-                refresh_directory_summaries(
-                    connection,
-                    root_id,
-                    scope_path_id,
-                    completed_directories=completed_directories if overlap_error is None else None,
-                    max_depth=1 if shallow else None,
+                overlaps = (scope_status == "completed" or affected_directories is not None) and (
+                    _overlapping_scans(connection, root_id, scope_key, scan_id, since_ns=started).fetchone() is not None
                 )
-                if scope_status == "completed" and (
-                    refresh_changed or not _overlapping_scans(
-                        connection, root_id, scope_key, scan_id, since_ns=started,
-                    ).fetchone()
-                ):
+                if (affected_directories is not None and scope_status in ("completed", "partial") and not overlaps
+                        and not _summary_repair_needed(connection, root_id, scope_key, scan_id)):
+                    refresh_finished_directories(connection, sorted(affected_directories), completed_directories)
+                    summary_scope = "affected"
+                else:
+                    refresh_directory_summaries(
+                        connection, root_id, scope_path_id,
+                        completed_directories=completed_directories if overlap_error is None else None,
+                        max_depth=1 if shallow else None,
+                    )
+                    summary_scope = "shallow" if shallow else "subtree"
+                if scope_status == "completed" and (refresh_changed or not overlaps):
                     connection.executemany(
                         """UPDATE directory_summary SET enumerated_mtime_ns=?, enumerated_change_time_ns=?
                            WHERE path_id=? AND last_completed_scan_id=?
@@ -953,7 +993,9 @@ def scan_directory(
             errors = int(
                 connection.execute("SELECT error_count FROM scan_scope WHERE id=?", (scope_id,)).fetchone()["error_count"]
             )
-            stats = timer.as_dict(files_seen + dirs_seen) | {"checkpoints": checkpoints} | deletion_counts
+            stats = timer.as_dict(files_seen + dirs_seen) | {
+                "checkpoints": checkpoints, "summary_scope": summary_scope,
+            } | deletion_counts
             if refresh_changed:
                 stats["directories_skipped"] = directories_skipped
             _claim_running_scan(
