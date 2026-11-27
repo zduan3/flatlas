@@ -36,6 +36,7 @@
 ## research/：调研
 
 - [同类工具与 MVP（0.1）功能对照](research/tool-comparison.md)：产品范围与外部工具对照记录。
+- [Windows 扫描调研](research/windows-scan-everything.md)记录 Everything 的索引方式、flatlas 实测和参照接口。
 
 ## 开发指南
 

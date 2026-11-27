@@ -60,6 +60,11 @@ File Atlas 首先服务于寻找大文件、大目录和重复内容，以减少
 - 与 Python backend 对照同一测试语料和规范化 SQLite 结果。
 - 加入有界并发、取消、进度统计和性能基准。
 
+### Windows 扫描的远期评估
+
+- 先评估 `FileIdExtdDirectoryInfo` 批量读取目录元数据。用现有扫描器逐路径对照 File ID、hardlink、reparse 以及驻留、稀疏、压缩文件的占用值。接口或字段不可用时，保留逐路径采集。
+- 有整卷建库需求时，再评估本地 NTFS 的 `FSCTL_ENUM_USN_DATA`。验证卷权限、多个 hardlink 路径的枚举完整性、路径重建、reparse 边界和占用字段补采。普通目录与网络共享继续走目录枚举。接口与实测背景见 [Windows 扫描调研](../research/windows-scan-everything.md)。
+
 ## 阶段 5：安全去重执行器
 
 - plan 在 apply 前重新验证文件身份、metadata 与内容。
@@ -71,4 +76,5 @@ File Atlas 首先服务于寻找大文件、大目录和重复内容，以减少
 ## 阶段 6：持续增量与体验
 
 - 事件驱动 dirty queue 与定期 reconcile。
+- Windows 先评估在显式刷新时读取已有的 USN Journal，按卷保存 Journal ID 和游标，定位需要重扫的文件与目录。改名覆盖新旧父目录，hardlink 变化覆盖受影响路径。日志断档或卷身份变化时回退常规扫描，删除仍由 `completed` scope 确认。见 [Windows 扫描调研](../research/windows-scan-everything.md#供后续评估的-windows-接口)。
 - 可选 TUI、shell completion、稳定 JSON 协议与发行打包。
