@@ -69,6 +69,15 @@ uv run pytest -q tests/test_dupes_filters.py::test_local_rescan_combines_new_and
 
 从 Windows 可以通过 `wsl.exe -d Ubuntu --exec bash -lc 'cd ~/code/flatlas && uv sync --locked && uv run ruff check . && uv run pytest -q -rs && uv run pyright && git diff --check'` 调用 Linux 检查。执行前确认 Linux 副本包含待验证的提交和未提交改动；两端使用各自的 `.venv`，测试语料放在 WSL 原生文件系统中。Linux Pyright 的 Node 运行时需要 `libatomic.so.1`，应由环境提供（这不是 Python 锁文件依赖）。历次带日期的验证结果记录在 [验证记录](history/verification-log.md)。
 
+## 扫描性能对照与排查
+
+1. **固定工作量。** 用同一个目标目录和扫描参数，明确是首次建库、完整重扫、部分目录过期的混合刷新，还是无变化刷新。首扫每次用独立的新索引；重扫用 SQLite backup API 从同一基线为每次运行创建独立副本，通过 `--db` 指向测试索引，保留日常索引。按时间刷新时固定时间戳；复测续扫时，在同一基线的副本上使用相同的 `--resume-from ID`。必要时用全局 `--no-config` 排除个人配置中的扫描默认值。
+2. **记录环境和耗时。** 记下对照版本、平台、扫描目标和索引各自所在的文件系统、运行顺序及已知的冷热缓存状态。在 WSL 用 `findmnt -T PATH` 核对实际挂载类型。保存 `scan --format json` 或 `scan-info ID --format json` 的结果，比较总耗时、观测文件和目录数、各阶段耗时与调用次数、scope 状态、错误数和确认删除数。活目录有变化时记录工作量差异。字段见 [分阶段计时](design/scanning.md#分阶段计时)。
+3. **追到开销发生的层。** 先拆最大的阶段。SQLite 慢时，对照索引上的实际 SQL 和参数运行 `EXPLAIN QUERY PLAN`，核对索引和约束范围，并把单次代价与调用次数一起看。目录汇总慢时，分别测目录集合收集、统计查询、子目录缓存读取和批量写回。跨挂载 I/O 慢时，有条件就按操作记录协议请求数，区分目录枚举与逐项元数据查询，同时核对枚举能提供哪些字段。单独的遍历追踪与含 SQLite 写入的 CLI 计时分别记录。
+4. **校验索引结果。** 按 namespace 和 `path_key` 对齐路径，比对状态、逻辑大小、占用空间以及受影响目录和祖先的汇总。核对 scope 的完成状态、实际报错的路径与错误类型，以及确认为删除的路径集合。局部汇总优化可在同一结果副本上做整树重算，对比汇总值和覆盖状态，单独处理仅记录运行时间或编号的字段。若修复本身改变错误或覆盖，列出预期差异并核对实际结果。
+
+示例见 [Windows 扫描实测与 WSL 的 9P 追踪](research/windows-scan-everything.md)。
+
 ## 后续 Rust 配置
 
 仅在进入 Rust 阶段时安装：
