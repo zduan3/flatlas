@@ -23,7 +23,7 @@
 - **重复目录树候选**：只读索引，按目录内相对路径与 size 找出结构相同或几乎相同的目录树副本，作为 inode 清理候选（不是删除授权）。建议先用 `flatlas.api` 在真实索引上跑脚本原型，再沉淀相似度与折叠规则。
 - **lazy-hash 后续能力**：有界并发、`--cached` / `--rehash`、多 PATH 与 include/exclude。→ [proposals/lazy-hash.md](proposals/lazy-hash.md)
 - **query-cli GNU 兼容批次**：交互用 `ls` / `du` / `df` 参数，`coverage`、`errors` 诊断命令；按实际缺口补齐，不照表全量实现。→ [proposals/query-cli.md](proposals/query-cli.md)
-- **跨平台与数据真实性**：Linux 非 UTF-8 路径、Windows 长路径与 reparse tag、跨 mount/volume 策略、allocated size 平台校准及复杂物理空间语义的保守表达。→ [路线图](roadmap.md)、[待决策清单](decisions.md)
+- **跨平台与数据真实性**：Linux 非 UTF-8 路径、Windows 长路径的现场查询及 hash 支持、reparse tag、跨 mount/volume 策略、allocated size 平台校准及复杂物理空间语义的保守表达。→ [路线图](roadmap.md)、[待决策清单](decisions.md)
 
 ## 数据库修改计划
 

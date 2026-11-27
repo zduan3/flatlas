@@ -28,9 +28,39 @@ class Namespace:
     identity: bytes
 
 
+def filesystem_path(value: Path) -> Path:
+    """Add a Windows extended-length prefix to an absolute path for filesystem I/O."""
+    if os.name != "nt":
+        return value
+    raw = os.fspath(value)
+    # Allow headroom for the wildcard appended by Windows directory enumeration.
+    # Count UTF-16 units, using a fast path for ordinary short names.
+    if len(raw) < 124 or raw.startswith(("\\\\?\\", "\\\\.\\")):
+        return value
+    if len(raw) < 248 and (raw.isascii() or len(raw.encode("utf-16-le", "surrogatepass")) < 496):
+        return value
+    if raw.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + raw[2:])
+    return Path("\\\\?\\" + raw)
+
+
+def resolve_scan_path(value: Path) -> Path:
+    """Resolve a scan scope and keep drive-letter and UNC identities unprefixed."""
+    expanded = value.expanduser()
+    if os.name != "nt":
+        return expanded.resolve()
+    resolved = filesystem_path(Path(os.path.abspath(expanded))).resolve()
+    raw = os.fspath(resolved)
+    if raw[:8].upper() == "\\\\?\\UNC\\":
+        return Path("\\\\" + raw[8:])
+    if raw.startswith("\\\\?\\") and len(raw) >= 7 and raw[5:7] == ":\\":
+        return Path(raw[4:])
+    return resolved
+
+
 def discover_namespace(value: Path) -> Namespace:
-    path = value.expanduser().resolve()
-    if not path.exists():
+    path = resolve_scan_path(value)
+    if not filesystem_path(path).exists():
         raise PathError(f"path does not exist: {path}")
     if os.name == "nt":
         anchor = Path(path.anchor)

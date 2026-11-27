@@ -29,6 +29,8 @@ flatlas 用 SQLite 保存子树扫描覆盖、错误、文件身份、占用空�
 
 scan 30 和上述 `%USERPROFILE%` 续扫均为 `partial`，复现两处访问拒绝和四处 Office `Wef` 长路径错误，确认删除数均为零。四条路径长 270–286 字符，单独复测时，普通路径的 `lstat` 均报 `WinError 3`，使用 `\\?\` 前缀后均成功。
 
+加入 Windows 扫描长路径支持后，按同一截止时间复测，四个 Office 文件均被本次扫描观测并记录了逻辑大小和占用空间。错误降至两条，均为此前的访问拒绝。scope 仍为 `partial`，确认删除数为零。
+
 ## 供后续评估的 Windows 接口
 
 - `GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)` 可按目录批量取得名称、File ID、逻辑大小、分配大小、时间和 reparse tag。[Microsoft 目录元数据结构](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_extd_dir_info)

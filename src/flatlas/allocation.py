@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from flatlas.lazystat import LazyStat
+from flatlas.paths import filesystem_path
 
 
 class _WindowsCtypes(Protocol):
@@ -60,7 +61,7 @@ def _compressed_size(path: Path) -> int:
     high = ctypes.c_uint32()
     # 0xffffffff is also a valid low DWORD; only a nonzero last error means failure.
     _windows_ctypes.set_last_error(0)
-    low = api.GetCompressedFileSizeW(str(path.absolute()), ctypes.byref(high))
+    low = api.GetCompressedFileSizeW(str(filesystem_path(path.absolute())), ctypes.byref(high))
     error = _windows_ctypes.get_last_error()
     if low == 0xFFFFFFFF and error:
         raise _windows_ctypes.WinError(error)
@@ -70,7 +71,7 @@ def _compressed_size(path: Path) -> int:
 def _volume_path(path: Path) -> str:
     api = _windows_api()
     volume = ctypes.create_unicode_buffer(32768)
-    if not api.GetVolumePathNameW(str(path.absolute()), volume, len(volume)):
+    if not api.GetVolumePathNameW(str(filesystem_path(path.absolute())), volume, len(volume)):
         raise _windows_ctypes.WinError(_windows_ctypes.get_last_error())
     return volume.value
 
@@ -146,7 +147,7 @@ def _has_no_extents(path: Path) -> bool:
     api = _windows_api()
     # FILE_READ_ATTRIBUTES, share read/write/delete, OPEN_EXISTING,
     # FILE_FLAG_OPEN_REPARSE_POINT: never open a replacement reparse target.
-    handle = api.CreateFileW(str(path.absolute()), 0x80, 7, None, 3, 0x200000, None)
+    handle = api.CreateFileW(str(filesystem_path(path.absolute())), 0x80, 7, None, 3, 0x200000, None)
     if handle == ctypes.c_void_p(-1).value:
         raise _windows_ctypes.WinError(_windows_ctypes.get_last_error())
     try:

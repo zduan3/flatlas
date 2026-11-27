@@ -28,10 +28,12 @@ from flatlas.paths import (
     discover_namespace,
     display_path,
     display_text,
+    filesystem_path,
     get_root,
     parent_key,
     path_from_key,
     path_key,
+    resolve_scan_path,
 )
 from flatlas.summaries import refresh_directory_summaries, refresh_finished_directories
 
@@ -98,7 +100,8 @@ def _observation(
     # caller already has it (the scanner extends its parent's key): path_key()
     # re-splits the whole relative path, which cost ~80 us per deep entry.
     with timer.phase("lstat") if timer is not None else nullcontext():
-        stat = lazy_lstat(value) if lazy else value.lstat()
+        io_path = filesystem_path(value) if sys.platform == "win32" else value
+        stat = lazy_lstat(io_path) if lazy else io_path.lstat()
     mode = stat.st_mode
     reparse = bool(getattr(stat, "st_file_attributes", 0) & getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
     if root:
@@ -116,7 +119,7 @@ def _observation(
     target: bytes | None = None
     if kind == "symlink":
         try:
-            target = os.fsencode(os.readlink(value))
+            target = os.fsencode(os.readlink(io_path))
         except OSError:
             target = None
     allocation = None
@@ -478,8 +481,8 @@ def resume_selection(
     root = get_root(connection, namespace)
     if root is None:
         raise FlatlasError(f"filesystem is not registered; run 'flatlas init {value}' first")
-    scope = value.expanduser().resolve()
-    if not scope.is_dir():
+    scope = resolve_scan_path(value)
+    if not filesystem_path(scope).is_dir():
         raise FlatlasError(f"scan path must be a directory: {scope}")
     scope_key = path_key(namespace, scope)
     row = connection.execute(
@@ -640,8 +643,8 @@ def scan_directory(
     root = get_root(connection, namespace)
     if root is None:
         raise FlatlasError(f"filesystem is not registered; run 'flatlas init {value}' first")
-    scope = value.expanduser().resolve()
-    if not scope.is_dir():
+    scope = resolve_scan_path(value)
+    if not filesystem_path(scope).is_dir():
         raise FlatlasError(f"scan path must be a directory: {scope}")
     root_id = int(root["id"])
     lazy = uses_lazy_metadata(root["filesystem_type"])
@@ -848,9 +851,10 @@ def scan_directory(
         if affected_directories is not None:
             affected_directories.add(directory_id)
         report("scanning", directory)
+        io_directory = filesystem_path(directory)
         try:
             with timer.phase("readdir"):
-                entries = list(os.scandir(directory))
+                entries = list(os.scandir(io_directory))
         except OSError as exc:
             _record_error(connection, scope_id, directory_key, "enumerate", exc)
             failed = True
@@ -858,7 +862,7 @@ def scan_directory(
         directory_complete = True
         for entry in entries:
             maybe_checkpoint()
-            entry_path = Path(entry.path)
+            entry_path = Path(entry.path) if io_directory is directory else directory / entry.name
             entry_key = directory_key + os.fsencode(entry.name) + b"\0"
             try:
                 observed = timer.observe_entry(

@@ -2,6 +2,10 @@
 
 > 状态：当前设计。描述各平台的 metadata 与占用空间采集差异及实测成本；随代码更新。跨平台边界总表见 [架构与边界](architecture.md#跨平台边界)。
 
+## Windows：扫描长路径
+
+扫描和续扫支持 Windows 扩展长度路径。直接指定扫描范围时，普通路径和带前缀的盘符或 UNC 路径都归入同一个索引 namespace。枚举、`lstat`、`readlink` 和 Win32 占用空间查询在 I/O 边界为长路径添加 `\\?\` 或 `\\?\UNC\`。长度按 UTF-16 代码单元判断，并为目录枚举的通配符预留空间。BLOB 路径键和用于查询的显示路径沿用普通路径格式，旧索引可以直接重扫。遍历中的 symlink、junction 和其他 reparse point 仍按现有规则处理。[Microsoft 长路径说明](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation)
+
 ## Windows：占用空间
 
 Windows 占用空间复用 `path.allocated_size` 和目录汇总缓存，无需 schema migration。

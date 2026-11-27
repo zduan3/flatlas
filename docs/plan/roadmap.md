@@ -30,7 +30,7 @@ File Atlas 首先服务于寻找大文件、大目录和重复内容，以减少
 - 局部子树更新、当前状态校验、stale hash 重算、dirty state 与历史结果保留策略，并以最小的 `coverage`、`errors`、scan 摘要解释结果可信度。
 - 配置化 include/exclude、大小与时间过滤；hash 并发、强制重算/只用缓存模式与 [`dupes` 本次运行诊断](../design/hashing.md#输出)。
 - 基准测试与故障注入测试。
-- 补齐 Linux 非 UTF-8、Windows 长路径/reparse tag、跨 mount/volume 策略和 allocated size 平台校准。
+- 补齐 Linux 非 UTF-8、Windows 长路径的现场查询及 hash 支持、reparse tag、跨 mount/volume 策略和 allocated size 平台校准。
 
 0.2 以「自动化存储评估」为主线分批发布。场景来自 Lustre 上百万级条目的存储盘点与清理：后台扫描百万级条目、脚本生成按目录的字节与条目数概览和可重建候选、删除后同步索引并对比前后数值。0.1 的 JSON 形状与 `core.py` 不再保留，不考虑向后兼容。
 
