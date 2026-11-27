@@ -78,3 +78,7 @@ File Atlas 首先服务于寻找大文件、大目录和重复内容，以减少
 - 事件驱动 dirty queue 与定期 reconcile。
 - Windows 先评估在显式刷新时读取已有的 USN Journal，按卷保存 Journal ID 和游标，定位需要重扫的文件与目录。改名覆盖新旧父目录，hardlink 变化覆盖受影响路径。日志断档或卷身份变化时回退常规扫描，删除仍由 `completed` scope 确认。见 [Windows 扫描调研](../research/windows-scan-everything.md#供后续评估的-windows-接口)。
 - 可选 TUI、shell completion、稳定 JSON 协议与发行打包。
+
+## 按需求启动的扫描优化
+
+- 有从 WSL 扫描 Windows 挂载盘的实际需求时，再实现目录句柄复用。用同一目录 fd 枚举和读取子项属性，逐路径对照元数据与占用空间，并验证符号链接、错误处理和缺失路径确认。见 [WSL 9P 追踪记录](../research/windows-scan-everything.md#wsl-跨挂载扫描的-9p-追踪)。

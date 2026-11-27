@@ -1,6 +1,6 @@
 # Windows 扫描调研：Everything 与 flatlas
 
-调研与实测日期为 2026-11-27。对比依据是 Everything 的公开说明与 flatlas 的 Windows 实测，计时均来自 flatlas。
+调研与实测日期为 2026-11-27。对比依据为 Everything 的公开说明、flatlas 的 Windows 实测及 WSL 上的遍历追踪。
 
 ## Everything 的索引方式
 
@@ -30,6 +30,23 @@ flatlas 用 SQLite 保存子树扫描覆盖、错误、文件身份、占用空�
 scan 30 和上述 `%USERPROFILE%` 续扫均为 `partial`，复现两处访问拒绝和四处 Office `Wef` 长路径错误，确认删除数均为零。四条路径长 270–286 字符，单独复测时，普通路径的 `lstat` 均报 `WinError 3`，使用 `\\?\` 前缀后均成功。
 
 加入 Windows 扫描长路径支持后，按同一截止时间复测，四个 Office 文件均被本次扫描观测并记录了逻辑大小和占用空间。错误降至两条，均为此前的访问拒绝。scope 仍为 `partial`，确认删除数为零。
+
+## WSL 跨挂载扫描的 9P 追踪
+
+同一 Windows `scoop/apps` 目录在 WSL 2 的 `/mnt/c` 下以 9P 挂载。用放在 WSL 原生 ext4 上的新索引首扫，耗时 235.357 秒，其中 `observe` 为 220.317 秒，`readdir` 为 12.210 秒，合计占 98.8%。两阶段包含跨挂载层访问的开销。
+
+随后用内核 `9p_client_req` 追踪两次完整遍历。遍历脚本复现文件系统调用，跳过 SQLite 写入。两次均读取 35,803 个普通文件、2,147 个目录和 33 个符号链接，无读取错误或追踪丢事件。
+
+| 操作 | 绝对路径枚举与 `lstat` | 复用打开的父目录 fd |
+|---|---:|---:|
+| 目录枚举（含打开与关闭） | 82,034 | 21,479 |
+| 普通文件 `lstat` | 1,211,875 | 143,212 |
+| 子目录与符号链接 `lstat` | 69,799 | 8,716 |
+| 全部 9P 请求（含根路径检查与 `readlink`） | 1,364,381 | 173,552 |
+| 追踪遍历总耗时 | 179.2 s | 27.1 s |
+
+- 两次均发出 6,441 个 `TREADDIR`，每个目录 3 个。保持父目录打开后，`os.scandir(fd)` 与 `os.stat(name, dir_fd=fd, follow_symlinks=False)` 共用目录句柄，省去重复的祖先路径解析。普通文件的请求数从平均 33.85 个降到 4 个，每条仍有 1 个 `TWALK`、2 个 `TGETATTR`、1 个 `TCLUNK`。
+- 9P2000.L 的目录条目向 Linux 提供名称、类型和 inode，大小、时间戳、占用块数仍需另取。抽查 64 个条目，读取类型和 inode 共发出 0 个请求；首次调用 `DirEntry.stat(follow_symlinks=False)` 发出 1,600 个请求，第二次对同一 `DirEntry` 调用命中 Python 缓存。 [WSL 内核目录枚举实现](https://raw.githubusercontent.com/microsoft/WSL2-Linux-Kernel/linux-msft-wsl-5.15.y/fs/9p/vfs_dir.c) · [Python DirEntry 文档](https://docs.python.org/3.12/library/os.html#os.DirEntry)
 
 ## 供后续评估的 Windows 接口
 
