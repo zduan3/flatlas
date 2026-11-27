@@ -2,6 +2,7 @@ import ctypes
 import json
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -32,7 +33,15 @@ def test_windows_regular_file_rounds_to_volume_cluster(monkeypatch, size, expect
     monkeypatch.setattr(allocation, "_cluster_size", lambda _path: 4096)
     monkeypatch.setattr(allocation, "_has_no_extents", lambda _path: False)
     metadata = cast(os.stat_result, SimpleNamespace(st_size=size, st_file_attributes=0))
-    assert allocation.allocated_size(Path("file"), metadata) == expected
+    phases = []
+
+    @contextmanager
+    def phase(name):
+        phases.append(name)
+        yield
+
+    assert allocation.allocated_size(Path("file"), metadata, phase=phase) == expected
+    assert phases == (["extents", "cluster_size"] if size else [])
 
 
 @pytest.mark.parametrize("attributes", [0x200, 0x800, 0xA00])
@@ -157,6 +166,65 @@ def test_cluster_uses_actual_volume_and_propagates_failures(monkeypatch, failure
             allocation._cluster_size(Path("file"))
 
 
+def test_cluster_cache_resolves_each_directory_and_reuses_volume_aliases(monkeypatch) -> None:
+    located = []
+    queried = []
+
+    def mount_point(path):
+        located.append(path)
+        return {"base": "drive", "mounted": "nested mount", "alias": "second mount"}[path.parent.name]
+
+    def cluster_size(volume):
+        queried.append(volume)
+        return {"first guid": 4096, "second guid": 65536}[volume]
+
+    monkeypatch.setattr(allocation, "_volume_path", mount_point)
+    monkeypatch.setattr(allocation, "_volume_guid", lambda mount: "first guid" if mount == "drive" else "second guid")
+    monkeypatch.setattr(allocation, "_volume_device", lambda volume: 1 if volume == "first guid" else 2)
+    monkeypatch.setattr(allocation, "_volume_cluster_size", cluster_size)
+    cache = allocation.WindowsAllocationCache()
+    base = Path("base")
+    mounted = base / "mounted"
+    alias = base / "alias"
+    assert cache.cluster_size(base / "a", 1) == 4096
+    assert cache.cluster_size(base / "b", 1) == 4096
+    assert cache.cluster_size(mounted / "a", 2) == 65536
+    assert cache.cluster_size(mounted / "b", 2) == 65536
+    assert cache.cluster_size(alias / "a", 2) == 65536
+    assert located == [base / "a", mounted / "a", alias / "a"]
+    assert queried == ["first guid", "second guid"]
+
+    monkeypatch.setattr(allocation, "_volume_path", lambda _path: "nested mount")
+    assert cache.cluster_size(base / "c", 2) == 65536  # The directory now resolves to another device.
+
+
+@pytest.mark.parametrize("fallback", ["unknown device", "no GUID", "GUID query fails", "volume changed"])
+def test_cluster_cache_fallback_keeps_per_file_queries(monkeypatch, fallback) -> None:
+    located = []
+
+    def mount_point(path):
+        located.append(path)
+        return "mount"
+
+    def cluster_size(volume):
+        if volume != "mount":
+            raise OSError("GUID path is unavailable")
+        return 8192
+
+    monkeypatch.setattr(allocation, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(allocation, "_has_no_extents", lambda _path: False)
+    monkeypatch.setattr(allocation, "_volume_path", mount_point)
+    monkeypatch.setattr(allocation, "_volume_guid", lambda _mount: None if fallback == "no GUID" else "guid")
+    monkeypatch.setattr(allocation, "_volume_device", lambda _volume: 2 if fallback == "volume changed" else 1)
+    monkeypatch.setattr(allocation, "_volume_cluster_size", cluster_size)
+    cache = allocation.WindowsAllocationCache()
+    device = 0 if fallback == "unknown device" else 1
+    metadata = cast(os.stat_result, SimpleNamespace(st_size=5000, st_dev=device))
+    files = [Path("directory") / name for name in ("a", "b")]
+    assert [allocation.allocated_size(path, metadata, cache=cache) for path in files] == [8192, 8192]
+    assert located == files
+
+
 @pytest.mark.scan
 @pytest.mark.safety
 def test_allocation_failure_preserves_metadata_and_prevents_false_deletion(tmp_path, monkeypatch) -> None:
@@ -170,7 +238,7 @@ def test_allocation_failure_preserves_metadata_and_prevents_false_deletion(tmp_p
     missing = nested / "missing"
     missing.write_bytes(b"b")
     (outside / "untouched").write_bytes(b"c")
-    monkeypatch.setattr(scanning, "allocated_size", lambda _path, _metadata: 4096)
+    monkeypatch.setattr(scanning, "allocated_size", lambda _path, _metadata, **_kwargs: 4096)
     with open_database(tmp_path / "index.sqlite") as connection:
         register_namespace(connection, discover_namespace(source))
         scan_directory(connection, source)
@@ -181,7 +249,7 @@ def test_allocation_failure_preserves_metadata_and_prevents_false_deletion(tmp_p
         missing.unlink()
         target.write_bytes(b"changed")
 
-        def fail(path, _metadata):
+        def fail(path, _metadata, **_kwargs):
             if path == target:
                 raise OSError(5, "allocation query failed")
             return 4096
@@ -208,14 +276,14 @@ def test_allocation_failure_preserves_metadata_and_prevents_false_deletion(tmp_p
         ).fetchone()[0] == old_freshness
         live = list_child_directories(connection, scope=nested)
         assert next(row for row in live if Path(row["path"]).name == "file")["allocated_size"] is None
-        monkeypatch.setattr(scanning, "allocated_size", lambda _path, _metadata: 4096)
+        monkeypatch.setattr(scanning, "allocated_size", lambda _path, _metadata, **_kwargs: 4096)
         assert scan_directory(connection, nested)["status"] == "completed"
         assert disk_usage(connection, scope=source)[0]["allocated_size"] == 8192
 
 
 @pytest.mark.safety
 def test_allocation_is_never_queried_for_directories_or_symlinks(tmp_path, monkeypatch) -> None:
-    def forbidden(*_args):
+    def forbidden(*_args, **_kwargs):
         pytest.fail("special entries must not query allocation")
 
     monkeypatch.setattr(scanning, "allocated_size", forbidden)
@@ -234,14 +302,14 @@ def test_reparse_file_is_not_queried(tmp_path, monkeypatch) -> None:
     namespace = discover_namespace(tmp_path)
     monkeypatch.setattr(Path, "lstat", lambda _path: SimpleNamespace(st_mode=0o100644, st_file_attributes=0x400))
     monkeypatch.setattr(scanning.os.path, "islink", lambda _path: False)
-    monkeypatch.setattr(scanning, "allocated_size", lambda *_args: pytest.fail("must not follow reparse"))
+    monkeypatch.setattr(scanning, "allocated_size", lambda *_args, **_kwargs: pytest.fail("must not follow reparse"))
     observed = scanning._observation(namespace, tmp_path / "reparse")
     assert observed.kind == "reparse"
     assert observed.allocated_size is None
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="native Windows allocation APIs")
-def test_native_windows_scan_and_ls_du_outputs(tmp_path: Path) -> None:
+def test_native_windows_scan_and_ls_du_outputs(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "文件"
     nested = source / "nested"
     nested.mkdir(parents=True)
@@ -251,18 +319,58 @@ def test_native_windows_scan_and_ls_du_outputs(tmp_path: Path) -> None:
     expected = allocation.allocated_size(file, file.lstat())
     assert expected is not None and expected > 0
     assert allocation.allocated_size(nested / "empty", (nested / "empty").lstat()) == 0
+    sibling = nested / "second.bin"
+    sibling.write_bytes(b"x" * 5000)
+    located = []
+    volume_path = allocation._volume_path
+
+    def locate(path):
+        located.append(path)
+        return volume_path(path)
+
+    monkeypatch.setattr(allocation, "_volume_path", locate)
     database = tmp_path / "index.sqlite"
     with open_database(database) as connection:
         register_namespace(connection, discover_namespace(source))
-        assert scan_directory(connection, source)["status"] == "completed"
-        assert disk_usage(connection, scope=source)[0]["allocated_size"] == expected
-        assert list_child_directories(connection, scope=source)[0]["allocated_size"] == expected
+        for scans in (1, 2):
+            assert scan_directory(connection, source)["status"] == "completed"
+            assert disk_usage(connection, scope=source)[0]["allocated_size"] == 2 * expected
+            assert list_child_directories(connection, scope=source)[0]["allocated_size"] == 2 * expected
+            assert len(located) == scans and all(path.parent == nested for path in located)
     runner = CliRunner()
     for command in ["ls", "du"]:
         result = runner.invoke(app, [command, str(source), "--db", str(database)])
         assert result.exit_code == 0, result.output
         assert "ALLOC(B)" in result.stdout
-        assert str(expected) in result.stdout
+        assert str(2 * expected) in result.stdout
+
+
+@pytest.mark.scan
+@pytest.mark.safety
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows junctions")
+def test_scan_does_not_resolve_volumes_through_junction_entries(tmp_path: Path, monkeypatch) -> None:
+    winapi = pytest.importorskip("_winapi")
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    (target / "outside.bin").write_bytes(b"x" * 5000)
+    try:
+        winapi.CreateJunction(str(target), str(source / "junction"))
+    except OSError as exc:
+        pytest.skip(f"junction creation unavailable: {exc}")
+
+    def unexpected_lookup(_path):
+        pytest.fail("must not look up a volume for a junction or its descendants")
+
+    monkeypatch.setattr(allocation, "_volume_path", unexpected_lookup)
+    with open_database(tmp_path / "index.sqlite") as connection:
+        register_namespace(connection, discover_namespace(source))
+        result = scan_directory(connection, source)
+        assert result["status"] == "completed"
+        assert result["files_seen"] == 0
+        row = connection.execute("SELECT entry_kind, allocated_size FROM path WHERE name_raw=?", (b"junction",)).fetchone()
+        assert tuple(row) == ("reparse", None)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="native Windows sparse/compression controls")

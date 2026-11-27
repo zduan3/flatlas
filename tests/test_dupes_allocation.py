@@ -39,14 +39,16 @@ def test_dupes_filters_zero_allocation_before_grouping_and_hashing(tmp_path: Pat
         content = b"resident" if name.startswith("zero") else b"mixed" if name.startswith("mixed") else b"singleton"
         (source / name).write_bytes(content)
     database = tmp_path / "index.sqlite"
-    monkeypatch.setattr("flatlas.scanning.allocated_size", lambda path, _metadata: 4096 if cached else allocations[path.name])
+    monkeypatch.setattr(
+        "flatlas.scanning.allocated_size", lambda path, _metadata, **_kwargs: 4096 if cached else allocations[path.name],
+    )
     connection = open_database(database)
     try:
         root_id = register_namespace(connection, discover_namespace(source))
         scan_directory(connection, source)
         if cached:
             assert ensure_duplicate_hashes(connection, source).candidate_files == 7
-            monkeypatch.setattr("flatlas.scanning.allocated_size", lambda path, _metadata: allocations[path.name])
+            monkeypatch.setattr("flatlas.scanning.allocated_size", lambda path, _metadata, **_kwargs: allocations[path.name])
             scan_directory(connection, source)
         before_hashes = [tuple(row) for row in connection.execute("SELECT * FROM file_hash ORDER BY path_id")]
         before_scopes = [tuple(row) for row in connection.execute("SELECT * FROM scan_scope ORDER BY id")]

@@ -38,7 +38,7 @@ def indexed(tmp_path: Path, monkeypatch):
     (outside / "medium-outside").write_bytes(b"m" * 8)
     monkeypatch.setattr(
         "flatlas.scanning.allocated_size",
-        lambda path, _metadata: 0 if path.name == "zero" else None if path.name == "medium-1" else 4096,
+        lambda path, _metadata, **_kwargs: 0 if path.name == "zero" else None if path.name == "medium-1" else 4096,
     )
     database = tmp_path / "index.sqlite"
     with db.open_database(database) as connection:

@@ -11,12 +11,12 @@ import sys
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from flatlas.allocation import allocated_size
+from flatlas.allocation import WindowsAllocationCache, allocated_size
 from flatlas.db import _last_insert_id, now_ns
 from flatlas.errors import FlatlasError
 from flatlas.lazystat import ExactFallbacks, lazy_lstat, uses_lazy_metadata
@@ -87,6 +87,7 @@ class ResumeSelection:
 
 def _observation(
     namespace: Namespace, value: Path, *, root: bool = False, lazy: bool = False, key: bytes | None = None,
+    timer: ScanTimer | None = None, allocation_cache: WindowsAllocationCache | None = None,
 ) -> Observation:
     # Classify from this single lstat. Extra islink/is_dir/is_file probes would
     # repeat the metadata request per entry, which is the dominant scan cost on
@@ -96,7 +97,8 @@ def _observation(
     # resynchronisation; see flatlas.lazystat. ``key`` is the path key when the
     # caller already has it (the scanner extends its parent's key): path_key()
     # re-splits the whole relative path, which cost ~80 us per deep entry.
-    stat = lazy_lstat(value) if lazy else value.lstat()
+    with timer.phase("lstat") if timer is not None else nullcontext():
+        stat = lazy_lstat(value) if lazy else value.lstat()
     mode = stat.st_mode
     reparse = bool(getattr(stat, "st_file_attributes", 0) & getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
     if root:
@@ -121,7 +123,11 @@ def _observation(
     allocation_error = None
     if kind == "file":
         try:
-            allocation = allocated_size(value, stat)
+            if timer is None:
+                allocation = allocated_size(value, stat)
+            else:
+                with timer.phase("allocation"):
+                    allocation = allocated_size(value, stat, phase=timer.allocation_phase, cache=allocation_cache)
         except OSError as exc:
             allocation_error = exc
     return Observation(
@@ -512,35 +518,57 @@ class ScanTimer:
     """Wall time and call counts per scan phase, persisted as ``scan.stats_json``.
 
     Phases are measured around individual operations, so the recursion in
-    ``visit`` does not double count. ``observe`` includes the exact-``lstat``
-    fallbacks, reported separately as ``exact_stat_fallbacks``.
+    ``visit`` does not double count. On Windows, ``lstat`` and ``allocation``
+    are separate phases. Elsewhere, ``observe`` includes any exact-``lstat``
+    fallbacks, also reported separately as ``exact_stat_fallbacks``.
     """
 
     def __init__(self) -> None:
         self.ns: defaultdict[str, int] = defaultdict(int)
         self.calls: defaultdict[str, int] = defaultdict(int)
+        self.allocation_ns: defaultdict[str, int] = defaultdict(int)
+        self.allocation_calls: defaultdict[str, int] = defaultdict(int)
         self.started = time.perf_counter_ns()
         self._fallbacks = (ExactFallbacks.count, ExactFallbacks.ns)
 
     @contextmanager
-    def phase(self, name: str) -> Iterator[None]:
+    def phase(self, name: str, *, allocation: bool = False) -> Iterator[None]:
+        ns, calls = (self.allocation_ns, self.allocation_calls) if allocation else (self.ns, self.calls)
         started = time.perf_counter_ns()
         try:
             yield
         finally:
-            self.ns[name] += time.perf_counter_ns() - started
-            self.calls[name] += 1
+            ns[name] += time.perf_counter_ns() - started
+            calls[name] += 1
+
+    def allocation_phase(self, name: str) -> AbstractContextManager[None]:
+        return self.phase(name, allocation=True)
+
+    def observe_entry(
+        self, namespace: Namespace, path: Path, *, lazy: bool, key: bytes,
+        allocation_cache: WindowsAllocationCache | None,
+    ) -> Observation:
+        if sys.platform == "win32":
+            return _observation(namespace, path, lazy=lazy, key=key, timer=self, allocation_cache=allocation_cache)
+        with self.phase("observe"):
+            return _observation(namespace, path, lazy=lazy, key=key)
 
     def as_dict(self, entries: int) -> dict[str, Any]:
         wall_ns = time.perf_counter_ns() - self.started
         wall_s = wall_ns / 1e9
+        phases: dict[str, dict[str, Any]] = {
+            name: {"s": round(self.ns[name] / 1e9, 3), "calls": self.calls[name]}
+            for name in sorted(self.ns, key=lambda key: -self.ns[key])
+        }
+        if self.allocation_ns:
+            phases["allocation"]["phases"] = {
+                name: {"s": round(ns / 1e9, 3), "calls": self.allocation_calls[name]}
+                for name, ns in self.allocation_ns.items()
+            }
         return {
             "wall_s": round(wall_s, 3),
             "entries_per_s": round(entries / wall_s, 1) if wall_s > 0 else None,
-            "phases": {
-                name: {"s": round(self.ns[name] / 1e9, 3), "calls": self.calls[name]}
-                for name in sorted(self.ns, key=lambda key: -self.ns[key])
-            },
+            "phases": phases,
             "unaccounted_s": round((wall_ns - sum(self.ns.values())) / 1e9, 3),
             "exact_stat_fallbacks": ExactFallbacks.count - self._fallbacks[0],
             "exact_stat_fallback_s": round((ExactFallbacks.ns - self._fallbacks[1]) / 1e9, 3),
@@ -587,6 +615,7 @@ def scan_directory(
     root_id = int(root["id"])
     lazy = uses_lazy_metadata(root["filesystem_type"])
     timer = ScanTimer()
+    allocation_cache = WindowsAllocationCache() if sys.platform == "win32" else None
     kind = "full" if scope == namespace.path else "subtree"
     started = now_ns()
     if refresh_before_ns is not None and refresh_before_ns > started:
@@ -749,10 +778,10 @@ def scan_directory(
                         continue
                     child_path = path_from_key(os.fsencode(namespace.path), child["path_key"])
                     try:
-                        with timer.phase("observe"):
-                            child_observed = _observation(
-                                namespace, child_path, lazy=lazy, key=bytes(child["path_key"])
-                            )
+                        child_observed = timer.observe_entry(
+                            namespace, child_path, lazy=lazy, key=bytes(child["path_key"]),
+                            allocation_cache=allocation_cache,
+                        )
                     except FileNotFoundError:
                         # The child was known when the parent was last
                         # enumerated. Re-enumerate the parent before
@@ -793,8 +822,9 @@ def scan_directory(
             entry_path = Path(entry.path)
             entry_key = directory_key + os.fsencode(entry.name) + b"\0"
             try:
-                with timer.phase("observe"):
-                    observed = _observation(namespace, entry_path, lazy=lazy, key=entry_key)
+                observed = timer.observe_entry(
+                    namespace, entry_path, lazy=lazy, key=entry_key, allocation_cache=allocation_cache,
+                )
             except OSError as exc:
                 _record_error(connection, scope_id, entry_key, "stat", exc)
                 failed = True

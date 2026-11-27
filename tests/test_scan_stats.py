@@ -3,6 +3,7 @@
 import json
 import shutil
 import sqlite3
+import sys
 from contextlib import closing
 from itertools import count
 from pathlib import Path
@@ -10,7 +11,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from flatlas import lazystat, paths, scanning
+from flatlas import allocation, lazystat, paths, scanning
 from flatlas.cli import app
 from flatlas.db import now_ns, open_database
 from flatlas.paths import (
@@ -31,7 +32,12 @@ def _tree(tmp_path: Path) -> Path:
     return source
 
 
-def test_scan_reports_and_persists_phase_timing(tmp_path: Path) -> None:
+def test_scan_reports_and_persists_phase_timing(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(allocation, "_has_no_extents", lambda path: path.name == "b.bin")
+    monkeypatch.setattr(allocation, "_volume_path", lambda _path: "mount")
+    monkeypatch.setattr(allocation, "_volume_guid", lambda _mount: "guid")
+    monkeypatch.setattr(allocation, "_volume_device", lambda _volume: tmp_path.lstat().st_dev)
+    monkeypatch.setattr(allocation, "_volume_cluster_size", lambda _volume: 4096)
     source = _tree(tmp_path)
     connection = open_database(tmp_path / "index.sqlite")
     try:
@@ -39,9 +45,20 @@ def test_scan_reports_and_persists_phase_timing(tmp_path: Path) -> None:
         result = scan_directory(connection, source)
         stats = result["stats"]
         assert result["paths_deleted"] == stats["paths_deleted"] == 0
-        assert {"readdir", "observe", "db_write", "mark_missing", "summaries"} <= set(stats["phases"])
-        assert stats["phases"]["observe"]["calls"] == 3  # nested, a.bin, b.bin
-        assert stats["phases"]["readdir"]["calls"] == 2
+        phases = stats["phases"]
+        assert {"readdir", "db_write", "mark_missing", "summaries"} <= set(phases)
+        if sys.platform == "win32":
+            assert phases["lstat"]["calls"] == 3  # nested, a.bin, b.bin
+            assert phases["allocation"]["calls"] == 2  # a.bin, b.bin
+            allocation_phases = phases["allocation"]["phases"]
+            assert allocation_phases["extents"]["calls"] == 2
+            assert allocation_phases["cluster_size"]["calls"] == 1  # a.bin
+            assert allocation_phases["extents"]["s"] + allocation_phases["cluster_size"]["s"] <= phases["allocation"]["s"] + 0.001
+            assert "observe" not in phases
+        else:
+            assert phases["observe"]["calls"] == 3
+            assert {"lstat", "allocation"}.isdisjoint(phases)
+        assert phases["readdir"]["calls"] == 2
         assert stats["exact_stat_fallbacks"] == 0
         assert stats["wall_s"] >= sum(phase["s"] for phase in stats["phases"].values()) - 0.01
         assert scan_info(connection, result["scan_id"])["stats"] == stats

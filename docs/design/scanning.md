@@ -28,7 +28,9 @@
 - `wall_s`、`entries_per_s`：本次扫描的总耗时与条目速率。速率的分子为本次观测的文件数加目录数，总耗时包含删除确认。
 - `paths_deleted`：最终事务提交的本次缺失路径数，包含缺失目录的已索引后代，每条路径只计一次。普通扫描将这些行标记为 `deleted`，`--purge-deleted` 则直接移除这些行。该字段也显示在 `scan` 的顶层输出中；确认零条时为 `0`，旧扫描缺少该字段时为未知。
 - `paths_purged`：`--purge-deleted` 实际从索引移除的路径数，包括本次缺失路径和旧 tombstone。该字段也显示在该模式的 `scan` 顶层输出中，无移除时为 `0`。
-- `phases`：`readdir`（枚举目录）、`observe`（每个条目的 stat，含 lazy 回退）、`db_write`（path upsert）、`refresh_query`（`--refresh-before`/续扫的逐目录查询）、`progress`（进度回调）、`checkpoint`（批次的目录汇总与计数更新）、`commit`（checkpoint 提交）、`mark_missing` 或 `purge_missing`（按模式确认删除）、`summaries`，各含秒数与调用次数；`unaccounted_s` 为未归入任何阶段的时间。阶段在单个操作外计时，递归不会重复计入。
+- `phases`：`readdir`（枚举目录）、`db_write`（path upsert）、`refresh_query`（`--refresh-before`/续扫的逐目录查询）、`progress`（进度回调）、`checkpoint`（批次的目录汇总与计数更新）、`commit`（checkpoint 提交）、`mark_missing` 或 `purge_missing`（按模式确认删除）、`summaries`，各含秒数与调用次数；`unaccounted_s` 为未归入任何阶段的时间。阶段在单个操作外计时，递归不会重复计入。
+- 元数据阶段在 Windows 分为 `lstat`（遍历时的逐条目元数据读取）和 `allocation`（普通文件的占用空间查询）。类型判定和构造观测记录等开销计入 `unaccounted_s`。其他平台及此前的 Windows 扫描使用 `observe`，记录遍历时每个条目的完整观测耗时。
+- `phases.allocation.phases` 细分普通非空、非压缩、非稀疏文件的占用空间查询：`extents` 包含打开文件句柄、校验属性、查询 extent 和关闭句柄；有外部 extent 时才调用 `cluster_size`，其中包含查缓存以及必要时定位卷和查询簇大小。调用次数包含缓存命中，耗时已计入 `allocation` 总计。压缩或稀疏文件的独立查询计入 `allocation` 总计。
 - `exact_stat_fallbacks`、`exact_stat_fallback_s`：lazy root 上因 `blocks×512 < size` 回退到精确 `lstat` 的次数与耗时（包含在 `observe` 内）。
 - `checkpoints`：本次提交的 checkpoint 数（含收尾前的最后一个）。
 - 进入收尾、初始化失败或收尾回滚时写入统计。partial、failed、cancelled 的删除计数为 `0`。被杀后接管的扫描只记录删除计数 `0`；尚未收尾的扫描可能没有统计，migration 5 之前的扫描为 `null`。

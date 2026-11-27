@@ -47,7 +47,9 @@ def _records(text: str) -> list[dict]:
 @pytest.fixture
 def external_file_allocation(monkeypatch) -> None:
     """Keep hash/plan fixtures eligible regardless of NTFS resident storage."""
-    monkeypatch.setattr("flatlas.scanning.allocated_size", lambda _path, metadata: 4096 if metadata.st_size else 0)
+    monkeypatch.setattr(
+        "flatlas.scanning.allocated_size", lambda _path, metadata, **_kwargs: 4096 if metadata.st_size else 0,
+    )
 
 
 def make_connection(tmp_path: Path):
