@@ -1,4 +1,4 @@
-"""Recursive CTEs walk the tree from the CTE side instead of rescanning ``path`` per row.
+"""Tree queries use parent lookups instead of rescanning ``path``.
 
 Without ``sqlite_stat1`` the planner's choice depends only on SQL and indexes, so a tiny
 database reproduces the plan used on a million-entry index.
@@ -18,6 +18,7 @@ from flatlas.findexpr import parse_find_expression
 from flatlas.hashing import ensure_duplicate_hashes
 from flatlas.paths import (
     discover_namespace,
+    path_key,
     register_namespace,
     remove_deleted_descendants,
     remove_indexed_subtree,
@@ -29,7 +30,7 @@ from flatlas.queries import (
     find_paths,
     largest_files,
 )
-from flatlas.scanning import scan_directory
+from flatlas.scanning import _indexed_directories, scan_directory
 
 pytestmark = [pytest.mark.scan, pytest.mark.query]
 
@@ -55,6 +56,41 @@ def _bad_steps(plan: list[tuple[int, int, str]]) -> list[str]:
             if children and not re.fullmatch(r"SCAN \w+", children[0][2]):
                 problems.append(f"recursive step starts with {children[0][2]!r}")
     return problems
+
+
+def test_refresh_lists_live_child_directories_using_parent_index(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    (source / "z" / "nested").mkdir(parents=True)
+    (source / "a").mkdir()
+    (source / "deleted").mkdir()
+    (source / "file").touch()
+    namespace = discover_namespace(source)
+    with closing(open_database(tmp_path / "index.sqlite")) as connection:
+        root_id = register_namespace(connection, namespace)
+        scan_directory(connection, source)
+        parent_id = connection.execute(
+            "SELECT id FROM path WHERE root_id=? AND path_key=?", (root_id, path_key(namespace, source)),
+        ).fetchone()[0]
+        (source / "deleted").rmdir()
+        scan_directory(connection, source)
+        a_key = path_key(namespace, source / "a")
+        connection.execute(
+            "DELETE FROM directory_summary WHERE path_id IN (SELECT id FROM path WHERE root_id=? AND path_key=?)",
+            (root_id, a_key),
+        )
+
+        traced: list[str] = []
+        connection.set_trace_callback(traced.append)
+        rows = _indexed_directories(connection, root_id, parent_id)
+        connection.set_trace_callback(None)
+
+        assert [row["path_key"] for row in rows] == [a_key, path_key(namespace, source / "z")]
+        assert rows[0]["subtree_complete_through_ns"] is None
+        assert rows[1]["subtree_complete_through_ns"] is not None
+        [statement] = traced
+        plan = _plan(connection, statement)
+        assert not _bad_steps(plan), plan
+        assert any("parent_path_id=?" in detail for _, _, detail in plan), plan
 
 
 def test_every_recursive_cte_iterates_from_the_cte(tmp_path: Path) -> None:

@@ -17,6 +17,7 @@
 - 子条目的 `path_key` 由父目录的 key 加上 `fsencode(name)` 与 NUL 直接拼出（按时间刷新时子目录 key 取自索引），不再对每个条目调用 `path_key()` 重新 `relpath` 并逐分量编码；后者在深路径上每条约 80 µs。非 TTY 时 CLI 不传进度回调（此前每条仍调用一次，480 万条目约 88 s）。热缓存下 3.5 万条目子树的扫描从 7.5 s 降到 5.4 s。
 - SQLite 页缓存上限为 256 MiB（按需分配），避免大索引在逐条查找时反复读取 B-tree 页。
 - 按父目录查子项（递归遍历子树、目录汇总刷新、删除确认）走 `idx_path_parent`（migration 5）。此前这些查询只能用以 `root_id` 开头的索引，SQLite 每次都为全表临时建自动索引；在 122 万行的索引上，TensorRT-LLM（5.6k 目录）重扫的汇总刷新从 8.1 s 降到 0.7 s。
+- 按时间或目录变化刷新时，查询已索引的直接子目录显式使用 `idx_path_root_parent_live`，再按 `path_key` 排序。这样避免 SQLite 为满足排序而按 `root_id` 读取整个 namespace 的路径索引。
 - 递归 CTE 一律写成 `FROM <cte> x CROSS JOIN path p ON ...`，外层也从 CTE 按主键回查 `path`。索引里没有 `sqlite_stat1`，计划只取决于 SQL 与索引：带 `p.root_id=?` 条件时 SQLite 会把 `path` 放在外层、按 `root_id` 扫整个 root，递归每取一行就扫一遍，浅扫描确认 41.5 万条删除因此跑不完；改后 3.7 s。`tests/test_query_plans.py` 对全部递归查询检查计划。
 - 完整扫描的删除确认按 `path_key` 区间更新：子条目 key 是父 key 加一个分量，scope 的后代正好是唯一索引上的一段区间，比沿 `parent_path_id` 的递归 CTE 快约一倍（380 万行 6.6 s → 3.5 s）。scope 行由本次扫描首次记录时（`first_seen_scan_id` 为本次）不可能有已索引的后代，整段跳过；首次全量扫描 480 万条目时这一步原本要 94 s。
 - 删除确认的成本与被改写的行数成正比：每条缺失路径都要更新行本身和含 `state` 的两个索引。2026-11 在 Lustre 上（索引 4.8 GB，也放在 Lustre）重扫一棵 391 万行、其中 368 万条已在外部删除的子树，总计 688 s，`mark_missing` 占 523 s，`readdir` + `observe` 只有 92 s。tombstone 不会自动清除，以后对该子树的完整扫描仍要在区间里走过这些行；已知删除清单时用 `rm --files0-from` 同步，已有 tombstone 时可用 [`rm --deleted PATH`](queries.md#rm---deleted-path) 清理。

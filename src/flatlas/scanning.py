@@ -364,10 +364,12 @@ def _indexed_directories(
     root_id: int,
     parent_id: int,
 ) -> list[sqlite3.Row]:
+    # Keep the lookup bounded to siblings even when ORDER BY favors the root/path-key index.
     return connection.execute(
         """SELECT p.id, p.path_key,
                   ds.subtree_complete_through_ns
-           FROM path p LEFT JOIN directory_summary ds ON ds.path_id=p.id
+           FROM path p INDEXED BY idx_path_root_parent_live
+           LEFT JOIN directory_summary ds ON ds.path_id=p.id
            WHERE p.root_id=? AND p.parent_path_id=? AND p.state='present'
              AND p.entry_kind='directory'
            ORDER BY p.path_key""",
