@@ -37,6 +37,8 @@ from flatlas.duplicate_filters import DuplicateFilters
 from flatlas.errors import FlatlasError, PathError
 from flatlas.findexpr import is_expression_start, parse_find_expression
 from flatlas.hashing import (
+    DupesStats,
+    DupesTimer,
     HashProgress,
     HashSummary,
     ensure_duplicate_hashes,
@@ -688,7 +690,8 @@ class _HashProgressDisplay(_ProgressLine):
         self._show(line, progress.phase)
 
 
-def _hash_error_records(summary: HashSummary) -> Iterator[dict[str, Any]]:
+def _hash_diagnostic_records(summary: HashSummary, stats: DupesStats) -> Iterator[dict[str, Any]]:
+    yield {"type": "hash", **summary.as_dict(), "stats": stats}
     for issue in summary.issues:
         yield {"type": "hash_error", **asdict(issue)}
 
@@ -698,6 +701,7 @@ def _print_duplicate_groups(
     fmt: str,
     output: Path | None,
     hash_summary: HashSummary,
+    stats: DupesStats,
     *,
     base: Path | None,
 ) -> None:
@@ -711,7 +715,8 @@ def _print_duplicate_groups(
         ]
         if fmt == "jsonl":
             # The hash summary first: it says whether the groups are complete.
-            records = [{"type": "hash", **hash_summary.as_dict()}, *records, *_hash_error_records(hash_summary)]
+            diagnostics = _hash_diagnostic_records(hash_summary, stats)
+            records = [next(diagnostics), *records, *diagnostics]
         write_records(records, fmt, GROUP_FIELDS, output)
         return
     if base is not None:
@@ -764,6 +769,11 @@ def _print_duplicate_groups(
         for issue in hash_summary.issues:
             path = issue.path if base is None else _relative_display(issue.path, base)
             lines.append(f"    {path} [{issue.stage}, {issue.status}]: {issue.message}")
+    lines.append(f"Timing: {stats['wall_s']:.3f} s total · {stats['unaccounted_s']:.3f} s unaccounted")
+    for name, phase in stats["phases"].items():
+        lines.append(f"    {name}: {phase['s']:.3f} s · {_counted(phase['calls'], 'call')}")
+        for child_name, child in phase.get("phases", {}).items():
+            lines.append(f"        {child_name}: {child['s']:.3f} s · {_counted(child['calls'], 'call')}")
     rendered = "\n".join(lines) + "\n"
     _emit(rendered, output)
 
@@ -1311,6 +1321,9 @@ def dupes(
     min_count: min_count_option = 2,
     min_savings: min_savings_option = 0,
     limit: group_limit_option = None,
+    quick_workers: Annotated[
+        int, typer.Option("--quick-workers", min=1, help="Maximum concurrent quick hash readers. Default is serial."),
+    ] = 1,
     report: Annotated[
         Path | None,
         typer.Option("--report", metavar="FILE", help="Write this run's hash summary and errors to a separate JSONL file."),
@@ -1331,17 +1344,25 @@ def dupes(
             for target in reserved
         ):
             raise FlatlasError("--report must differ from the index files and --output")
-    with _connection(db) as connection, _HashProgressDisplay(enabled=_stderr_is_tty()) as hash_progress:
-        hash_summary = ensure_duplicate_hashes(connection, path, on_progress=hash_progress.update, filters=filters)
-        groups = duplicate_groups(connection, scope=path, filters=filters)
+    timer = DupesTimer()
+    with contextlib.ExitStack() as index:
+        with timer.phase("index_open"):
+            connection = index.enter_context(_connection(db))
+        with _HashProgressDisplay(enabled=_stderr_is_tty()) as hash_progress:
+            hash_summary = ensure_duplicate_hashes(
+                connection, path, on_progress=hash_progress.update if hash_progress.enabled else None,
+                filters=filters, timer=timer, quick_workers=quick_workers,
+            )
+            with timer.phase("result_groups"):
+                groups = duplicate_groups(connection, scope=path, filters=filters)
+        with timer.phase("index_close"):
+            index.close()
+    stats = timer.as_dict()
     _warn_incomplete_hashes(hash_summary)
-    _print_duplicate_groups(groups, format, output, hash_summary, base=None if absolute else scope_path(path))
+    _print_duplicate_groups(groups, format, output, hash_summary, stats, base=None if absolute else scope_path(path))
     if report is not None:
         try:
-            write_records(
-                [{"type": "hash", **hash_summary.as_dict()}, *_hash_error_records(hash_summary)],
-                "jsonl", (), report,
-            )
+            write_records(_hash_diagnostic_records(hash_summary, stats), "jsonl", (), report)
         except OSError as exc:
             raise FlatlasError(f"cannot write hash report {report}: {exc}") from exc
 

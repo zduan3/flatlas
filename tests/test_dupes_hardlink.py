@@ -1,10 +1,13 @@
 """dupes treats hardlink aliases as one copy and reads each inode once."""
 
 import os
+from contextlib import closing
 from pathlib import Path
+from threading import BoundedSemaphore, get_ident, local
 
 import pytest
 
+from flatlas import hashing
 from flatlas.db import open_database
 from flatlas.hashing import ensure_duplicate_hashes
 from flatlas.paths import (
@@ -50,10 +53,11 @@ def _index(tmp_path: Path, source: Path):
     return connection
 
 
-def test_aliases_count_as_one_copy_and_are_read_once(tmp_path: Path, tree: Path) -> None:
+@pytest.mark.parametrize("quick_workers", [1, 4])
+def test_aliases_count_as_one_copy_and_are_read_once(tmp_path: Path, tree: Path, quick_workers: int) -> None:
     connection = _index(tmp_path, tree.parent)
     try:
-        summary = ensure_duplicate_hashes(connection, tree)
+        summary = ensure_duplicate_hashes(connection, tree, quick_workers=quick_workers)
         # e/f have no other same-size inode, so they are not candidates; b reuses a's read.
         assert summary.candidate_files == 4
         assert summary.content_files_read == 3
@@ -63,6 +67,83 @@ def test_aliases_count_as_one_copy_and_are_read_once(tmp_path: Path, tree: Path)
         assert sorted(Path(path["path_display"]).name for path in group["paths"]) == ["a", "b", "c"]
     finally:
         connection.close()
+
+
+def test_quick_alias_reads_use_the_same_worker_slots(tmp_path: Path, tree: Path, monkeypatch) -> None:
+    held = local()
+    readers = []
+    main_thread = get_ident()
+    original = hashing._validated_digest
+
+    class TrackedSlots:
+        def __init__(self) -> None:
+            self.capacity = BoundedSemaphore(2)
+
+        def __enter__(self) -> None:
+            self.capacity.acquire()
+            held.slots = self
+
+        def __exit__(self, *_exc: object) -> None:
+            held.slots = None
+            self.capacity.release()
+
+    slots = TrackedSlots()
+
+    def make_slots(workers):
+        assert workers == 2
+        return slots
+
+    def read(candidate, *, full, timer):
+        assert not full and held.slots is slots
+        readers.append(get_ident())
+        return original(candidate, full=full, timer=timer)
+
+    monkeypatch.setattr(hashing, "Semaphore", make_slots)
+    monkeypatch.setattr(hashing, "_validated_digest", read)
+    with closing(_index(tmp_path, tree.parent)) as connection:
+        summary = ensure_duplicate_hashes(connection, tree, quick_workers=2)
+    assert summary.complete and summary.content_files_read == len(readers) == 3
+    assert readers.count(main_thread) == 1
+
+
+@pytest.mark.parametrize("after_commit", [False, True])
+def test_rescanned_inode_hash_is_not_reused_by_a_sibling_alias(tmp_path: Path, monkeypatch, after_commit: bool) -> None:
+    scope = tmp_path / "source"
+    a = scope / "a" / "file"
+    other = scope / "b" / "file"
+    alias = scope / "c" / "file"
+    for directory in (a.parent, other.parent, alias.parent):
+        directory.mkdir(parents=True)
+    a.write_bytes(b"x" * 16384)
+    other.write_bytes(b"x" * 16384)
+    os.link(a, alias)
+    db = tmp_path / "index.sqlite"
+    original = hashing._validated_digest
+
+    def rescan() -> None:
+        previous = a.stat()
+        a.write_bytes(b"y" * 16384)
+        os.utime(a, ns=(previous.st_atime_ns, previous.st_mtime_ns + 1_000_000_000))
+        with closing(open_database(db)) as writer:
+            assert scan_directory(writer, a.parent)["status"] == "completed"
+
+    def read(candidate, *, full, timer):
+        digest = original(candidate, full=full, timer=timer)
+        if not after_commit and Path(candidate["path_display"]) == a:
+            rescan()
+        return digest
+
+    def progress(update: hashing.HashProgress) -> None:
+        if after_commit and update.phase == "quick" and update.completed_files == 1:
+            rescan()
+
+    with closing(_index(tmp_path, scope)) as connection:
+        monkeypatch.setattr(hashing, "_validated_digest", read)
+        summary = ensure_duplicate_hashes(connection, scope, quick_workers=2, commit_batch=1, on_progress=progress)
+        assert duplicate_groups(connection, scope=scope) == []
+    expected = {str(alias)} if after_commit else {str(a), str(alias)}
+    assert summary.changed_files == len(expected) and summary.errors == 0
+    assert {issue.path for issue in summary.issues} == expected
 
 
 def test_links_outside_the_scope_are_flagged(tmp_path: Path, tree: Path) -> None:

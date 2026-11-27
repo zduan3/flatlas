@@ -59,9 +59,9 @@ def test_size_filters_bound_reads_and_cached_groups(indexed, monkeypatch, cached
         reads = []
         digest = hashing._validated_digest
 
-        def observe(candidate, *, full):
+        def observe(candidate, *, full, timer):
             reads.append(Path(candidate["path_display"]).name)
-            return digest(candidate, full=full)
+            return digest(candidate, full=full, timer=timer)
 
         monkeypatch.setattr(hashing, "_validated_digest", observe)
         filters = DuplicateFilters(min_size=8, max_size=8)
@@ -161,10 +161,10 @@ def test_group_filter_does_not_hide_hash_errors_or_change_coverage(indexed, monk
     scope, database, _ = indexed
     digest = hashing._validated_digest
 
-    def fail_one(candidate, *, full):
+    def fail_one(candidate, *, full, timer):
         if Path(candidate["path_display"]).name == "other-0":
             raise OSError("injected read error")
-        return digest(candidate, full=full)
+        return digest(candidate, full=full, timer=timer)
 
     monkeypatch.setattr(hashing, "_validated_digest", fail_one)
     with db.open_database(database) as connection:

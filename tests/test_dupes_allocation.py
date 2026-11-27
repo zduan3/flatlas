@@ -55,9 +55,9 @@ def test_dupes_filters_zero_allocation_before_grouping_and_hashing(tmp_path: Pat
         read_paths = []
         real_digest = hashing._validated_digest
 
-        def digest(candidate, *, full):
+        def digest(candidate, *, full, timer):
             read_paths.append(Path(candidate["path_display"]).name)
-            return real_digest(candidate, full=full)
+            return real_digest(candidate, full=full, timer=timer)
 
         monkeypatch.setattr(hashing, "_validated_digest", digest)
         summary = ensure_duplicate_hashes(connection, source)
@@ -96,7 +96,8 @@ def test_dupes_filters_zero_allocation_before_grouping_and_hashing(tmp_path: Pat
             assert rows[0]["count"] == "2"
             names = {Path(path).name for row in rows for path in json.loads(row["paths"])}
         else:
-            names = {line.strip() for line in result.stdout.splitlines() if line.startswith("    ")}
+            groups_text = result.stdout.partition("\nHash:")[0]
+            names = {line.strip() for line in groups_text.splitlines() if line.startswith("    ")}
         assert names == {"mixed-positive", "mixed-unknown"}
     output = tmp_path / "dupes.json"
     result = runner.invoke(app, ["dupes", str(source), "--format", "jsonl", "--output", str(output), "--db", str(database)])

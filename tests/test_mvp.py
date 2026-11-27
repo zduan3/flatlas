@@ -691,12 +691,13 @@ def test_dupes_scopes_grouped_output_to_path_and_defaults_to_cwd(tmp_path: Path,
     lines = result.stdout.splitlines()
     assert lines[0] == "1 duplicate group · 1 redundant file · 14 B theoretical savings"
     assert lines[2] == "[1] 14 B × 2 files · 14 B theoretical savings"
-    assert lines[3:] == [
+    assert lines[3:7] == [
         "    large-a.bin",
         "    large-b.bin",
         "",
         "Hash: 2 candidates · 0 cache hits · 2 files read · 28 bytes read",
     ]
+    assert lines[7].startswith("Timing: ")
 
     connection = open_database(database)
     try:
@@ -757,9 +758,9 @@ def test_lazy_hashing_is_scoped_reads_small_files_once_and_reuses_cache(tmp_path
         original = hashing._validated_digest
         reads: list[tuple[Path, bool]] = []
 
-        def tracked(candidate, *, full):
+        def tracked(candidate, *, full, timer):
             reads.append((Path(candidate["path_display"]), full))
-            return original(candidate, full=full)
+            return original(candidate, full=full, timer=timer)
 
         monkeypatch.setattr(hashing, "_validated_digest", tracked)
         summary = ensure_duplicate_hashes(connection, inside)
@@ -801,9 +802,9 @@ def test_quick_hash_avoids_full_reads_for_different_large_files(tmp_path: Path, 
         original = hashing._validated_digest
         phases: list[bool] = []
 
-        def tracked(candidate, *, full):
+        def tracked(candidate, *, full, timer):
             phases.append(full)
-            return original(candidate, full=full)
+            return original(candidate, full=full, timer=timer)
 
         monkeypatch.setattr(hashing, "_validated_digest", tracked)
         summary = ensure_duplicate_hashes(connection, source)

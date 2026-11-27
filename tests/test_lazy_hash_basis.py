@@ -7,6 +7,8 @@ written back) instead of marking the file changed forever. Identity and size
 must still match, and exact roots stay strict.
 """
 
+import os
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -45,9 +47,12 @@ def _indexed_mtimes(connection) -> dict[str, int]:
     return {Path(row["path_display"]).name: int(row["mtime_ns"]) for row in rows}
 
 
-def test_lazy_root_reconciles_trailing_mtime_and_finds_the_group(tmp_path: Path) -> None:
+@pytest.mark.parametrize("count_changes", [False, True])
+def test_lazy_root_reconciles_trailing_mtime_and_finds_the_group(tmp_path: Path, count_changes: bool) -> None:
     connection, source, exact = _index_pair(tmp_path, "lustre")
     try:
+        if count_changes:
+            connection.execute("PRAGMA count_changes=ON")
         summary = hashing.ensure_duplicate_hashes(connection, source)
         assert summary.complete
         assert summary.changed_files == 0
@@ -78,3 +83,29 @@ def test_lazy_root_still_rejects_a_size_change(tmp_path: Path) -> None:
         assert summary.changed_files == 1
     finally:
         connection.close()
+
+
+@pytest.mark.parametrize("count_changes", [False, True])
+def test_lazy_time_writeback_cannot_replace_a_newer_scan(tmp_path: Path, monkeypatch, count_changes: bool) -> None:
+    connection, source, exact = _index_pair(tmp_path, "lustre")
+    with closing(connection):
+        if count_changes:
+            connection.execute("PRAGMA count_changes=ON")
+        original = hashing._validated_digest
+        a = source / "a.bin"
+        newer = exact["a.bin"] + LAG_NS
+
+        def read(candidate, *, full, timer):
+            digest = original(candidate, full=full, timer=timer)
+            if Path(candidate["path_display"]) == a:
+                assert candidate["times_reconciled"]
+                os.utime(a, ns=(a.stat().st_atime_ns, newer))
+                with closing(open_database(tmp_path / "index.sqlite")) as scanner:
+                    assert scan_directory(scanner, source)["status"] == "completed"
+            return digest
+
+        monkeypatch.setattr(hashing, "_validated_digest", read)
+        summary = hashing.ensure_duplicate_hashes(connection, source, quick_workers=2)
+        assert _indexed_mtimes(connection)["a.bin"] == newer
+        assert connection.execute("SELECT count(*) FROM file_hash").fetchone()[0] == 0
+    assert (summary.changed_files, summary.errors) == (2, 0)
